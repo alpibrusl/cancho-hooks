@@ -60,6 +60,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/config_test.py build/hooks
 
+      - name: 410 Gone disables an endpoint; enabling it again
+        working-directory: hooks
+        run: python3 tests/gone_test.py build/hooks
+
       - name: One delivery attempt, against each kind of receiver
         working-directory: hooks
         run: python3 tests/attempt_test.py build/hooks

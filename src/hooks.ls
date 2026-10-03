@@ -254,7 +254,7 @@ fn event_record[&c, &b, &k](scratch: &!c [byte], ms: int, body: &b [byte], key: 
 // One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
 // `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
 // `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &s [int], ix: &!x [int], arena: &!y [byte], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
@@ -391,6 +391,52 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y](heap: &!h Heap, ro
         buffer.drop(heap, body);
         return answer;
     }
+    if id == 6 {
+        // POST /endpoints/:id/enable: let a disabled endpoint be tried again. Answers 200 whether it was disabled or not.
+        let want = route.param_nat(path, params, 0);
+        if want < 0 || want >= state.max_endpoints() {
+            return server.failure(heap, out, 400, "the id must be a number below 16", keep);
+        }
+        if index_of(stats, want) < 0 {
+            return server.failure(heap, out, 404, "no such endpoint", keep);
+        }
+        if is_disabled(stats, want) {
+            if note_endpoint(done, stats, state.enabled(), want) == 0 || log.flush(done) != 0 {
+                return server.failure(heap, out, 503, "the change could not be stored", keep);
+            }
+            set_disabled(stats, want, false);
+        }
+        return server.reply(heap, out, 200, "{\"enabled\":true}", keep);
+    }
+    if id == 7 {
+        // GET /endpoints: each endpoint's id, port, cursor (every event up to it is final) and whether it is disabled. Not the
+        // host and not the secret.
+        var w = json.writer(heap, 160);
+        w = json.begin_array(heap, w);
+        var i = 0;
+        while i < stats[c_endpoints()] {
+            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            w = json.begin_object(heap, w);
+            w = json.put_key(heap, w, "id");
+            w = json.put_int(heap, w, e);
+            w = json.put_key(heap, w, "port");
+            w = json.put_int(heap, w, endpoints.port_of(stats[off_table()..off_table() + endpoints.table_size()], i));
+            w = json.put_key(heap, w, "cursor");
+            w = json.put_int(heap, w, stats[off_cur() + e]);
+            w = json.put_key(heap, w, "disabled");
+            w = json.put_bool(heap, w, is_disabled(stats, e));
+            w = json.end_object(heap, w);
+            i = i + 1;
+        }
+        w = json.end_array(heap, w);
+        let body = json.finish(w);
+        var answer = out;
+        borrow body as &sb in {
+            answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, body);
+        return answer;
+    }
     if id == 0 - 2 {
         var extra = buffer.append(heap, buffer.empty(heap, 48), "Allow: ");
         extra = route.allowed(heap, router, path, params, extra);
@@ -412,6 +458,8 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/events/:id", 3);
     r = route.add(heap, r, "GET", "/stats", 4);
     r = route.add(heap, r, "GET", "/config", 5);
+    r = route.add(heap, r, "POST", "/endpoints/:id/enable", 6);
+    r = route.add(heap, r, "GET", "/endpoints", 7);
     return r;
 }
 
@@ -468,6 +516,39 @@ fn c_dead() -> [] int {
 // How long an attempt may take in all, in ms.
 fn c_deadline() -> [] int {
     return 9;
+}
+
+// A bit per endpoint id (0 to 15): set while the endpoint is disabled and gets no new attempts (`docs/design.md` section 22).
+fn c_disabled() -> [] int {
+    return 10;
+}
+
+fn is_disabled[&d](dv: &d [int], e: int) -> [] bool {
+    return dv[c_disabled()] >> e & 1 == 1;
+}
+
+fn set_disabled[&d](dv: &!d [int], e: int, on: bool) -> [] int {
+    if on {
+        dv[c_disabled()] = dv[c_disabled()] | 1 << e;
+    } else {
+        dv[c_disabled()] = dv[c_disabled()] & ~(1 << e);
+    }
+    return 0;
+}
+
+// Append the record that endpoint `e` was disabled or enabled (`state.disabled()`, `state.enabled()`) to `done`, not yet
+// flushed. Answers 1 if it was appended, 0 if the log refused it.
+fn note_endpoint[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int) -> [file_write] int {
+    var ok = 0;
+    region a {
+        let rec = alloc_slice[a](128, byte_of(0));
+        let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, 0, 0, 0);
+        if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
+            dv[c_seq()] = dv[c_seq()] + 1;
+            ok = 1;
+        }
+    }
+    return ok;
 }
 
 fn off_table() -> [] int {
@@ -612,6 +693,10 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             let o = state.outcome_at(window, 0);
             if o.0 == 0 {
                 odd = odd + 1;
+            } else if o.0 == state.disabled() || o.0 == state.enabled() {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                    set_disabled(dv, o.1, o.0 == state.disabled());
+                }
             } else if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
                 state.apply(dv[off_cells()..dv_size()], dv[off_cur()..off_cur() + state.max_endpoints()], o.1, o.0, o.2, o.3, o.4);
             }
@@ -701,7 +786,9 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
     var next_at = 0;
     if code >= 200 && code < 300 {
         kind = state.delivered();
-    } else if tries >= dv[off_sched()] + 1 {
+    } else if code == 410 || tries >= dv[off_sched()] + 1 {
+        // A `410 Gone` is the receiver saying the endpoint no longer exists: this event is a dead letter at once, and the
+        // endpoint stops being tried (below).
         kind = state.dead();
     } else {
         next_at = clock_unix_ms(clock) + dv[off_sched() + tries];
@@ -721,6 +808,11 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
                 dv[c_failed()] = dv[c_failed()] + 1;
             }
             ok = 1;
+        }
+    }
+    if ok == 1 && code == 410 && !is_disabled(dv, e) {
+        if note_endpoint(done, dv, state.disabled(), e) == 1 {
+            set_disabled(dv, e, true);
         }
     }
     return ok;
@@ -804,7 +896,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
         let e = dv[off_table() + i * endpoints.stride()];
         let now = clock_unix_ms(clock);
         var id = dv[off_cur() + e] + 1;
-        while budget > 0 && id <= dv[c_scanned()] && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
+        while budget > 0 && !is_disabled(dv, e) && id <= dv[c_scanned()] && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
             if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
                 budget = budget - 1;
                 let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, token0);
@@ -896,7 +988,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, window, contents(cw), contents(nw), dv[0..off_sched() + 17], ix, arena, clock_unix_ms(clock), out);
+                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..off_sched() + 17], ix, arena, clock_unix_ms(clock), out);
                                     }
                                 }
                             }

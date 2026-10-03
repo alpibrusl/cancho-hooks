@@ -16,7 +16,7 @@ rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the 
 flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the
 reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next
 attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). Since H1e a client may send an `Idempotency-Key`: a repeat of the same event answers the first answer, byte for byte, and stores nothing, also across a crash ([`docs/design.md`](docs/design.md) section 17). Not built: endpoints and
-attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) endpoints.
+attempt history in Postgres, jitter, replay, TLS (`https`) endpoints.
 
 ## Requirements
 
@@ -144,13 +144,15 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `POST /events` | a JSON object with a string `"type"`, and optionally an `Idempotency-Key` (1 to 255 visible ASCII characters); answers `202 {"id":N}` after the flush, `422` for a body that is not one or a key already used for a different event, `400` for a bad or doubled key, `413` for an event too large (over 65,499 bytes, less 28 and the key's length with a key), `507` for a new key when 65,536 are held, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
 | `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys"}` |
+| `GET /endpoints` | each endpoint's `{"id","port","cursor","disabled"}` (not the host, not the secret) |
+| `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
 | `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |
 | `GET /healthz` | `{"ok":true}` |
 
 A delivery is `POST /hook` to the endpoint, with the event as the body and three headers: `webhook-id` (`evt_<id>`, the same on
 every attempt, so a receiver can drop a repeat), `webhook-timestamp` (Unix seconds) and `webhook-signature` (`v1,` and the base64
 HMAC-SHA256 of `<id>.<timestamp>.<body>` under the decoded secret). Any `2xx` is a delivery. Anything else, a timeout or a
-refused connection is a failure; the retries come 5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 14 h, 20 h and 24 h after the previous
+refused connection is a failure (a `410 Gone` is the exception: that event is a dead letter at once and the endpoint is **disabled**, no new attempts until `POST /endpoints/:id/enable`); the retries come 5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 14 h, 20 h and 24 h after the previous
 attempt, and then the event is a dead letter for that endpoint.
 
 ## How it works
@@ -164,6 +166,7 @@ request held; after the turn one `flush` covers every append and the held reques
 ```sh
 $LEX_SYS test                                      # the four unit-test sets of lex-sys.toml (state, endpoints, idem, config)
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
+python3 tests/gone_test.py build/hooks             # 410 Gone disables an endpoint, restarts keep it, enable undoes it
 python3 tests/config_test.py build/hooks           # settings: a file, flags, which wins, and every refusal
 python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
 python3 tests/retry_test.py build/hooks            # the retry delays, also across restarts, and the dead letter
