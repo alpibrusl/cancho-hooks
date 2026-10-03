@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 
+http.server.HTTPServer.request_queue_size = 128   # the default is 5: a burst of connections would lose a SYN and wait a second
 BIN, MODE = os.path.abspath(sys.argv[1]), sys.argv[2]
 
 

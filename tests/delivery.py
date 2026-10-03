@@ -5,7 +5,8 @@
 
 Three endpoints, each its own receiver with its own secret, behave differently:
 
-  0  mostly healthy: 20% of requests answered 500, 1% stall past the service's deadline and then answer 200
+  0  mostly healthy: 20% of requests answered 500, 1% stall past the service's deadline and then answer 200 (never more
+     than three failures in a row for one event, so five attempts always suffice)
   1  flaky: each event fails its first 0 to 3 attempts, then succeeds
   2  poisoned: every event whose "n" is a multiple of 17 is always answered 500; the rest succeed
 
@@ -37,6 +38,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402  (reads the same argv: binary, events, threads, mean ms)
+
+http.server.HTTPServer.request_queue_size = 128   # the default is 5: a burst of connections would lose a SYN and wait a second
 import struct  # noqa: E402
 from standardwebhooks import Webhook  # noqa: E402
 
@@ -72,7 +75,9 @@ class Receiver:
                     outer.seen[hid] = outer.seen.get(hid, 0) + 1
                     count = outer.seen[hid]
                     if outer.behaviour == 0:
-                        roll = outer.rng.random()
+                        # Random, but never more than 3 failures in a row for one event: five attempts then always
+                        # suffice, so a dead letter on this endpoint can only be the service's fault.
+                        roll = outer.rng.random() if count <= 3 else 1.0
                         stall = roll < 0.01
                         status = 200 if stall or roll >= 0.21 else 500
                     elif outer.behaviour == 1:
