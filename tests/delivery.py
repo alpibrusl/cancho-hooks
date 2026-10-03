@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
-"""Delivery under chaos (docs/design.md section 6, the first criterion carried through to the receiver).
+"""Delivery to several endpoints under chaos (docs/design.md sections 4, 6 and 15).
 
     python3 tests/delivery.py build/hooks [events] [threads] [mean-ms-between-kills]
 
-A receiver this script controls answers `POST /hook`: mostly 200, sometimes 500, rarely it stalls past the service's
-attempt deadline and then answers 200 (so the receiver *has* the event and the service believes it failed: a repeat is
-the only correct outcome). The service is `kill -9`'d at random instants as a power cut (see chaos.py). When the clients
-have finished posting, the harness waits for the backlog to drain, then checks, from the receiver's record and from the
-files:
+Three endpoints, each its own receiver with its own secret, behave differently:
 
-  * every acknowledged event reached the receiver at least once, with the body the client sent
-  * the first delivery of each event comes in id order (delivery is in order while the receiver is up)
-  * `delivered.seg` is a valid log whose last id is the last event: the cursor survived every cut
-  * once drained, the service sends nothing more
-  * repeats are counted and reported, not forbidden: at least once is the contract
+  0  mostly healthy: 20% of requests answered 500, 1% stall past the service's deadline and then answer 200
+  1  flaky: each event fails its first 0 to 3 attempts, then succeeds
+  2  poisoned: every event whose "n" is a multiple of 17 is always answered 500; the rest succeed
+
+The retry schedule is scaled down to 100, 150, 200 and 250 ms (so an event is dead-lettered after its fifth attempt) and the
+service is `kill -9`'d at random instants as a power cut (see chaos.py) while 300 events are posted and delivered. When the
+clients are done the kills continue until MIN_KILLS (default 100), then stop, and the backlog must drain with no more help.
+Then, from the receivers' record and the files:
+
+  * every request carried a Standard Webhooks signature that the reference library (`standardwebhooks`) verifies, with a
+    timestamp inside its tolerance
+  * on endpoints 0 and 1, every acknowledged event was answered 2xx at least once, with the bytes the client sent
+  * on endpoint 2, every non-poisoned event was, and no poisoned event ever was; each poisoned event is dead-lettered
+  * `delivery.seg` is a valid log in which, for each endpoint, every event is final exactly as above (delivered or dead)
+  * a poisoned event does not hold up the events after it: for most of them the next event was delivered before the poisoned
+    one's last attempt (no head-of-line blocking)
+  * a poisoned event was attempted at least 5 times, and at most 5 plus one per kill
+  * once drained, the service sends nothing more, and after one last power cut and a restart it still sends nothing
 """
+import base64
 import http.server
 import json
 import os
 import random
-import re
 import shutil
 import sys
 import tempfile
@@ -28,34 +37,52 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402  (reads the same argv: binary, events, threads, mean ms)
+import struct  # noqa: E402
+from standardwebhooks import Webhook  # noqa: E402
 
-P_FAIL, P_STALL = 0.2, 0.01
 MIN_KILLS = int(os.environ.get("MIN_KILLS", "100"))
+SCHEDULE = "100,150,200,250"
+ATTEMPTS = 5
+POISON = 17
 
 
 class Receiver:
-    def __init__(self):
-        self.got = []            # (webhook-id, body, the status it answered)
+    def __init__(self, behaviour, secret):
+        self.behaviour = behaviour
+        self.wh = Webhook(secret)
+        self.got = []            # (webhook-id, body, status answered, signature ok / reason, time)
         self.stalls = 0
         self.lock = threading.Lock()
-        self.rng = random.Random(11)
+        self.rng = random.Random(11 + behaviour)
+        self.seen = {}
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 hid = self.headers.get("webhook-id", "")
+                try:
+                    outer.wh.verify(body, dict(self.headers))
+                    sig = True
+                except Exception as e:  # noqa: BLE001
+                    sig = str(e) or repr(e)
+                n = json.loads(body)["n"]
+                stall = False
                 with outer.lock:
-                    roll = outer.rng.random()
-                    if roll < P_STALL:
-                        status = 200
-                        outer.stalls += 1
-                    elif roll < P_STALL + P_FAIL:
-                        status = 500
+                    outer.seen[hid] = outer.seen.get(hid, 0) + 1
+                    count = outer.seen[hid]
+                    if outer.behaviour == 0:
+                        roll = outer.rng.random()
+                        stall = roll < 0.01
+                        status = 200 if stall or roll >= 0.21 else 500
+                    elif outer.behaviour == 1:
+                        status = 500 if count <= n % 4 else 200
                     else:
-                        status = 200
-                    outer.got.append((hid, body, status))
-                if roll < P_STALL:
+                        status = 500 if n % POISON == 0 else 200
+                    if stall:
+                        outer.stalls += 1
+                    outer.got.append((hid, body, status, sig, time.time()))
+                if stall:
                     time.sleep(2.6)
                 try:
                     self.send_response(status)
@@ -77,13 +104,30 @@ class Receiver:
             return len(self.got)
 
 
+def outcomes(path):
+    """delivery.seg through the independent reader: [(seq, kind, endpoint, event, attempts, next_at)]."""
+    data = open(path, "rb").read() if os.path.exists(path) else b""
+    records, end = chaos.read_log(data)
+    out = []
+    for seq, pairs in records:
+        assert len(pairs) == 1 and pairs[0][0] == b"o" and len(pairs[0][1]) == 40, "not an outcome record"
+        out.append((seq, *struct.unpack("<5q", pairs[0][1])))
+    return out, len(data) - end
+
+
 def main():
     events, threads_n, mean_ms = chaos.EVENTS, chaos.THREADS, chaos.MEAN_MS
     datadir = tempfile.mkdtemp(prefix="hooks-delivery-")
-    recv = Receiver()
+    secrets = ["whsec_" + base64.b64encode(os.urandom(24 + 8 * i)).decode() for i in range(3)]
+    recvs = [Receiver(i, secrets[i]) for i in range(3)]
+    with open(os.path.join(datadir, "endpoints.conf"), "w") as f:
+        f.write("# test endpoints\n")
+        for i, r in enumerate(recvs):
+            f.write(f"{i} 127.0.0.1 {r.port} {secrets[i]}\n")
     port = chaos.free_port()
-    svc = chaos.Service(port, datadir, extra=("127.0.0.1", recv.port))
+    svc = chaos.Service(port, datadir, extra=(SCHEDULE,))
     svc.start()
+    overtaken = "not measured"
     failures = []
     acked, acked_lock = {}, threading.Lock()
     stop = threading.Event()
@@ -125,17 +169,23 @@ def main():
         t.start()
     for t in ts:
         t.join()
-    # The kills go on while the backlog drains: delivery is what is under test here.
-    last_id = max(acked) if acked else 0
-    seg = os.path.join(datadir, "delivered.seg")
 
-    def cursor():
-        data = open(seg, "rb").read() if os.path.exists(seg) else b""
+    seg = os.path.join(datadir, "delivery.seg")
+
+    def final_sets():
+        outs, _ = outcomes(seg)
+        fin = [set(), set(), set()]
+        for _, kind, e, ev, _, _ in outs:
+            if kind in (1, 3) and 0 <= e < 3:
+                fin[e].add(ev)
+        return fin
+
+    def all_ids():
+        data = open(os.path.join(datadir, "events.seg"), "rb").read()
         records, _ = chaos.read_log(data)
-        return records[-1][0] if records else 0
+        return {ms: json.loads(dict(pairs)[b"event"])["n"] for ms, pairs in records}
 
-    # Kill until MIN_KILLS have happened (and the posting is done), then stop and require the backlog to drain with no
-    # more help: a service that only makes progress because it is restarted is not delivering.
+    # Kill until MIN_KILLS, then stop and require the backlog to drain unaided.
     deadline = time.time() + 240
     while time.time() < deadline and kills[0] < MIN_KILLS:
         time.sleep(0.2)
@@ -145,85 +195,109 @@ def main():
         svc.start()
     drain_started = time.time()
     drained_at = None
-    while time.time() < drain_started + 90:
-        if cursor() >= last_id:
+    while time.time() < drain_started + 120:
+        ids = all_ids()
+        fin = final_sets()
+        if all(set(ids) <= f for f in fin):
             drained_at = time.time()
             break
         time.sleep(0.2)
     if drained_at is None:
-        failures.append(f"the backlog did not drain in 90 s without kills: the cursor is at {cursor()} of {last_id}")
-    # Once drained, it must go quiet: count requests over a quiet period.
-    n0 = recv.count()
+        failures.append("the backlog did not drain in 120 s without kills")
+    ids = all_ids()
+    n0 = [r.count() for r in recvs]
     time.sleep(2.5)
-    n1 = recv.count()
-    # The cursor is durable once a turn has ended: cut the power now and it must still be at the last event, and a
-    # restart must not deliver anything again. (A cursor that is written but not flushed passes every other check here,
-    # since a repeat is allowed; this is the one that sees it.)
-    cursor_before = cursor()
+    n1 = [r.count() for r in recvs]
+    if n0 != n1 and drained_at is not None:
+        failures.append(f"the service kept sending after the backlog drained: {n1[0]-n0[0]}, {n1[1]-n0[1]}, {n1[2]-n0[2]} more requests")
+
+    # The last power cut: the outcomes are durable once a turn has ended, and a restart repeats nothing.
+    before = final_sets()
     svc.kill()
-    after_cut = cursor()
-    if drained_at is not None and after_cut < cursor_before:
-        failures.append(f"a power cut took the cursor from {cursor_before} back to {after_cut}: it was not flushed")
+    after = final_sets()
+    if drained_at is not None and any(a != b for a, b in zip(before, after)):
+        failures.append("a power cut took outcomes back: the outcome log was not flushed at the end of a turn")
     svc.start()
-    m0 = recv.count()
+    m0 = [r.count() for r in recvs]
     time.sleep(2.5)
-    if recv.count() != m0 and after_cut >= cursor_before:
-        failures.append(f"after the cut and a restart the service delivered {recv.count() - m0} events again")
+    if [r.count() for r in recvs] != m0 and before == after:
+        failures.append("after the cut and a restart the service sent requests again")
     if svc.proc and svc.proc.poll() is None:
         svc.proc.terminate()
         svc.proc.wait()
     elapsed = time.time() - started
 
-    got = list(recv.got)
-    first_seen, per_id = {}, {}
-    answered_ok = {}
-    for hid, body, status in got:
-        i = int(hid.split("_")[1]) if hid.startswith("evt_") else -1
-        per_id.setdefault(i, []).append(body)
-        if status == 200:
-            answered_ok[i] = answered_ok.get(i, 0) + 1
-        first_seen.setdefault(i, len(first_seen))
-    # Delivered means the receiver answered it 2xx: a request that got a 500 is an attempt, not a delivery.
-    undelivered = [i for i in acked if i not in answered_ok]
-    if undelivered:
-        failures.append(f"{len(undelivered)} acknowledged events were never delivered (answered 2xx), e.g. {sorted(undelivered)[:5]}")
-    wrong = [i for i, b in acked.items() if i in per_id and any(x != b for x in per_id[i])]
-    if wrong:
-        failures.append(f"{len(wrong)} events reached the receiver with a different body, e.g. {sorted(wrong)[:5]}")
-    order = sorted(first_seen, key=first_seen.get)
-    # Among events delivered, first deliveries must be ascending except for ones a failing stall let through out of
-    # step: none can be, since the service delivers one at a time, in order.
-    if order != sorted(order):
-        bad = next(k for k in range(len(order) - 1) if order[k] > order[k + 1])
-        failures.append(f"first deliveries are not in id order: {order[bad]} came before {order[bad + 1]}")
-    if n1 != n0:
-        failures.append(f"the service sent {n1 - n0} more requests after the backlog drained")
-    seg = os.path.join(datadir, "delivered.seg")
-    data = open(seg, "rb").read() if os.path.exists(seg) else b""
-    records, end = chaos.read_log(data)
-    ids = [ms for ms, _ in records]
-    if ids != sorted(set(ids)):
-        failures.append("delivered.seg ids are not strictly increasing")
-    if drained_at is not None and (not ids or ids[-1] < last_id):
-        failures.append(f"delivered.seg ends at {ids[-1] if ids else 0}, the last acknowledged event is {last_id}")
-    repeats = sum(len(v) - 1 for v in per_id.values())
-    # A repeat after a 2xx is a crash (the cursor was behind the receiver by at most one turn of deliveries) or a stall
-    # that answered after the deadline. Anything beyond that bound means the cursor is not doing its job.
-    again = sum(n - 1 for n in answered_ok.values())
-    bound = kills[0] * 17 + recv.stalls + 2
-    if again > bound:
-        failures.append(f"{again} events were delivered again after the receiver had answered 2xx; "
-                        f"{kills[0]} kills and {recv.stalls} stalls account for at most {bound}")
-    print(f"{events} events, {threads_n} threads, {kills[0]} kills as "
-          f"{'power cuts' if chaos.POWER_LOSS else 'process kills'}, {elapsed:.1f}s; receiver fails {P_FAIL:.0%} and stalls {P_STALL:.0%}")
-    print(f"acknowledged {len(acked)}; receiver saw {len(got)} requests for {len(per_id)} events ({repeats} repeats, {again} of them after a 2xx);"
-          f" delivered.seg holds {len(records)} records ({len(data) - end} bytes of torn tail)")
+    # --- the checks on what the receivers saw ---------------------------------------------------------------
+    n_of = {i: ids[i] for i in ids}
+    for e, r in enumerate(recvs):
+        got = list(r.got)
+        bad_sig = [(h, s) for h, _, _, s, _ in got if s is not True]
+        if bad_sig:
+            failures.append(f"endpoint {e}: {len(bad_sig)} requests failed signature verification, e.g. {bad_sig[0]}")
+        ok_by_id = {}
+        for hid, body, status, _, t in got:
+            if status == 200:
+                ok_by_id.setdefault(int(hid.split("_")[1]), []).append(body)
+        poisoned = {i for i, n in n_of.items() if e == 2 and n % POISON == 0}
+        want = [i for i in acked if i not in poisoned]
+        missing = [i for i in want if i not in ok_by_id]
+        if missing:
+            failures.append(f"endpoint {e}: {len(missing)} events never answered 2xx, e.g. {sorted(missing)[:5]}")
+        wrong = [i for i in want if i in ok_by_id and any(b != acked[i] for b in ok_by_id[i])]
+        if wrong:
+            failures.append(f"endpoint {e}: {len(wrong)} events arrived with different bytes")
+        if e == 2:
+            leaked = [i for i in poisoned if i in ok_by_id]
+            if leaked:
+                failures.append(f"endpoint 2: poisoned events answered 2xx: {sorted(leaked)[:5]}")
+            tries = {i: sum(1 for h, *_ in got if h == f"evt_{i}") for i in poisoned}
+            few = [i for i, t in tries.items() if t < ATTEMPTS]
+            many = [i for i, t in tries.items() if t > ATTEMPTS + kills[0]]
+            if few:
+                failures.append(f"endpoint 2: poisoned events attempted fewer than {ATTEMPTS} times: {sorted(few)[:5]}")
+            if many:
+                failures.append(f"endpoint 2: poisoned events attempted more than {ATTEMPTS} + {kills[0]} times: {sorted(many)[:5]}")
+            # No head-of-line blocking: the event after a poisoned one was delivered before the poisoned one gave up.
+            last_try = {i: max(t for h, _, _, _, t in got if h == f"evt_{i}") for i in poisoned}
+            first_ok = {}
+            for hid, _, status, _, t in got:
+                if status == 200:
+                    i = int(hid.split("_")[1])
+                    first_ok[i] = min(first_ok.get(i, t), t)
+            checked = passed = 0
+            for i in poisoned:
+                if i + 1 in first_ok and i in last_try:
+                    checked += 1
+                    passed += first_ok[i + 1] < last_try[i]
+            head = f"{passed} of {checked} poisoned events were overtaken by the next one"
+            overtaken = head
+            if checked and passed * 10 < checked * 8:
+                failures.append(f"endpoint 2: head-of-line blocking: only {head}")
+    outs, torn = outcomes(seg)
+    print(f"head-of-line: {overtaken}")
+    fin = final_sets()
+    for e in range(3):
+        if drained_at is not None and fin[e] != set(ids):
+            failures.append(f"delivery.seg: endpoint {e} has {len(fin[e])} final events of {len(ids)}")
+    dead = {e: {ev for _, k, ee, ev, _, _ in outs if k == 3 and ee == e} for e in range(3)}
+    want_dead = {i for i, n in n_of.items() if n % POISON == 0}
+    if drained_at is not None and (dead[2] != want_dead or dead[0] or dead[1]):
+        failures.append(f"dead letters: endpoint 2 has {len(dead[2])} of {len(want_dead)} poisoned events, others {len(dead[0])}/{len(dead[1])}")
+    if [s for s in (outs[i][0] for i in range(len(outs)))] != sorted({s for s, *_ in outs}):
+        failures.append("delivery.seg sequence numbers are not strictly increasing")
+
+    reqs = [r.count() for r in recvs]
+    print(f"{events} events, {threads_n} threads, {kills[0]} kills as {'power cuts' if chaos.POWER_LOSS else 'process kills'}, {elapsed:.1f}s; "
+          f"{len(ids)} events in the log, {len(acked)} acknowledged")
+    print(f"requests per endpoint: {reqs} ({sum(r.stalls for r in recvs)} stalls); delivery.seg: {len(outs)} outcome records "
+          f"({sum(1 for o in outs if o[1]==1)} delivered, {sum(1 for o in outs if o[1]==2)} failed attempts, "
+          f"{sum(1 for o in outs if o[1]==3)} dead letters), {torn} bytes of torn tail")
     shutil.rmtree(datadir, ignore_errors=True)
     if failures:
         for f in failures:
             print("FAIL:", f)
         return 1
-    print("PASS: every acknowledged event was delivered, intact and in order, the cursor survived, and it went quiet")
+    print("PASS: signed deliveries to three endpoints, retried and dead-lettered as designed, nothing lost, nothing repeated after the cut")
     return 0
 
 
