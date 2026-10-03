@@ -7,9 +7,9 @@ on:
 
 env:
   # The compiler and the log these sources are built with. A source file does not record which `std` it was written
-  # against, so the revisions are part of the contract. The compiler is lex-sys PR #191 (`tcp_connect_start`, which attempts that do not
-  # wait need); move this to its main once that is merged.
-  LEX_SYS_REV: 8d4966f926d60a4378b1271d7e32520e5d234b9a
+  # against, so the revisions are part of the contract. The compiler is lex-sys main with `tcp_connect_start`, which
+  # attempts that do not wait need.
+  LEX_SYS_REV: b255e8392dbc38ff790f28cade9aa34eec5a1d80
   # lexsys-log main, with the append path (`src/log.ls`).
   LOG_REV: c0c3852541e927c3e893331207f1a0aaf184bc2e
 

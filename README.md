@@ -21,7 +21,7 @@ attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) 
 ## Requirements
 
 - The **lex-sys** compiler and a checkout of **lexsys-log**, both at the revisions this repository's CI builds with (below).
-  The compiler needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190, merged) and `tcp_connect_start` (attempts that do not wait; lex-sys PR #191).
+  The compiler needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190, merged) and `tcp_connect_start` (attempts that do not wait; lex-sys PR #191, merged).
 - Rust, to build the compiler; `gcc`, to build the small `fsync` shim the crash tests use.
 - To run the tests: `python3` and `pip install standardwebhooks` (the independent implementation signatures are checked against).
 
