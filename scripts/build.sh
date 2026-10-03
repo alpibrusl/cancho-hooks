@@ -19,7 +19,7 @@ LEX_SYS_DIR=${LEX_SYS_DIR:-$here/../lex-sys}
 LOG_DIR=${LOG_DIR:-$here/../lexsys-log}
 out=${1:-$here/build/hooks}
 mkdir -p "$(dirname "$out")"
-"$LEX_SYS" build "$here/src/hooks.ls" "$here/src/attempt.ls" "$here/src/sign.ls" "$here/src/state.ls" "$here/src/endpoints.ls" \
+"$LEX_SYS" build "$here/src/hooks.ls" "$here/src/attempt.ls" "$here/src/sign.ls" "$here/src/state.ls" "$here/src/endpoints.ls" "$here/src/idem.ls" \
   "$LEX_SYS_DIR/packages/http-server/server.ls" \
   "$LOG_DIR/src/log.ls" "$LOG_DIR/src/segment.ls" "$LOG_DIR/src/record.ls" "$LOG_DIR/src/crc.ls" \
   --std -o "$out"

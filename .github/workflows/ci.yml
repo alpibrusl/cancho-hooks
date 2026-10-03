@@ -56,11 +56,12 @@ jobs:
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks
 
-      - name: Unit tests (the delivery window, the endpoints file)
+      - name: Unit tests (the delivery window, the endpoints file, the idempotency index)
         working-directory: hooks
         run: |
           ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
           ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+          ../lex-sys/target/release/lex-sys test tests/idem_test.ls src/idem.ls --std
 
       - name: Signatures and base64 against the reference library
         working-directory: hooks
@@ -85,3 +86,7 @@ jobs:
       - name: Three endpoints, signed, retried, dead-lettered, with the service killed
         working-directory: hooks
         run: python3 tests/delivery.py build/hooks 300 4 150
+
+      - name: Idempotency keys (the contract, refusals, restarts, chaos, a broken log, the full index)
+        working-directory: hooks
+        run: FULL=1 python3 tests/idempotency_test.py build/hooks

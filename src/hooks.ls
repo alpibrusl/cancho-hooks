@@ -2,7 +2,7 @@ edition 5;
 
 // `hooks` -- a webhook delivery service (`docs/design.md`).
 //
-//     hooks <port> <data-dir> [<retry delays in ms, comma separated> [<attempt deadline in ms>]]
+//     hooks <port> <data-dir> [<retry delays in ms, comma separated> [<attempt deadline in ms> [<idempotency window in ms>]]]
 //
 // This is step H1a: **ingest**. `POST /events` takes a JSON object with a string `"type"`, appends it to a durable log
 // (`lexsys-log`'s `log.ls`), and answers `202` with its id **only after the flush that covers it**. Requests that arrive in
@@ -31,6 +31,8 @@ import http.server;
 import log;
 import record;
 import attempt;
+import crc;
+import idem;
 import std.conns;
 import endpoints;
 import sign;
@@ -193,9 +195,64 @@ fn find_event[&h, &l, &w](heap: &!h Heap, lg: &!l log.Log, window: &!w [byte], i
     return found;
 }
 
-// One request, answered or noted for later. `note[0]` is set to the new event's id if the request was an accepted
-// `POST /events` (answer it after the flush, with `202`), and to -1 otherwise (the answer in `out` goes out now).
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &s [int], out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
+// The index of the `Idempotency-Key` header, -1 if there is none, -2 if there is more than one (which one the client meant
+// is not ours to guess).
+fn key_header[&q, &t](request: &q [byte], table: &t [int]) -> [] int {
+    let first = http.find_header(request, table, "idempotency-key");
+    if first < 0 {
+        return first;
+    }
+    var i = first + 1;
+    while i < http.header_count(table) {
+        if bytes_equal_lower(http.header_name(request, table, i), "idempotency-key") {
+            return 0 - 2;
+        }
+        i = i + 1;
+    }
+    return first;
+}
+
+// Is `name` (any case) `want` (lowercase)?
+fn bytes_equal_lower[&a, &b](name: &a [byte], want: &b [byte]) -> [] bool {
+    if len(name) != len(want) {
+        return false;
+    }
+    var i = 0;
+    while i < len(name) {
+        var c = int_of(name[i]);
+        if c >= 'A' && c <= 'Z' {
+            c = c + 32;
+        }
+        if c != int_of(want[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Build the record of event `ms` in `scratch`: the body, and for a keyed event the key and the time `now` (Unix ms, eight bytes).
+// Answers the record's length.
+fn event_record[&c, &b, &k](scratch: &!c [byte], ms: int, body: &b [byte], key: &k [byte], keyed: bool, now: int) -> [] int {
+    if !keyed {
+        let p = record.begin(scratch, 0, ms, 0, 1);
+        return record.seal(scratch, 0, record.put_pair(scratch, p, "event", body));
+    }
+    let p = record.begin(scratch, 0, ms, 0, 3);
+    var end = record.put_pair(scratch, p, "event", body);
+    end = record.put_pair(scratch, end, "key", key);
+    region a {
+        let stamp = alloc_slice[a](8, byte_of(0));
+        record.put_u64(stamp, 0, now);
+        end = record.put_pair(scratch, end, "t", stamp);
+    }
+    return record.seal(scratch, 0, end);
+}
+
+// One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
+// `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
+// `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &s [int], ix: &!x [int], arena: &!y [byte], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
@@ -209,19 +266,52 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s](heap: &!h Heap, router: &r
         if len(reason) > 0 {
             return server.failure(heap, out, 422, reason, keep);
         }
+        let kh = key_header(request, table);
+        if kh == 0 - 2 {
+            return server.failure(heap, out, 400, "more than one Idempotency-Key header", keep);
+        }
+        let keyed = kh >= 0;
+        var key = request[0..0];
+        var entry = 0 - 1;
+        var sum = 0;
+        if keyed {
+            key = http.header_value(request, table, kh);
+            if !idem.valid(key) {
+                return server.failure(heap, out, 400, "the Idempotency-Key must be 1 to 255 visible ASCII characters", keep);
+            }
+            sum = crc.of(body);
+            entry = idem.find(ix, arena, key);
+            if entry >= 0 && idem.fresh(ix, entry, now) {
+                if !idem.matches(ix, entry, sum, len(body)) {
+                    return server.failure(heap, out, 422, "this Idempotency-Key was used for a different event", keep);
+                }
+                // The same event again: nothing is written, and the answer is the first one's, after the flush that covers it
+                // (a broken log fails that flush, so the answer is then 503, as for any other request held).
+                note[0] = idem.id_of(ix, entry);
+                return out;
+            }
+            if entry < 0 && idem.count(ix) >= idem.capacity() {
+                return server.failure(heap, out, 507, "too many Idempotency-Keys are held", keep);
+            }
+        }
         var ms = 1;
         if log.last_ms(lg) >= 1 {
             ms = log.last_ms(lg) + 1;
         }
-        let mut_pos = record.begin(scratch, 0, ms, 0, 1);
-        let end = record.put_pair(scratch, mut_pos, "event", body);
-        let total = record.seal(scratch, 0, end);
+        let total = event_record(scratch, ms, body, key, keyed, now);
         let code = log.append(lg, scratch[0..total], ms, 0);
         if code == log.too_long() {
             return server.failure(heap, out, 413, "the event is too large", keep);
         }
         if code != 0 {
             return server.failure(heap, out, 503, "the event could not be stored", keep);
+        }
+        if keyed {
+            // Only now that the record is appended: the index never holds a key the log does not.
+            if entry < 0 {
+                entry = idem.add(ix, arena, key);
+            }
+            idem.set(ix, entry, ms, now, sum, len(body));
         }
         note[0] = ms;
         return out;
@@ -250,7 +340,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s](heap: &!h Heap, router: &r
     }
     if id == 4 {
         // GET /stats: the delivery counters, for the tests and for a human.
-        var w = json.writer(heap, 128);
+        var w = json.writer(heap, 160);
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "endpoints");
         w = json.put_int(heap, w, stats[c_endpoints()]);
@@ -262,6 +352,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s](heap: &!h Heap, router: &r
         w = json.put_int(heap, w, stats[c_failed()]);
         w = json.put_key(heap, w, "dead");
         w = json.put_int(heap, w, stats[c_dead()]);
+        w = json.put_key(heap, w, "keys");
+        w = json.put_int(heap, w, idem.count(ix));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -733,7 +825,7 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
+fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
@@ -742,7 +834,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v](heap: &!h Heap, router: &r route.
                 widest = route.most_params(router);
             }
             let params = box_slice(heap, 2 * widest, 0);
-            let scratch = box_slice(heap, max_len() + 256, byte_of(0));
+            let scratch = box_slice(heap, max_len() + 8192, byte_of(0));
             let note = box_slice(heap, 1, 0);
             // The delivery attempts in flight: their state, request and response bytes, the poller events that concern them, and
             // their connections.
@@ -775,7 +867,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v](heap: &!h Heap, router: &r route.
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, window, contents(cw), contents(nw), dv[0..16], out);
+                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, window, contents(cw), contents(nw), dv[0..16], ix, arena, clock_unix_ms(clock), out);
                                     }
                                 }
                             }
@@ -947,9 +1039,44 @@ fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [by
     }
 }
 
+// Rebuild the idempotency index from the events log: every keyed record, in order, the later one of two with the same key
+// winning (as it does when the service is running). Answers 0, or a status for `main` to exit with: the log has a record this
+// code does not understand, or more keys than the index holds.
+fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], arena: &!y [byte]) -> [file_read] int {
+    var at = 0;
+    while true {
+        let r = log.read_at(lg, at, window);
+        if r.0 == 1 {
+            return 0;
+        }
+        if r.0 != 0 {
+            return 16;
+        }
+        if record.fields_of(window, 0) >= 3 {
+            let ev = record.pair_at(window, record.first_pair(0));
+            let k = record.pair_at(window, ev.4);
+            let t = record.pair_at(window, k.4);
+            if k.1 != 3 || window[k.0] != byte_of('k') || t.1 != 1 || window[t.0] != byte_of('t') || t.3 != 8 {
+                return 16;
+            }
+            let key = window[k.2..k.2 + k.3];
+            var entry = idem.find(ix, arena, key);
+            if entry < 0 {
+                entry = idem.add(ix, arena, key);
+            }
+            if entry < 0 {
+                return 16;
+            }
+            idem.set(ix, entry, record.ms_of(window, 0), record.get_u64(window, t.2), crc.of(window[ev.2..ev.2 + ev.3]), ev.3);
+        }
+        at = at + r.1;
+    }
+    return 0;
+}
+
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // scan of the events log positioned at the slowest endpoint. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int) -> [heap, fs_read(""), file_read] int {
+fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte]) -> [heap, fs_read(""), file_read] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
     dv[c_deadline()] = default_deadline_ms();
     if deadline_ms > 0 {
@@ -957,6 +1084,10 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t](heap: &!h Heap, fs: &c Fs(""), di
     }
     if len(schedule) > 0 && parse_schedule(schedule, dv[off_sched()..off_sched() + 17]) < 0 {
         return 14;
+    }
+    let rebuilt = rebuild(lg, window, ix, arena);
+    if rebuilt != 0 {
+        return rebuilt;
     }
     let n = load_endpoints(heap, fs, dir, dv, blob);
     if n < 0 {
@@ -989,6 +1120,7 @@ fn main(world: World) -> [] int {
         let sched_buf = alloc_slice[a](256, byte_of(0));
         var sched_len = 0;
         var deadline_ms = 0;
+        var window_ms = 86400000;
         borrow args as &g in {
             if arg_count(g) > 1 {
                 port = number_of(arg(g, 1));
@@ -1018,6 +1150,12 @@ fn main(world: World) -> [] int {
             if arg_count(g) > 4 {
                 deadline_ms = number_of(arg(g, 4));
             }
+            if arg_count(g) > 5 {
+                window_ms = number_of(arg(g, 5));
+                if window_ms < 0 {
+                    port = 0 - 1;
+                }
+            }
         }
         if port > 0 && port < 65536 && dir_len > 0 {
             status = 3;
@@ -1025,6 +1163,8 @@ fn main(world: World) -> [] int {
                 var wbuf = buffer.empty(h, max_len() + 4096);
                 let dvb = box_slice(h, dv_size(), 0);
                 let blob = box_slice(h, 16384, byte_of(0));
+                let ixb = box_slice(h, idem.ix_size(), 0);
+                let arenab = box_slice(h, idem.arena_size(), byte_of(0));
                 borrow mut wbuf as &!wb in {
                     borrow fs as &fsr in {
                         match open_log(fsr, dir_buf[0..dir_len], "events.seg", buffer.room(wb)) {
@@ -1041,31 +1181,36 @@ fn main(world: World) -> [] int {
                                         var dl = dl0;
                                         borrow mut dvb as &!dvw in {
                                             borrow mut blob as &!bw in {
-                                                borrow mut lg as &!lw in {
-                                                    borrow mut dl as &!dw in {
-                                                        status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms);
-                                                        if status == 0 {
-                                                            borrow net as &nn in {
-                                                                match tcp_listen(nn, port, 1024, 0) {
-                                                                    Listening::Ok(l) => {
-                                                                        var listener = l;
-                                                                        borrow mut listener as &!lh in {
-                                                                            listener_nonblocking(lh);
-                                                                            let router = routes(h);
-                                                                            borrow mut io as &!i in {
-                                                                                io.error_all(i, "listening\n");
-                                                                            }
-                                                                            borrow router as &r in {
-                                                                                borrow clock as &c in {
-                                                                                    status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, contents(bw), contents(dvw));
+                                                borrow mut ixb as &!ixw in {
+                                                    borrow mut arenab as &!arw in {
+                                                        borrow mut lg as &!lw in {
+                                                            borrow mut dl as &!dw in {
+                                                                contents(ixw)[1] = window_ms;
+                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw));
+                                                                if status == 0 {
+                                                                    borrow net as &nn in {
+                                                                        match tcp_listen(nn, port, 1024, 0) {
+                                                                            Listening::Ok(l) => {
+                                                                                var listener = l;
+                                                                                borrow mut listener as &!lh in {
+                                                                                    listener_nonblocking(lh);
+                                                                                    let router = routes(h);
+                                                                                    borrow mut io as &!i in {
+                                                                                        io.error_all(i, "listening\n");
+                                                                                    }
+                                                                                    borrow router as &r in {
+                                                                                        borrow clock as &c in {
+                                                                                            status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw));
+                                                                                        }
+                                                                                    }
+                                                                                    route.drop(h, router);
                                                                                 }
+                                                                                listener_close(listener);
                                                                             }
-                                                                            route.drop(h, router);
+                                                                            Listening::Failed(e) => {
+                                                                                status = 11;
+                                                                            }
                                                                         }
-                                                                        listener_close(listener);
-                                                                    }
-                                                                    Listening::Failed(e) => {
-                                                                        status = 11;
                                                                     }
                                                                 }
                                                             }
@@ -1085,6 +1230,8 @@ fn main(world: World) -> [] int {
                 buffer.drop(h, wbuf);
                 unbox_slice(h, dvb);
                 unbox_slice(h, blob);
+                unbox_slice(h, ixb);
+                unbox_slice(h, arenab);
             }
         }
     }
