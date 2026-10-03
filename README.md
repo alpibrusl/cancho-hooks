@@ -51,6 +51,19 @@ curl -XPOST -d '{"type":"user.created","id":7}' localhost:8080/events      # {"i
 With nothing listening on port 9000 the event is stored and retried (5 s, 5 min, ...). To watch a delivery arrive, run the
 receiver below first.
 
+## A prebuilt binary
+
+Every CI run that passes keeps the service as an artifact of the run (Actions, the run, "Artifacts": `hooks-linux-x86_64-<commit>`,
+a zip of `hooks-linux-x86_64` and its `.sha256`). It is built by the compiler this commit pins, for Linux x86-64 with the glibc of
+`ubuntu-latest` or newer, and the zip loses the executable bit:
+
+```sh
+unzip hooks-linux-x86_64-*.zip && sha256sum -c hooks-linux-x86_64.sha256 && chmod +x hooks-linux-x86_64
+./hooks-linux-x86_64 --port 8080 --dir /var/lib/hooks
+```
+
+A run's artifacts expire (90 days by default); a release with a stable URL is not built.
+
 ## Examples
 
 **A receiver** (`receiver.py`): prints the three Standard Webhooks headers and the body of every delivery, and answers `204`.
