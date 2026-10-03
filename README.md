@@ -12,10 +12,10 @@ rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the 
 
 ## Status
 
-**Step H1d.** Working: durable ingest (`202` only after the flush that covers the event; requests that arrive together share one
+**Step H1e.** Working: durable ingest (`202` only after the flush that covers the event; requests that arrive together share one
 flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the
 reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next
-attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). Not built: idempotency keys, endpoints and
+attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). Since H1e a client may send an `Idempotency-Key`: a repeat of the same event answers the first answer, byte for byte, and stores nothing, also across a crash ([`docs/design.md`](docs/design.md) section 17). Not built: endpoints and
 attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) endpoints.
 
 ## Requirements
@@ -79,7 +79,7 @@ evt_1 1791028548 v1,5Zm7wWgRWI1/Wv9pxlBJoAfhaZGx7dUmeUGdTj0hWd8= {"type":"user.c
 $ curl localhost:8080/events/1
 {"id":1,"event":{"type":"user.created","id":7}}
 $ curl localhost:8080/stats
-{"endpoints":1,"attempts":1,"delivered":1,"failed":0,"dead":0}
+{"endpoints":1,"attempts":1,"delivered":1,"failed":0,"dead":0,"keys":0}
 ```
 
 **Verify a delivery** the way a subscriber would, with the reference library (`pip install standardwebhooks`):
@@ -102,15 +102,27 @@ blank lines are ignored); the optional third argument replaces the retry delays,
 ```sh
 build/hooks 8080 /tmp/hooks-data 100,200,400,800    # four retries, then a dead letter after the fifth attempt
 build/hooks 8080 /tmp/hooks-data 100,200,400,800 500  # ... and give up on an attempt after 500 ms (the default is 2,000)
+build/hooks 8080 /tmp/hooks-data 100,200,400,800 500 60000  # ... and remember idempotency keys for 60 s (the default is a day)
+```
+
+**Idempotency.** Send the same `Idempotency-Key` with the same event and you get the same answer and one event, however often you retry:
+
+```
+$ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":77}' localhost:8080/events
+{"id":2}
+$ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":77}' localhost:8080/events
+{"id":2}
+$ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' localhost:8080/events
+{"error":"this Idempotency-Key was used for a different event"}
 ```
 
 ## HTTP API
 
 | | |
 |---|---|
-| `POST /events` | a JSON object with a string `"type"`; answers `202 {"id":N}` after the flush, `422` for a body that is not one, `413` for one over 65,500 bytes, `503` if the log is broken |
+| `POST /events` | a JSON object with a string `"type"`, and optionally an `Idempotency-Key` (1 to 255 visible ASCII characters); answers `202 {"id":N}` after the flush, `422` for a body that is not one or a key already used for a different event, `400` for a bad or doubled key, `413` for an event too large (over 65,499 bytes, less 28 and the key's length with a key), `507` for a new key when 65,536 are held, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
-| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead"}` |
+| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys"}` |
 | `GET /healthz` | `{"ok":true}` |
 
 A delivery is `POST /hook` to the endpoint, with the event as the body and three headers: `webhook-id` (`evt_<id>`, the same on
@@ -130,12 +142,14 @@ request held; after the turn one `flush` covers every append and the held reques
 ```sh
 $LEX_SYS test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std     # the delivery window
 $LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+$LEX_SYS test tests/idem_test.ls src/idem.ls --std                                                       # the idempotency-key index
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
 python3 tests/retry_test.py build/hooks            # the retry delays, also across restarts, and the dead letter
 python3 tests/isolation_test.py build/hooks        # what a silent, slow or unreachable endpoint costs the others (gated)
 python3 tests/chaos.py build/hooks 2000 8 50       # kill -9 as a power cut: no acknowledged event may be lost
 python3 tests/delivery.py build/hooks 300 4 150    # three endpoints, signed, retried and dead-lettered, with the service killed
+FULL=1 python3 tests/idempotency_test.py build/hooks   # idempotency keys: the contract, restarts, chaos, a broken log, a full index
 ```
 
 The crash tests emulate a power cut with a small `LD_PRELOAD` shim (`tests/fsync_shim.c`): a plain `kill -9` cannot show a
@@ -144,7 +158,7 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 ## Documentation
 
 - [`docs/design.md`](docs/design.md): what this is for, which store owns which fact, the delivery semantics, the test scenario
-  fixed before the build, the gaps predicted, and sections 13 to 16 on what building each step showed.
+  fixed before the build, the gaps predicted, and sections 13 to 17 on what building each step showed.
 
 ## Layout
 
@@ -152,6 +166,7 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 src/hooks.ls       the service: routes, the loop, delivery
 src/attempt.ls     delivery attempts that do not hold the loop: connect, send, read a status line, each waiting for the poller
 src/state.ls       the per-endpoint cursor and window, and the outcome record
+src/idem.ls        the idempotency-key index (rebuilt from the log at start)
 src/endpoints.ls   the endpoints file
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
 scripts/build.sh   builds the service, the probes and the fsync shim
@@ -161,7 +176,7 @@ docs/design.md     the design and what building it found
 
 ## Limitations
 
-One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, not a database; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 16 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. Not for production.
+One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, not a database; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 16 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
 
 ## Contributing
 
