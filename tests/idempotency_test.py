@@ -208,14 +208,17 @@ def stage_refusals():
     ok = raw(r.port, event(3), "good-key")
     check(status_of(ok) == 202, "the key is still free after a refused event")
 
-    # Over the size limit with a key: refused, no record, no key.
-    huge = json.dumps({"type": "t", "pad": "x" * 70000}).encode()
-    try:
-        refused = status_of(raw(r.port, huge, "big")) in (413, 400)
-    except OSError:
-        refused = True      # the server may close a connection whose body is over its input limit before it has read it all
-    check(refused, "an event over the limit is refused")
+    # An event the log refuses as too large reaches the handler (the server's input limit is higher): 413, and no key.
+    huge = json.dumps({"type": "t", "pad": "x" * 65600}).encode()
+    check(status_of(raw(r.port, huge, "big")) == 413, "an event over the log's limit is refused with 413")
     check(keys_held(r.port) == 3, "and holds no key")
+    check(status_of(raw(r.port, event(8), "big")) == 202, "the key is free afterwards")
+    # Over the server's own input limit the connection may simply be closed.
+    try:
+        status_of(raw(r.port, json.dumps({"type": "t", "pad": "x" * 70000}).encode(), "huger"))
+    except OSError:
+        pass
+    check(keys_held(r.port) == 4, "an event over the server's input limit holds no key either")
     # Near the limit: a keyed record is larger than an unkeyed one, so the limit is lower by the key and 40 bytes.
     near = json.dumps({"type": "t", "pad": "x" * 65300}).encode()
     a = raw(r.port, near, "k" * 200)
@@ -312,7 +315,7 @@ def stage_delivery():
         def do_POST(self):
             self.rfile.read(int(self.headers["Content-Length"]))
             got.append(self.headers["webhook-id"])
-            self.send_response(204)
+            self.send_response(500 if self.headers["webhook-id"] == "evt_2" and got.count("evt_2") == 1 else 204)
             self.send_header("Content-Length", "0")
             self.end_headers()
 
@@ -331,12 +334,13 @@ def stage_delivery():
         raw(svc.port, event(1), "once")
     raw(svc.port, event(2), "twice")
     deadline = time.time() + 5
-    while time.time() < deadline and len(got) < 2:
+    while time.time() < deadline and len(got) < 3:
         time.sleep(0.05)
     time.sleep(0.5)
-    check(sorted(got) == ["evt_1", "evt_2"], f"five requests with one key are one delivery (receiver saw {got})")
+    check(sorted(set(got)) == ["evt_1", "evt_2"] and got.count("evt_1") == 1,
+          f"five requests with one key are one delivery (receiver saw {got})")
     stats = json.loads(get(svc.port, "/stats")[1])
-    check(stats["delivered"] == 2 and stats["keys"] == 2, f"stats agree: {stats}")
+    check(stats["delivered"] == 2 and stats["failed"] >= 1 and stats["keys"] == 2, f"stats agree: {stats}")
     svc.kill()
     shutil.rmtree(datadir, ignore_errors=True)
     srv.shutdown()

@@ -285,10 +285,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y](heap: &!h Heap, ro
                 if !idem.matches(ix, entry, sum, len(body)) {
                     return server.failure(heap, out, 422, "this Idempotency-Key was used for a different event", keep);
                 }
-                // The same event again: nothing is written, and the answer is the first one's, after the flush that covers it.
-                if log.broken(lg) {
-                    return server.failure(heap, out, 503, "the event could not be stored", keep);
-                }
+                // The same event again: nothing is written, and the answer is the first one's, after the flush that covers it
+                // (a broken log fails that flush, so the answer is then 503, as for any other request held).
                 note[0] = idem.id_of(ix, entry);
                 return out;
             }
