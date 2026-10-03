@@ -310,5 +310,5 @@ Until here the build needed three clones and two SHAs: the compiler, `lexsys-log
 **Found.**
 
 * **A fetched file is named by its hash, so an old one is a second declaration.** Moving a pin leaves the previous commit's files in `build/deps` next to the new ones and `build` refuses the duplicates; `build.sh` clears the directory first. (lex-sys's own `fetch_net_dependencies` test helper says the same about two fetches of one package.)
-* **The pin on `lexsys-log` is a commit of a branch that has not been merged** when this is written (`lexsys-log` PR #6, which adds the published stores). A squash merge makes a new commit with the same tree, so after it merges `scripts/lock.sh` is run once with the merge commit; the entries inside the locks do not change, only the commit.
+* **The pin on `lexsys-log` had to move once, after the merge.** It was first the head of the pull request that added the published stores; a squash merge makes a new commit with the same tree, so `scripts/lock.sh` was run again with the merge commit (`6b4f46f`) and the diff of `deps/log.lock` was that one `rev` line, as predicted: the entries inside do not change, only where they are fetched from.
 * **Still two hand-kept lists:** the source files `build.sh` names (`src/*.ls`), and the test commands. A project file (lex-sys section 7.5, step 3) would hold both.
