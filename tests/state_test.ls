@@ -156,7 +156,7 @@ fn test_a_foreign_record_is_not_an_outcome() -> [] int {
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         // The right key and length, an unknown kind.
         let again = state.put_outcome(buf, 0, 2, state.delivered(), 0, 1, 1, 0);
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 9);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 99);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
     }
     return 0;
@@ -180,6 +180,34 @@ fn test_endpoint_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(c[0], 0);
         test.assert(!state.is_final(w, c, 0, 1));
         test.assert_eq(state.attempts(w, 0, 1), 0);
+    }
+    return 0;
+}
+
+// The replay records read back as themselves, with their attempts and next time, and change no cell either.
+fn test_replay_records_read_back_and_change_no_cell() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        state.put_outcome(buf, 0, 9, state.replay(), 1, 42, 0, 0);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, state.replay());
+        test.assert_eq(o.1, 1);
+        test.assert_eq(o.2, 42);
+        state.put_outcome(buf, 0, 10, state.replay_failed(), 1, 42, 3, 1700000000000);
+        let f = state.outcome_at(buf, 0);
+        test.assert_eq(f.0, state.replay_failed());
+        test.assert_eq(f.3, 3);
+        test.assert_eq(f.4, 1700000000000);
+        state.put_outcome(buf, 0, 11, state.replay_delivered(), 1, 42, 4, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, state.replay_delivered());
+        state.put_outcome(buf, 0, 12, state.replay_dead(), 1, 42, 9, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, state.replay_dead());
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.replay_delivered(), 1, 1, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.replay_dead(), 1, 1, 0), 0);
+        test.assert_eq(c[0], 0);
+        test.assert(!state.is_final(w, c, 0, 1));
     }
     return 0;
 }

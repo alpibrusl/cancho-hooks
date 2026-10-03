@@ -60,6 +60,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/config_test.py build/hooks
 
+      - name: Replay an event to one endpoint or all
+        working-directory: hooks
+        run: python3 tests/replay_test.py build/hooks
+
       - name: 410 Gone disables an endpoint; enabling it again
         working-directory: hooks
         run: python3 tests/gone_test.py build/hooks

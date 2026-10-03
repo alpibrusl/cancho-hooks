@@ -49,6 +49,25 @@ pub fn enabled() -> [] int {
     return 5;
 }
 
+// Replay (`docs/design.md` section 23): an event is sent again to one endpoint although it is final there. A replay is asked
+// for (`replay`, with the endpoint and event) and then has outcomes of its own, which are not the window's: the attempt failed
+// (with its count and the time of the next), or ended delivered or dead.
+pub fn replay() -> [] int {
+    return 6;
+}
+
+pub fn replay_failed() -> [] int {
+    return 7;
+}
+
+pub fn replay_delivered() -> [] int {
+    return 8;
+}
+
+pub fn replay_dead() -> [] int {
+    return 9;
+}
+
 // The size of the cell array for `n` endpoints: three ints (final, attempts, next attempt) per cell.
 pub fn cells(n: int) -> [] int {
     return n * span() * 3;
@@ -148,7 +167,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 5 {
+    if kind < 1 || kind > 9 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

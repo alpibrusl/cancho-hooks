@@ -356,6 +356,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, stats[c_dead()]);
         w = json.put_key(heap, w, "keys");
         w = json.put_int(heap, w, idem.count(ix));
+        w = json.put_key(heap, w, "replays");
+        w = json.put_int(heap, w, rp_cap() - rp_free(stats));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -437,6 +439,77 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         buffer.drop(heap, body);
         return answer;
     }
+    if id == 8 || id == 9 {
+        // POST /events/:id/replay[/:endpoint]: send the event again to every endpoint, or to one, whatever happened to it there.
+        let want = route.param_nat(path, params, 0);
+        if want < 1 {
+            return server.failure(heap, out, 400, "the id must be a positive number", keep);
+        }
+        var only = 0 - 1;
+        if id == 9 {
+            only = route.param_nat(path, params, 1);
+            if only < 0 || only >= state.max_endpoints() {
+                return server.failure(heap, out, 400, "the endpoint must be a number below 16", keep);
+            }
+            if index_of(stats, only) < 0 {
+                return server.failure(heap, out, 404, "no such endpoint", keep);
+            }
+        }
+        let offset = find_offset(lg, window, want);
+        if offset < 0 {
+            return server.failure(heap, out, 404, "no such event", keep);
+        }
+        var needed = 0;
+        var i = 0;
+        while i < stats[c_endpoints()] {
+            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            if (only < 0 || e == only) && rp_find(stats, e, want) < 0 {
+                needed = needed + 1;
+            }
+            i = i + 1;
+        }
+        if needed > rp_free(stats) {
+            return server.failure(heap, out, 507, "too many replays are waiting", keep);
+        }
+        // The records first, then one flush, and only then the table: a replay that was not stored is not started.
+        i = 0;
+        while i < stats[c_endpoints()] {
+            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            if only < 0 || e == only {
+                if note_outcome(done, stats, state.replay(), e, want, 0, 0) == 0 {
+                    return server.failure(heap, out, 503, "the replay could not be stored", keep);
+                }
+            }
+            i = i + 1;
+        }
+        if log.flush(done) != 0 {
+            return server.failure(heap, out, 503, "the replay could not be stored", keep);
+        }
+        var w = json.writer(heap, 96);
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "event");
+        w = json.put_int(heap, w, want);
+        w = json.put_key(heap, w, "endpoints");
+        w = json.begin_array(heap, w);
+        i = 0;
+        while i < stats[c_endpoints()] {
+            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            if only < 0 || e == only {
+                rp_put(stats, e, want, offset);
+                w = json.put_int(heap, w, e);
+            }
+            i = i + 1;
+        }
+        w = json.end_array(heap, w);
+        w = json.end_object(heap, w);
+        let body = json.finish(w);
+        var answer = out;
+        borrow body as &sb in {
+            answer = server.reply(heap, answer, 202, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, body);
+        return answer;
+    }
     if id == 0 - 2 {
         var extra = buffer.append(heap, buffer.empty(heap, 48), "Allow: ");
         extra = route.allowed(heap, router, path, params, extra);
@@ -460,6 +533,8 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/config", 5);
     r = route.add(heap, r, "POST", "/endpoints/:id/enable", 6);
     r = route.add(heap, r, "GET", "/endpoints", 7);
+    r = route.add(heap, r, "POST", "/events/:id/replay", 8);
+    r = route.add(heap, r, "POST", "/events/:id/replay/:endpoint", 9);
     return r;
 }
 
@@ -536,19 +611,24 @@ fn set_disabled[&d](dv: &!d [int], e: int, on: bool) -> [] int {
     return 0;
 }
 
-// Append the record that endpoint `e` was disabled or enabled (`state.disabled()`, `state.enabled()`) to `done`, not yet
-// flushed. Answers 1 if it was appended, 0 if the log refused it.
-fn note_endpoint[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int) -> [file_write] int {
+// Append an outcome record of any kind to `done`, not yet flushed. Answers 1 if it was appended, 0 if the log refused it.
+fn note_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, id: int, attempts: int, next_at: int) -> [file_write] int {
     var ok = 0;
     region a {
         let rec = alloc_slice[a](128, byte_of(0));
-        let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, 0, 0, 0);
+        let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, id, attempts, next_at);
         if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
             dv[c_seq()] = dv[c_seq()] + 1;
             ok = 1;
         }
     }
     return ok;
+}
+
+// Append the record that endpoint `e` was disabled or enabled (`state.disabled()`, `state.enabled()`) to `done`, not yet
+// flushed. Answers 1 if it was appended, 0 if the log refused it.
+fn note_endpoint[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int) -> [file_write] int {
+    return note_outcome(done, dv, kind, e, 0, 0, 0);
 }
 
 fn off_table() -> [] int {
@@ -580,8 +660,79 @@ fn off_flight() -> [] int {
     return off_cells() + state.cells(state.max_endpoints());
 }
 
-fn dv_size() -> [] int {
+// The replays asked for and not finished (`docs/design.md` section 23): `rp_cap()` entries of `rp_stride()` integers, in the order
+// state, endpoint, event, attempts, next attempt, offset of the event in the events log (-1 until looked up), in flight.
+fn off_rp() -> [] int {
     return off_flight() + state.max_endpoints() * state.span();
+}
+
+fn rp_cap() -> [] int {
+    return 32;
+}
+
+fn rp_stride() -> [] int {
+    return 7;
+}
+
+fn dv_size() -> [] int {
+    return off_rp() + rp_cap() * rp_stride();
+}
+
+// A replay attempt's id for the attempt machinery: the event's id plus this, so `finish_attempt` can tell it from a window's.
+fn replay_base() -> [] int {
+    return 1099511627776;
+}
+
+// The entry for (endpoint, event), or -1.
+fn rp_find[&d](dv: &d [int], e: int, id: int) -> [] int {
+    var r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 1] == e && dv[b + 2] == id {
+            return r;
+        }
+        r = r + 1;
+    }
+    return 0 - 1;
+}
+
+fn rp_free[&d](dv: &d [int]) -> [] int {
+    var n = 0;
+    var r = 0;
+    while r < rp_cap() {
+        if dv[off_rp() + r * rp_stride()] == 0 {
+            n = n + 1;
+        }
+        r = r + 1;
+    }
+    return n;
+}
+
+// Ask for (endpoint, event) to be sent again: take the entry for it, or a free one, and reset it. Answers the entry, or -1 if
+// there is none free.
+fn rp_put[&d](dv: &!d [int], e: int, id: int, offset: int) -> [] int {
+    var r = rp_find(dv, e, id);
+    if r < 0 {
+        var k = 0;
+        while k < rp_cap() && r < 0 {
+            if dv[off_rp() + k * rp_stride()] == 0 {
+                r = k;
+            }
+            k = k + 1;
+        }
+    }
+    if r < 0 {
+        return 0 - 1;
+    }
+    let b = off_rp() + r * rp_stride();
+    dv[b] = 1;
+    dv[b + 1] = e;
+    dv[b + 2] = id;
+    dv[b + 3] = 0;
+    dv[b + 4] = 0;
+    dv[b + 5] = offset;
+    dv[b + 6] = 0;
+    return r;
 }
 
 fn flight_at(e: int, id: int) -> [] int {
@@ -678,6 +829,27 @@ fn index_of[&d](dv: &d [int], e: int) -> [] int {
     return 0 - 1;
 }
 
+// Apply one replay record to the table of replays (`docs/design.md` section 23): asked for, failed (with its count and the time of
+// the next attempt), or ended.
+fn recover_replay[&d](dv: &!d [int], kind: int, e: int, id: int, tries: int, next_at: int) -> [] int {
+    if kind == state.replay() {
+        rp_put(dv, e, id, 0 - 1);
+        return 0;
+    }
+    let r = rp_find(dv, e, id);
+    if r < 0 {
+        return 0;
+    }
+    let b = off_rp() + r * rp_stride();
+    if kind == state.replay_failed() {
+        dv[b + 3] = tries;
+        dv[b + 4] = next_at;
+    } else {
+        dv[b] = 0;
+    }
+    return 0;
+}
+
 // Read every outcome in `done` and apply it: this is how the cursors, the attempts and the times of the next attempts survive a
 // restart. Answers 0, or the number of records that were not outcomes (a log from something else), in which case the caller
 // refuses to start.
@@ -693,6 +865,10 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             let o = state.outcome_at(window, 0);
             if o.0 == 0 {
                 odd = odd + 1;
+            } else if o.0 >= state.replay() && o.0 <= state.replay_dead() {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                    recover_replay(dv, o.0, o.1, o.2, o.3, o.4);
+                }
             } else if o.0 == state.disabled() || o.0 == state.enabled() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
                     set_disabled(dv, o.1, o.0 == state.disabled());
@@ -772,10 +948,80 @@ fn request_for[&h, &b, &k](heap: &!h Heap, id: int, body: &b [byte], key: &k [by
     }
 }
 
+// An attempt at a replay ended (`docs/design.md` section 23): the same rules as a window's attempt (a `2xx` delivers, a `410` kills
+// the event and disables the endpoint, the schedule running out kills it, anything else waits for the next delay), recorded
+// under the kinds of a replay. Answers 1 if an outcome record was appended.
+fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int) -> [file_write, clock] int {
+    dv[c_attempts()] = dv[c_attempts()] + 1;
+    if dv[off_flying() + e] > 0 {
+        dv[off_flying() + e] = dv[off_flying() + e] - 1;
+    }
+    let r = rp_find(dv, e, id);
+    if r < 0 {
+        return 0;
+    }
+    let b = off_rp() + r * rp_stride();
+    dv[b + 6] = 0;
+    let tries = dv[b + 3] + 1;
+    var kind = state.replay_failed();
+    var next_at = 0;
+    if code >= 200 && code < 300 {
+        kind = state.replay_delivered();
+    } else if code == 410 || tries >= dv[off_sched()] + 1 {
+        kind = state.replay_dead();
+    } else {
+        next_at = clock_unix_ms(clock) + dv[off_sched() + tries];
+    }
+    var ok = 0;
+    if note_outcome(done, dv, kind, e, id, tries, next_at) == 1 {
+        ok = 1;
+        if kind == state.replay_failed() {
+            dv[b + 3] = tries;
+            dv[b + 4] = next_at;
+            dv[c_failed()] = dv[c_failed()] + 1;
+        } else {
+            dv[b] = 0;
+            if kind == state.replay_delivered() {
+                dv[c_delivered()] = dv[c_delivered()] + 1;
+            } else {
+                dv[c_dead()] = dv[c_dead()] + 1;
+            }
+        }
+    }
+    if ok == 1 && code == 410 && !is_disabled(dv, e) {
+        if note_endpoint(done, dv, state.disabled(), e) == 1 {
+            set_disabled(dv, e, true);
+        }
+    }
+    return ok;
+}
+
+// The offset in the events log of event `id`, or -1 if there is no such event.
+fn find_offset[&l, &w](lg: &!l log.Log, window: &!w [byte], id: int) -> [file_read] int {
+    var at = 0;
+    var going = true;
+    while going {
+        let r = log.read_at(lg, at, window);
+        if r.0 != 0 {
+            going = false;
+        } else if record.ms_of(window, 0) == id {
+            return at;
+        } else if record.ms_of(window, 0) > id {
+            going = false;
+        } else {
+            at = at + r.1;
+        }
+    }
+    return 0 - 1;
+}
+
 // An attempt ended: `code` is what `attempt` answered (an HTTP status, or a negative reason). Count it, write its outcome to
 // `done` (not yet flushed), apply it to the cells, and free the event to be tried again when its time comes. Answers 1 if an
 // outcome record was appended, 0 if the log refused it (then the cells are left alone and a restart repeats the attempt).
 fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int) -> [file_write, clock] int {
+    if id >= replay_base() {
+        return finish_replay(done, dv, clock, e, id - replay_base(), code);
+    }
     dv[c_attempts()] = dv[c_attempts()] + 1;
     dv[flight_at(e, id)] = 0;
     if dv[off_flying() + e] > 0 {
@@ -879,6 +1125,42 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
     return (table, finish_attempt(done, dv, clock, e, id, code));
 }
 
+// Start an attempt at the replay in entry `r`, for the endpoint in table slot `i`. Answers the table and 1 if an outcome was
+// written at once (the connection failed before it began), else 0.
+fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!q [byte], atab: conns.Table, i: int, r: int, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+    let base = off_rp() + r * rp_stride();
+    let id = dv[base + 2];
+    let e = dv[base + 1];
+    if dv[base + 5] < 0 {
+        dv[base + 5] = find_offset(lg, window, id);
+    }
+    dv[base + 6] = 1;
+    dv[off_flying() + e] = dv[off_flying() + e] + 1;
+    if dv[base + 5] < 0 {
+        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect()));
+    }
+    let r0 = log.read_at(lg, dv[base + 5], window);
+    if r0.0 != 0 || record.ms_of(window, 0) != id {
+        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect()));
+    }
+    let p = record.pair_at(window, record.first_pair(0));
+    let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
+    var table = atab;
+    var started = 0 - 1;
+    var code = attempt.no_connect();
+    borrow request as &qb in {
+        let (grown, slot, answer) = attempt.begin(heap, table, poller, net, endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i), buffer.bytes(qb), at, req, token0, e, id + replay_base(), clock_ms(clock) + dv[c_deadline()]);
+        table = grown;
+        started = slot;
+        code = answer;
+    }
+    buffer.drop(heap, request);
+    if started >= 0 {
+        return (table, 0);
+    }
+    return (table, finish_replay(done, dv, clock, e, id, code));
+}
+
 // Start attempts: for each endpoint in turn, starting from a different one each time, every event in its window that is not
 // final, not in flight and whose time has come gets one, up to `most_starts()` in all and `per_endpoint()` in flight for each
 // endpoint. Answers the table and how many outcomes were written at once.
@@ -906,6 +1188,22 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
             id = id + 1;
         }
         step = step + 1;
+    }
+    // Then the replays that are due, with what is left of the budget.
+    let now = clock_unix_ms(clock);
+    var rr = 0;
+    while rr < rp_cap() && budget > 0 {
+        let base = off_rp() + rr * rp_stride();
+        if dv[base] == 1 && dv[base + 6] == 0 && dv[base + 4] <= now && !is_disabled(dv, dv[base + 1]) && dv[off_flying() + dv[base + 1]] < per_endpoint() {
+            let i = index_of(dv, dv[base + 1]);
+            if i >= 0 {
+                budget = budget - 1;
+                let (grown, w) = start_replay(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, rr, token0);
+                table = grown;
+                written = written + w;
+            }
+        }
+        rr = rr + 1;
     }
     return (table, written);
 }
@@ -988,7 +1286,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..off_sched() + 17], ix, arena, clock_unix_ms(clock), out);
+                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..dv_size()], ix, arena, clock_unix_ms(clock), out);
                                     }
                                 }
                             }
