@@ -7,11 +7,11 @@ on:
 
 env:
   # The compiler and the log these sources are built with. A source file does not record which `std` it was written
-  # against, so the revisions are part of the contract. The compiler is lex-sys PR #190 (`clock_unix_ms`, which the signing
-  # timestamp needs); move this to its main once that is merged.
-  LEX_SYS_REV: 095e772b782b6c17bd64560dbd33af21ad7bf6f3
+  # against, so the revisions are part of the contract. The compiler is lex-sys main with `clock_unix_ms`, which the signing
+  # timestamp needs.
+  LEX_SYS_REV: 8ccf164e82c8e8b149483ab06411506f9c25d1bb
   # lexsys-log main, with the append path (`src/log.ls`).
-  LOG_REV: 2421a3717f2c4d74f02d61d4dc41bb9faedad590
+  LOG_REV: c0c3852541e927c3e893331207f1a0aaf184bc2e
 
 jobs:
   test:

@@ -207,7 +207,7 @@ H1c replaces the one fixed receiver with **several endpoints**, signs every deli
 
 **Signing (`src/sign.ls`)**: HMAC-SHA256 and base64 written in lex-sys on `std.crypto`'s SHA-256, no capability. Checked against the **reference Python library** (`standardwebhooks`) in 536 comparisons: every payload length around SHA-256's block boundaries, keys under, at and over the 64-byte HMAC block, a secret with and without its `whsec_` prefix, strict base64 decoding with seven malformed inputs. Ten mutants of `sign.ls` (the two pads, the long-key rule and its boundary, the separator, the prefix, padding, the tail, the length, the decoder's length check) are all killed. What the specification does not say, and the library settled: **the HMAC key is the base64-decoded secret**; and it publishes no test vectors, which is why an independent implementation, not a vector, is the oracle.
 
-**A gap found: lex-sys had no wall clock.** The timestamp header is Unix seconds and a receiver checks it, but `Clock` was monotonic only. Signing with that would have been refused as 50 years old, and the retry times persisted in the log need a clock that survives a restart. The fix is a builtin, `clock_unix_ms`, in lex-sys PR #190 (this repository's CI builds against that revision until it merges).
+**A gap found: lex-sys had no wall clock.** The timestamp header is Unix seconds and a receiver checks it, but `Clock` was monotonic only. Signing with that would have been refused as 50 years old, and the retry times persisted in the log need a clock that survives a restart. The fix is a builtin, `clock_unix_ms`, in lex-sys PR #190 (merged; this repository's CI builds against lex-sys `main` from that merge).
 
 **Tested.**
 
