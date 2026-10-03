@@ -5,12 +5,6 @@ on:
     branches: ["**"]
   pull_request:
 
-env:
-  # The compiler these sources are built with. A source file does not record which `std` it was written against, so the
-  # revision is part of the contract. It is lex-sys main with packages across repositories (#192): `vcs fetch` of a lock with
-  # an origin. The two libraries are not pinned here but in `deps/` (`scripts/lock.sh` moves them).
-  LEX_SYS_REV: f804ce7e6fcf5717ea52442bf648a1fe81090f98
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,10 +13,16 @@ jobs:
         with:
           path: hooks
 
+      # The compiler is whichever commit lex-sys.toml says these sources were written for: one place, which the compiler
+      # itself checks (`lex-sys build` refuses any other).
+      - name: Read the compiler pin from lex-sys.toml
+        id: pin
+        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
           repository: alpibrusl/lex-sys
-          ref: ${{ env.LEX_SYS_REV }}
+          ref: ${{ steps.pin.outputs.rev }}
           path: lex-sys
 
       - name: Cache the compiler
@@ -30,7 +30,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: lex-sys/target/release/lex-sys
-          key: lex-sys-${{ env.LEX_SYS_REV }}
+          key: lex-sys-${{ steps.pin.outputs.rev }}
 
       - name: Build lex-sys
         if: steps.compiler.outputs.cache-hit != 'true'
@@ -41,9 +41,9 @@ jobs:
         working-directory: hooks
         run: ../lex-sys/target/release/lex-sys fmt --check src
 
-      - name: Build the service and the fsync shim
+      - name: Install the libraries, build the service and the fsync shim
         working-directory: hooks
-        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh build/hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
 
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks

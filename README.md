@@ -20,9 +20,9 @@ attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) 
 
 ## Requirements
 
-- The **lex-sys** compiler at the revision this repository's CI builds with (below). It needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190),
-  `tcp_connect_start` (attempts that do not wait; #191) and `vcs fetch` of a lock with an origin (#192), all merged.
-- `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are locked in `deps/` and fetched, and checked, by `lex-sys vcs fetch`.
+- The **lex-sys** compiler at the commit `lex-sys.toml` names (`[package] lex-sys`); `lex-sys build` refuses any other. It needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190),
+  `tcp_connect_start` (attempts that do not wait; #191), a lock with an origin (#192) and the project file (#193).
+- `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are dependencies in `lex-sys.toml`, pinned to a commit each, and `lex-sys build` fetches and checks them.
 - Rust, to build the compiler; `gcc`, to build the small `fsync` shim the crash tests use.
 - To run the tests: `python3` and `pip install standardwebhooks` (the independent implementation signatures are checked against).
 
@@ -32,11 +32,12 @@ attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) 
 git clone https://github.com/alpibrusl/lex-sys                          # the compiler, and nothing else to clone
 git clone https://github.com/alpibrusl/lexsys-hooks && cd lexsys-hooks
 
-REV=$(sed -n 's/^ *LEX_SYS_REV: *//p' .github/workflows/ci.yml)           # the revision CI uses
+REV=$(sed -n 's/^lex-sys *= *"\(.*\)"/\1/p' lex-sys.toml)                 # the compiler these sources were written for
 (cd ../lex-sys && git fetch -q origin && git checkout "$REV" && cargo build --release -p lex-sys)
 export LEX_SYS=$PWD/../lex-sys/target/release/lex-sys
 
-scripts/build.sh                      # fetches the two locked libraries, then builds build/hooks (and the test probes and the fsync shim)
+lex-sys build                         # installs the two libraries in lex-sys.toml, then builds build/hooks and build/sign_probe
+scripts/build.sh                      # the same, and the fsync shim the crash tests preload
 
 # one endpoint: <id> <host> <port> <secret>
 mkdir -p /tmp/hooks-data
@@ -138,7 +139,7 @@ request held; after the turn one `flush` covers every append and the held reques
 ## Tests
 
 ```sh
-$LEX_SYS test tests/state_test.ls src/state.ls build/deps/*.ls --std     # the delivery window (after scripts/build.sh has fetched build/deps)
+$LEX_SYS test tests/state_test.ls src/state.ls build/deps/*.ls --std     # the delivery window (after `lex-sys build` has fetched build/deps)
 $LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
 $LEX_SYS test tests/idem_test.ls src/idem.ls --std                                                       # the idempotency-key index
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
@@ -167,9 +168,8 @@ src/state.ls       the per-endpoint cursor and window, and the outcome record
 src/idem.ls        the idempotency-key index (rebuilt from the log at start)
 src/endpoints.ls   the endpoints file
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
-scripts/build.sh   fetches the locked libraries and builds the service, the probes and the fsync shim
-scripts/lock.sh    moves the pins in deps/ to other commits
-deps/              log.lock and server.lock: which commits of lexsys-log and lex-sys the build uses
+lex-sys.toml       the project file: the compiler, the two libraries (each pinned to a commit) and the programs
+scripts/build.sh   `lex-sys build`, and the fsync shim the crash tests preload
 tests/             unit tests (lex-sys) and harnesses (Python)
 docs/design.md     the design and what building it found
 ```
