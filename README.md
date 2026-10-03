@@ -12,17 +12,16 @@ rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the 
 
 ## Status
 
-**Step H1c.** Working: durable ingest (`202` only after the flush that covers the event; requests that arrive together share one
+**Step H1d.** Working: durable ingest (`202` only after the flush that covers the event; requests that arrive together share one
 flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the
 reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next
-attempt) surviving a crash. **Not met:** a slow or silent endpoint still costs the others, because delivery shares the loop that
-serves ingest ([`docs/design.md`](docs/design.md) section 15 has the numbers). Not built: idempotency keys, endpoints and
+attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). Not built: idempotency keys, endpoints and
 attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) endpoints.
 
 ## Requirements
 
 - The **lex-sys** compiler and a checkout of **lexsys-log**, both at the revisions this repository's CI builds with (below).
-  The compiler needs `clock_unix_ms`, which the signing timestamp uses (lex-sys PR #190, merged).
+  The compiler needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190, merged) and `tcp_connect_start` (attempts that do not wait; lex-sys PR #191).
 - Rust, to build the compiler; `gcc`, to build the small `fsync` shim the crash tests use.
 - To run the tests: `python3` and `pip install standardwebhooks` (the independent implementation signatures are checked against).
 
@@ -92,7 +91,7 @@ Webhook("whsec_...").verify(body, {"webhook-id": "evt_1", "webhook-timestamp": "
 ```
 
 **Several endpoints, and a faster schedule for trying things out.** `endpoints.conf` takes one endpoint a line (`#` comments and
-blank lines are ignored); the optional third argument replaces the retry delays, in milliseconds:
+blank lines are ignored); the optional third argument replaces the retry delays, in milliseconds, and the fourth the time an attempt may take:
 
 ```
 # <id> <host> <port> <secret>
@@ -102,13 +101,14 @@ blank lines are ignored); the optional third argument replaces the retry delays,
 
 ```sh
 build/hooks 8080 /tmp/hooks-data 100,200,400,800    # four retries, then a dead letter after the fifth attempt
+build/hooks 8080 /tmp/hooks-data 100,200,400,800 500  # ... and give up on an attempt after 500 ms (the default is 2,000)
 ```
 
 ## HTTP API
 
 | | |
 |---|---|
-| `POST /events` | a JSON object with a string `"type"`; answers `202 {"id":N}` after the flush, `422` for a body that is not one, `503` if the log is broken |
+| `POST /events` | a JSON object with a string `"type"`; answers `202 {"id":N}` after the flush, `422` for a body that is not one, `413` for one over 65,500 bytes, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
 | `GET /stats` | `{"endpoints","attempts","delivered","failed","dead"}` |
 | `GET /healthz` | `{"ok":true}` |
@@ -122,10 +122,7 @@ attempt, and then the event is a dead letter for that endpoint.
 ## How it works
 
 One thread, one poller. An accepted event is appended to a [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) segment and its
-request held; after the turn one `flush` covers every append and the held requests are answered. Delivery then runs in the same
-loop: each endpoint has a cursor (every event up to it is delivered or dead) and a window of events above it that finished out
-of order or are waiting for a retry, so a failing event does not hold up the ones after it. What happened to each attempt goes to
-a second log, `delivery.seg`, which a restart replays; the time of the next attempt is a Unix time, so it survives too.
+request held; after the turn one `flush` covers every append and the held requests are answered. Delivery runs in the same loop without holding it: each attempt is a small state machine (connecting, sending, reading) whose connection is watched on the server's own poller, so up to 64 are in flight together and a slow, silent or unreachable endpoint costs the others almost nothing. Each endpoint has a cursor (every event up to it is delivered or dead) and a window of events above it that finished out of order or are waiting for a retry, so a failing event does not hold up the ones after it. What happened to each attempt goes to a second log, `delivery.seg`, which a restart replays; the time of the next attempt is a Unix time, so it survives too.
 [`docs/design.md`](docs/design.md) has the semantics, the scenario fixed before the build, and what each step found.
 
 ## Tests
@@ -134,9 +131,9 @@ a second log, `delivery.seg`, which a restart replays; the time of the next atte
 $LEX_SYS test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std     # the delivery window
 $LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
-python3 tests/attempt_test.py build/attempt_probe  # one delivery attempt against seven kinds of receiver
+python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
 python3 tests/retry_test.py build/hooks            # the retry delays, also across restarts, and the dead letter
-python3 tests/isolation_test.py build/hooks        # what a stalled or slow endpoint costs the others (reports; gates two cases)
+python3 tests/isolation_test.py build/hooks        # what a silent, slow or unreachable endpoint costs the others (gated)
 python3 tests/chaos.py build/hooks 2000 8 50       # kill -9 as a power cut: no acknowledged event may be lost
 python3 tests/delivery.py build/hooks 300 4 150    # three endpoints, signed, retried and dead-lettered, with the service killed
 ```
@@ -147,13 +144,13 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 ## Documentation
 
 - [`docs/design.md`](docs/design.md): what this is for, which store owns which fact, the delivery semantics, the test scenario
-  fixed before the build, the gaps predicted, and sections 13 to 15 on what building each step showed.
+  fixed before the build, the gaps predicted, and sections 13 to 16 on what building each step showed.
 
 ## Layout
 
 ```
 src/hooks.ls       the service: routes, the loop, delivery
-src/deliver.ls     one delivery attempt: connect, send, read a status line with a deadline
+src/attempt.ls     delivery attempts that do not hold the loop: connect, send, read a status line, each waiting for the poller
 src/state.ls       the per-endpoint cursor and window, and the outcome record
 src/endpoints.ls   the endpoints file
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
@@ -164,9 +161,7 @@ docs/design.md     the design and what building it found
 
 ## Limitations
 
-One process, one thread; delivery blocks it (`connect` to an unanswered address for as long as the kernel waits). Endpoints come
-from a file read at start, not a database; hostnames are resolved by a blocking call; no `https`. At most 16 endpoints, and an
-endpoint more than 1,024 events behind is not served until it catches up. `delivery.seg` is never compacted. Not for production.
+One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, not a database; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 16 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. Not for production.
 
 ## Contributing
 

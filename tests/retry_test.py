@@ -25,6 +25,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
 
+http.server.HTTPServer.request_queue_size = 128   # the default is 5: a burst of connections would lose a SYN and wait a second
+
 
 class Receiver:
     def __init__(self, fail_first):

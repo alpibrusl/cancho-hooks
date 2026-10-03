@@ -7,9 +7,9 @@ on:
 
 env:
   # The compiler and the log these sources are built with. A source file does not record which `std` it was written
-  # against, so the revisions are part of the contract. The compiler is lex-sys main with `clock_unix_ms`, which the signing
-  # timestamp needs.
-  LEX_SYS_REV: 8ccf164e82c8e8b149483ab06411506f9c25d1bb
+  # against, so the revisions are part of the contract. The compiler is lex-sys PR #191 (`tcp_connect_start`, which attempts that do not
+  # wait need); move this to its main once that is merged.
+  LEX_SYS_REV: 8d4966f926d60a4378b1271d7e32520e5d234b9a
   # lexsys-log main, with the append path (`src/log.ls`).
   LOG_REV: c0c3852541e927c3e893331207f1a0aaf184bc2e
 
@@ -68,13 +68,13 @@ jobs:
 
       - name: One delivery attempt, against each kind of receiver
         working-directory: hooks
-        run: python3 tests/attempt_test.py build/attempt_probe
+        run: python3 tests/attempt_test.py build/hooks
 
       - name: The retry schedule, across restarts
         working-directory: hooks
         run: python3 tests/retry_test.py build/hooks
 
-      - name: A stalled or slow endpoint, and what it costs the others
+      - name: A stalled, slow or blackholed endpoint, and what it costs the others
         working-directory: hooks
         run: python3 tests/isolation_test.py build/hooks
 

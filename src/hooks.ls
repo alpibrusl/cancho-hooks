@@ -2,7 +2,7 @@ edition 5;
 
 // `hooks` -- a webhook delivery service (`docs/design.md`).
 //
-//     hooks <port> <data-dir>
+//     hooks <port> <data-dir> [<retry delays in ms, comma separated> [<attempt deadline in ms>]]
 //
 // This is step H1a: **ingest**. `POST /events` takes a JSON object with a string `"type"`, appends it to a durable log
 // (`lexsys-log`'s `log.ls`), and answers `202` with its id **only after the flush that covers it**. Requests that arrive in
@@ -30,7 +30,8 @@ import std.route;
 import http.server;
 import log;
 import record;
-import deliver;
+import attempt;
+import std.conns;
 import endpoints;
 import sign;
 import state;
@@ -216,6 +217,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s](heap: &!h Heap, router: &r
         let end = record.put_pair(scratch, mut_pos, "event", body);
         let total = record.seal(scratch, 0, end);
         let code = log.append(lg, scratch[0..total], ms, 0);
+        if code == log.too_long() {
+            return server.failure(heap, out, 413, "the event is too large", keep);
+        }
         if code != 0 {
             return server.failure(heap, out, 503, "the event could not be stored", keep);
         }
@@ -300,7 +304,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 //     table    96    the endpoints, six integers each (`endpoints.ls`)
 //     cur      16    per endpoint id: every event up to this one is final
 //     sched    17    the retry schedule: the number of delays, then the delays in ms
-//     cool     16    per endpoint id: no attempt before this time (Unix ms) after a timeout or a failed connect
+//     flying   16    per endpoint id: how many attempts are in flight
 //     offs     1024  where in the events log each event of the window starts, by `id % window`
 //     cells    ...   `state.cells(16)`: final / attempts / next attempt, per endpoint id and `id % window`
 
@@ -340,6 +344,11 @@ fn c_dead() -> [] int {
     return 8;
 }
 
+// How long an attempt may take in all, in ms.
+fn c_deadline() -> [] int {
+    return 9;
+}
+
 fn off_table() -> [] int {
     return 16;
 }
@@ -352,7 +361,7 @@ fn off_sched() -> [] int {
     return 128;
 }
 
-fn off_cool() -> [] int {
+fn off_flying() -> [] int {
     return 145;
 }
 
@@ -364,29 +373,32 @@ fn off_cells() -> [] int {
     return 145 + state.span();
 }
 
-fn dv_size() -> [] int {
+// One flag per cell: is an attempt at this (endpoint, event) in flight? (An event with one is not started again.)
+fn off_flight() -> [] int {
     return off_cells() + state.cells(state.max_endpoints());
 }
 
-// The most attempts one turn makes, so a long backlog does not starve the requests behind it.
-fn most_per_turn() -> [] int {
+fn dv_size() -> [] int {
+    return off_flight() + state.max_endpoints() * state.span();
+}
+
+fn flight_at(e: int, id: int) -> [] int {
+    return off_flight() + e * state.span() + id % state.span();
+}
+
+// The most attempts one turn starts, so a long backlog does not starve the requests behind it.
+fn most_starts() -> [] int {
     return 16;
 }
 
-// How long an attempt waits for the receiver's status line.
-fn attempt_ms() -> [] int {
+// The most attempts one endpoint has in flight together: a stalled endpoint holds this many slots and no more.
+fn per_endpoint() -> [] int {
+    return 8;
+}
+
+// How long an attempt may take in all (connect, send, and the wait for the status line) unless the fourth argument says.
+fn default_deadline_ms() -> [] int {
     return 2000;
-}
-
-// After an attempt that timed out or could not connect, the endpoint is left alone this long. Delivery runs in the loop that
-// serves ingest, so every such attempt costs everyone up to `attempt_ms()`; without this, each new event would cost it again.
-fn cool_ms() -> [] int {
-    return 5000;
-}
-
-// A turn starts no new attempt once it has spent this long (an attempt in progress is not interrupted).
-fn turn_ms() -> [] int {
-    return 250;
 }
 
 // The Standard Webhooks schedule (https://www.standardwebhooks.com): after the first attempt, retries after 5 s, 5 min, 30 min,
@@ -554,26 +566,16 @@ fn request_for[&h, &b, &k](heap: &!h Heap, id: int, body: &b [byte], key: &k [by
     }
 }
 
-// One attempt at event `id` for the endpoint in table slot `i`, and its outcome written to `done` (not yet flushed). Answers 1,
-// or 0 if the turn should stop (the event cannot be read, or the outcome log refused the record).
-fn deliver_one[&h, &l, &g, &w, &d, &b, &n, &k](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, i: int, id: int) -> [heap, file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] int {
-    let r = log.read_at(lg, dv[off_offs() + id % state.span()], window);
-    if r.0 != 0 || record.ms_of(window, 0) != id {
-        return 0;
-    }
-    let p = record.pair_at(window, record.first_pair(0));
-    let e = endpoints.id_of(dv[off_table()..off_table() + endpoints.table_size()], i);
-    let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
-    var code = 0;
-    borrow request as &qb in {
-        code = deliver.attempt(net, endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i), buffer.bytes(qb), clock, attempt_ms());
-    }
-    buffer.drop(heap, request);
+// An attempt ended: `code` is what `attempt` answered (an HTTP status, or a negative reason). Count it, write its outcome to
+// `done` (not yet flushed), apply it to the cells, and free the event to be tried again when its time comes. Answers 1 if an
+// outcome record was appended, 0 if the log refused it (then the cells are left alone and a restart repeats the attempt).
+fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int) -> [file_write, clock] int {
     dv[c_attempts()] = dv[c_attempts()] + 1;
-    if code == deliver.no_connect() || code == deliver.timed_out() {
-        dv[off_cool() + e] = clock_unix_ms(clock) + cool_ms();
+    dv[flight_at(e, id)] = 0;
+    if dv[off_flying() + e] > 0 {
+        dv[off_flying() + e] = dv[off_flying() + e] - 1;
     }
-    let tries = state.attempts(dv[off_cells()..dv_size()], e, id) + 1;
+    let tries = state.attempts(dv[off_cells()..off_flight()], e, id) + 1;
     var kind = state.failed();
     var next_at = 0;
     if code >= 200 && code < 300 {
@@ -589,7 +591,7 @@ fn deliver_one[&h, &l, &g, &w, &d, &b, &n, &k](heap: &!h Heap, lg: &!l log.Log, 
         let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, id, tries, next_at);
         if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
             dv[c_seq()] = dv[c_seq()] + 1;
-            state.apply(dv[off_cells()..dv_size()], dv[off_cur()..off_cur() + state.max_endpoints()], e, kind, id, tries, next_at);
+            state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, kind, id, tries, next_at);
             if kind == state.delivered() {
                 dv[c_delivered()] = dv[c_delivered()] + 1;
             } else if kind == state.dead() {
@@ -603,52 +605,124 @@ fn deliver_one[&h, &l, &g, &w, &d, &b, &n, &k](heap: &!h Heap, lg: &!l log.Log, 
     return ok;
 }
 
-// One turn of delivery: for each endpoint in turn, starting from a different one each time, every event in its window that is
-// not final and whose time has come gets an attempt, up to `most_per_turn()` attempts in all. The outcomes are flushed once.
-fn deliver_turn[&h, &l, &g, &w, &d, &b, &n, &k](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock) -> [heap, file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] int {
-    let count = dv[c_endpoints()];
-    let started = clock_ms(clock);
-    extend_scan(lg, window, dv);
-    var budget = most_per_turn();
+// The poller woke the attempt in `slot`: move it along, and if it ended, free its slot and record how. Answers 1 if an outcome
+// was written.
+fn settle[&g, &d, &k, &t, &p, &a, &r, &s](done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], slot: int, token0: int) -> [file_write, clock, conn_read, conn_write, poll] int {
+    let code = attempt.advance(atab, poller, at, req, resp, slot, token0);
+    if code == attempt.pending() {
+        return 0;
+    }
+    let e = attempt.endpoint_of(at, slot);
+    let id = attempt.event_of(at, slot);
+    attempt.finish(atab, at, slot);
+    return finish_attempt(done, dv, clock, e, id, code);
+}
+
+// End every attempt that has run past its deadline, as a timeout. Answers how many outcomes were written.
+fn sweep[&g, &d, &k, &t, &a](done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, at: &!a [int]) -> [file_write, clock] int {
+    let now = clock_ms(clock);
     var written = 0;
-    var going = true;
+    var slot = 0;
+    while slot < attempt.slots() {
+        if attempt.expired(at, slot, now) {
+            let e = attempt.endpoint_of(at, slot);
+            let id = attempt.event_of(at, slot);
+            attempt.finish(atab, at, slot);
+            written = written + finish_attempt(done, dv, clock, e, id, attempt.timed_out());
+        }
+        slot = slot + 1;
+    }
+    return written;
+}
+
+// Start an attempt at event `id` for the endpoint in table slot `i`. Answers the table and 1 if an outcome was written at once
+// (the connection failed before it began), else 0.
+fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, i: int, id: int, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+    let r0 = log.read_at(lg, dv[off_offs() + id % state.span()], window);
+    if r0.0 != 0 || record.ms_of(window, 0) != id {
+        return (atab, 0);
+    }
+    let p = record.pair_at(window, record.first_pair(0));
+    let e = endpoints.id_of(dv[off_table()..off_table() + endpoints.table_size()], i);
+    let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
+    var table = atab;
+    var started = 0 - 1;
+    var code = attempt.no_connect();
+    borrow request as &qb in {
+        let (grown, slot, answer) = attempt.begin(heap, table, poller, net, endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i), buffer.bytes(qb), at, req, token0, e, id, clock_ms(clock) + dv[c_deadline()]);
+        table = grown;
+        started = slot;
+        code = answer;
+    }
+    buffer.drop(heap, request);
+    if started >= 0 {
+        dv[flight_at(e, id)] = 1;
+        dv[off_flying() + e] = dv[off_flying() + e] + 1;
+        return (table, 0);
+    }
+    // It could not even begin: that is an outcome like any other, and the event is not in flight.
+    dv[flight_at(e, id)] = 1;
+    dv[off_flying() + e] = dv[off_flying() + e] + 1;
+    return (table, finish_attempt(done, dv, clock, e, id, code));
+}
+
+// Start attempts: for each endpoint in turn, starting from a different one each time, every event in its window that is not
+// final, not in flight and whose time has come gets one, up to `most_starts()` in all and `per_endpoint()` in flight for each
+// endpoint. Answers the table and how many outcomes were written at once.
+fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+    let count = dv[c_endpoints()];
+    extend_scan(lg, window, dv);
+    var table = atab;
+    var budget = most_starts();
+    var written = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
     var step = 0;
-    while step < count && going {
+    while step < count && budget > 0 {
         let i = (turn + step) % count;
         let e = dv[off_table() + i * endpoints.stride()];
         let now = clock_unix_ms(clock);
         var id = dv[off_cur() + e] + 1;
-        if now < dv[off_cool() + e] {
-            id = dv[c_scanned()] + 1;
-        }
-        while going && budget > 0 && id <= dv[c_scanned()] && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) {
-            if !state.is_final(dv[off_cells()..dv_size()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && state.next_at(dv[off_cells()..dv_size()], e, id) <= now {
-                if clock_ms(clock) - started > turn_ms() {
-                    going = false;
-                } else {
-                    budget = budget - 1;
-                    if deliver_one(heap, lg, done, window, dv, blob, net, clock, i, id) == 1 {
-                        written = written + 1;
-                        if clock_unix_ms(clock) < dv[off_cool() + e] {
-                            // This endpoint just timed out or refused: leave it for now.
-                            id = dv[c_scanned()];
-                        }
-                    } else {
-                        going = false;
-                    }
-                }
+        while budget > 0 && id <= dv[c_scanned()] && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
+            if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
+                budget = budget - 1;
+                let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, token0);
+                table = grown;
+                written = written + w;
             }
             id = id + 1;
         }
         step = step + 1;
     }
+    return (table, written);
+}
+
+// One turn of delivery. `ev` holds the `(token, readiness)` pairs the poller reported for handles that are not the server's:
+// the attempts' connections. Move each of those attempts along, end the ones past their deadline, start new ones, and flush the
+// outcomes once. Answers the attempts' connection table and how many outcomes were written.
+fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], ev: &e [int], nev: int, token0: int, atab: conns.Table) -> [heap, file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] (conns.Table, int) {
+    var table = atab;
+    var written = 0;
+    var j = 0;
+    while j < nev {
+        let slot = ev[2 * j] - token0;
+        if attempt.busy(at, slot) {
+            borrow mut table as &!tw in {
+                written = written + settle(done, dv, clock, tw, poller, at, req, resp, slot, token0);
+            }
+        }
+        j = j + 1;
+    }
+    borrow mut table as &!tw in {
+        written = written + sweep(done, dv, clock, tw, at);
+    }
+    let (grown, started) = start_attempts(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, token0);
+    written = written + started;
     if written > 0 {
         // What a restart resumes from; a lost tail only means a repeat.
         log.flush(done);
     }
-    return written;
+    return (grown, written);
 }
 
 // ---------------------------------------------------------------------
@@ -662,14 +736,21 @@ fn deliver_turn[&h, &l, &g, &w, &d, &b, &n, &k](heap: &!h Heap, lg: &!l log.Log,
 fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
     match poller_new() {
         Polling::Ok(p) => {
-            var srv = server.open(heap, p, listener, 16384, 0, 9);
+            var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
             var widest = 1;
             if route.most_params(router) > 1 {
                 widest = route.most_params(router);
             }
             let params = box_slice(heap, 2 * widest, 0);
-            let scratch = box_slice(heap, 20480, byte_of(0));
+            let scratch = box_slice(heap, max_len() + 256, byte_of(0));
             let note = box_slice(heap, 1, 0);
+            // The delivery attempts in flight: their state, request and response bytes, the poller events that concern them, and
+            // their connections.
+            let at = box_slice(heap, attempt.at_size(), 0);
+            let req = box_slice(heap, attempt.req_size(), byte_of(0));
+            let resp = box_slice(heap, attempt.resp_size(), byte_of(0));
+            let events = box_slice(heap, 256, 0);
+            var atab = conns.empty(heap, attempt.slots());
             let tickets = box_slice(heap, most_held(), 0);
             let ids = box_slice(heap, most_held(), 0);
             let keeps = box_slice(heap, most_held(), 0);
@@ -769,9 +850,41 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v](heap: &!h Heap, router: &r route.
                     }
                 }
                 if dv[c_endpoints()] > 0 {
-                    deliver_turn(heap, lg, done, window, dv, blob, net, clock);
+                    var token0 = 0;
+                    var nev = 0;
+                    borrow srv as &sr in {
+                        token0 = server.first_token(sr);
+                        nev = server.foreign_count(sr);
+                        if nev > 128 {
+                            nev = 128;
+                        }
+                        borrow mut events as &!ew in {
+                            var j = 0;
+                            while j < 2 * nev {
+                                contents(ew)[j] = server.foreign(sr)[j];
+                                j = j + 1;
+                            }
+                        }
+                    }
+                    borrow mut srv as &!sw in {
+                        borrow mut at as &!aw in {
+                            borrow mut req as &!qw in {
+                                borrow mut resp as &!pw in {
+                                    borrow events as &er in {
+                                        let (grown, written) = delivery_turn(heap, lg, done, window, dv, blob, net, clock, server.poller(sw), contents(aw), contents(qw), contents(pw), contents(er), nev, token0, atab);
+                                        atab = grown;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            conns.drop(heap, atab);
+            unbox_slice(heap, at);
+            unbox_slice(heap, req);
+            unbox_slice(heap, resp);
+            unbox_slice(heap, events);
             server.close(heap, srv);
             buffer.drop(heap, out);
             unbox_slice(heap, params);
@@ -836,8 +949,12 @@ fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [by
 
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // scan of the events log positioned at the slowest endpoint. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte]) -> [heap, fs_read(""), file_read] int {
+fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int) -> [heap, fs_read(""), file_read] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
+    dv[c_deadline()] = default_deadline_ms();
+    if deadline_ms > 0 {
+        dv[c_deadline()] = deadline_ms;
+    }
     if len(schedule) > 0 && parse_schedule(schedule, dv[off_sched()..off_sched() + 17]) < 0 {
         return 14;
     }
@@ -871,6 +988,7 @@ fn main(world: World) -> [] int {
         var dir_len = 0;
         let sched_buf = alloc_slice[a](256, byte_of(0));
         var sched_len = 0;
+        var deadline_ms = 0;
         borrow args as &g in {
             if arg_count(g) > 1 {
                 port = number_of(arg(g, 1));
@@ -897,6 +1015,9 @@ fn main(world: World) -> [] int {
                     sched_len = len(sc);
                 }
             }
+            if arg_count(g) > 4 {
+                deadline_ms = number_of(arg(g, 4));
+            }
         }
         if port > 0 && port < 65536 && dir_len > 0 {
             status = 3;
@@ -922,7 +1043,7 @@ fn main(world: World) -> [] int {
                                             borrow mut blob as &!bw in {
                                                 borrow mut lg as &!lw in {
                                                     borrow mut dl as &!dw in {
-                                                        status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len]);
+                                                        status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms);
                                                         if status == 0 {
                                                             borrow net as &nn in {
                                                                 match tcp_listen(nn, port, 1024, 0) {
