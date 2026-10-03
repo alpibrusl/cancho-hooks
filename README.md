@@ -162,9 +162,7 @@ request held; after the turn one `flush` covers every append and the held reques
 ## Tests
 
 ```sh
-$LEX_SYS test tests/state_test.ls src/state.ls build/deps/*.ls --std     # the delivery window (after `lex-sys build` has fetched build/deps)
-$LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
-$LEX_SYS test tests/idem_test.ls src/idem.ls --std                                                       # the idempotency-key index
+$LEX_SYS test                                      # the four unit-test sets of lex-sys.toml (state, endpoints, idem, config)
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 python3 tests/config_test.py build/hooks           # settings: a file, flags, which wins, and every refusal
 python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
