@@ -154,4 +154,43 @@ H1a is ingest only: `POST /events` appends to `lexsys-log`'s `log.ls` and answer
 * **A region's arena is 64 KiB**, so the 68 KiB scan window and the 20 KiB record scratch are heap boxes (`lexsys-log` section 12).
 * **A `res` enum cannot be assigned over**, so a function that opens a log returns from inside the `match` instead of building an answer in a variable. Not a bug; it shaped the code.
 
-**Not built yet:** endpoints, delivery, retries, signing, idempotency. Next is H1b, delivery to one fixed receiver, which will meet the first predicted gap (a blocking connect).
+**Not built in H1a:** endpoints, delivery, retries, signing, idempotency. H1b, delivery to one fixed receiver, is section 14.
+
+## 14. What building the second step showed
+
+H1b delivers to **one fixed receiver** given on the command line (`hooks <port> <dir> <host> <port>`). After each turn of the loop the service sends the events the log has flushed, in order, one at a time, to `POST /hook` with the event as the body and `webhook-id: evt_<id>`, and counts an event delivered on any `2xx`. `src/deliver.ls` is one attempt: `tcp_connect`, send, then wait for a status line for at most 2 s with a `Poller` on the non-blocking connection.
+
+**How delivery is remembered.** A second log, `delivered.seg`, gets one record per delivered event, and the record's id *is* the event's id. Because delivery is strictly in order, the last record is the cursor, and recovering that log is all a restart needs. The record is written **after** the receiver answered and flushed once per turn, so a crash between the answer and the flush redelivers (at most one turn's worth, 16): at least once, never zero.
+
+**Tested (`tests/attempt_test.py`, `tests/delivery.py`).** The attempt alone, against seven receivers: `204`, `500`, a receiver that never answers (deadline at 1,003 ms), one that closes without answering, one that sends junk, one that splits the status line across two packets (`200` after 303 ms), and a port nothing listens on. All answer what was expected. The delivery run: a receiver answering `500` to 20% of requests and stalling past the deadline on 1%, a service killed as a power cut at least 100 times while 300 events are posted and drained, then **no more kills** and the backlog must drain within 90 s, then the service must go quiet, then one last power cut must leave the cursor where it was and a restart must deliver nothing. Result on this machine: 101 kills, 300 acknowledged events, all answered `2xx` by the receiver with the bytes the client sent, first deliveries in id order, 393 requests in all (93 repeats, of which 9 came after a `2xx` the receiver had given: a crash before the cursor flush, or a stall that answered after the deadline).
+
+**Mutants, and what they said about the harness.** Five mutants of `src/hooks.ls` in scratch copies, never committed. All five are killed by the harness as it now stands, but **two of them survived its first version**, and that is the useful part:
+
+| mutant | first version of the harness | now |
+|---|---|---|
+| treat any status as delivered (a `500` counts) | **survived**: it checked that the receiver *saw* each event, and a request that got a `500` is seen | killed: 64 acknowledged events never answered `2xx` |
+| after a success, do not advance past the event | **survived**: every kill restarted the service, which rescans the log and so un-stuck it; it made one event of progress per restart | killed: the kill-free drain phase; the cursor stops at 36 of 300 |
+| cursor record written but never flushed | passed every at-least-once check, as it should (a repeat is allowed) | killed only by the last stage: a power cut took the cursor from 300 back to 110 |
+| restart scans the events log from offset 0 instead of after the cursor | killed (starvation: 293 events never delivered; the service redelivered events 1 to 7 on every start) | killed |
+| restart ignores the cursor, starts at 0 | not run on the first version | killed: the cursor is at 6 of 300 after the kill-free phase |
+
+The lesson is the same as in section 13: a property that tolerates a behaviour (repeats are allowed) cannot also detect it, so each such property needs a check of its own that does not tolerate it.
+
+**The first predicted gap, measured (`tests/stall_probe.py`, a report and not a gate).** Delivery runs in the same loop as ingest, so a receiver that is slow is slow for everyone. `POST /events` latency while the receiver is:
+
+| receiver | p50 | worst | |
+|---|---|---|---|
+| healthy | 1.8 ms | 89 ms | |
+| accepts and never answers | 1.6 ms | 2,004 ms | 10 of 200 posts took over 500 ms; each is one attempt waiting out its 2 s deadline |
+| accept queue full (the SYN is dropped) | 10,000 ms | 10,000 ms | 5 of 6 posts hit the probe's own 10 s limit; the real wait is the kernel's connect timeout, **not measured** and commonly over a minute |
+
+So criterion 3 (a stalled receiver does not stall the others) **fails by construction**, as predicted, and the numbers say how: the read deadline bounds the damage at 2 s per attempt; the blocking `connect` does not bound it at all. Non-blocking connect (and name resolution, which this step does not meet because it dials an IP) is the next piece of lex-sys this project needs.
+
+**Other findings.**
+
+* **The cursor is stricter than section 4 allows.** One cursor means a failing event blocks every later one: head-of-line blocking, which section 4 says v1 avoids ("the retry of event N and the first attempt of event N+1 are not ordered"). With one receiver the two designs coincide; with several endpoints a per-endpoint state that is not a single number is needed, and `delivered.seg` becomes a set of (endpoint, event) records. This is H1c's first job, not a detail.
+* **`poller_new` per attempt** costs an epoll descriptor each time. Fine at this rate; the poller belongs to the delivery loop once it is a loop with several attempts in flight.
+* **A blocking write** after connect would stall on a receiver whose window is full; the bodies here fit the socket buffer, so it was not reached.
+* **`log.read_at` reads only below the synced mark**, which is what stopped the delivery loop from sending an event whose `202` had not been given yet; nothing had to be added for that.
+
+**Not verified here:** more than one receiver; signing; the retry schedule (the pause is a fixed placeholder, 200 ms times the failures in a row, capped at 2 s); the kernel's connect timeout; throughput of delivery; behaviour with a backlog larger than a turn (16) under kills.

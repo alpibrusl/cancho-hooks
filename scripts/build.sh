@@ -19,8 +19,10 @@ LEX_SYS_DIR=${LEX_SYS_DIR:-$here/../lex-sys}
 LOG_DIR=${LOG_DIR:-$here/../lexsys-log}
 out=${1:-$here/build/hooks}
 mkdir -p "$(dirname "$out")"
-"$LEX_SYS" build "$here/src/hooks.ls" \
+"$LEX_SYS" build "$here/src/hooks.ls" "$here/src/deliver.ls" \
   "$LEX_SYS_DIR/packages/http-server/server.ls" \
   "$LOG_DIR/src/log.ls" "$LOG_DIR/src/segment.ls" "$LOG_DIR/src/record.ls" "$LOG_DIR/src/crc.ls" \
   --std -o "$out"
 gcc -shared -fPIC -O2 -o "$(dirname "$out")/fsync_shim.so" "$here/tests/fsync_shim.c" -ldl
+# The probe that tests one delivery attempt on its own (tests/attempt_test.py).
+"$LEX_SYS" build "$here/tests/attempt_probe.ls" "$here/src/deliver.ls" --std -o "$(dirname "$out")/attempt_probe"

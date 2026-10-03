@@ -106,8 +106,9 @@ def read_log(data):
 # ---- the service under chaos -----------------------------------------------------------------------------------
 
 class Service:
-    def __init__(self, port, datadir):
+    def __init__(self, port, datadir, extra=()):
         self.port, self.datadir, self.proc, self.starts = port, datadir, None, 0
+        self.extra = [str(a) for a in extra]
         self.lock = threading.Lock()
 
     def start(self):
@@ -115,7 +116,7 @@ class Service:
             env = dict(os.environ)
             if POWER_LOSS:
                 env["LD_PRELOAD"] = os.path.abspath(SHIM)
-            self.proc = subprocess.Popen([BIN, str(self.port), self.datadir], stderr=subprocess.PIPE,
+            self.proc = subprocess.Popen([BIN, str(self.port), self.datadir, *self.extra], stderr=subprocess.PIPE,
                                          stdout=subprocess.DEVNULL, env=env)
             self.starts += 1
             self.proc.stderr.readline()  # "listening"
@@ -129,8 +130,11 @@ class Service:
                 self.power_cut()
 
     def power_cut(self):
-        """Leave the file as a power cut could: all of what the last fsync covered, a random part of the rest."""
-        path = os.path.join(self.datadir, "events.seg")
+        """Leave each file as a power cut could: all of what the last fsync covered, a random part of the rest."""
+        for name in ("events.seg", "delivered.seg"):
+            self.cut_file(os.path.join(self.datadir, name))
+
+    def cut_file(self, path):
         if not os.path.exists(path):
             return
         side = path + ".synced"

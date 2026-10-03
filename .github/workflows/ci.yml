@@ -52,6 +52,14 @@ jobs:
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh build/hooks
 
+      - name: One delivery attempt, against each kind of receiver
+        working-directory: hooks
+        run: python3 tests/attempt_test.py build/attempt_probe
+
       - name: No acknowledged event is lost (kill -9 as a power cut)
         working-directory: hooks
         run: python3 tests/chaos.py build/hooks 2000 8 50
+
+      - name: Every acknowledged event is delivered, with the receiver failing and the service killed
+        working-directory: hooks
+        run: python3 tests/delivery.py build/hooks 300 4 150
