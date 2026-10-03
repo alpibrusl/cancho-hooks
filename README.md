@@ -44,7 +44,7 @@ mkdir -p /tmp/hooks-data
 echo "0 127.0.0.1 9000 whsec_$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(24)).decode())')" \
   > /tmp/hooks-data/endpoints.conf
 
-build/hooks 8080 /tmp/hooks-data &    # port, data directory
+build/hooks --port 8080 --dir /tmp/hooks-data &
 curl -XPOST -d '{"type":"user.created","id":7}' localhost:8080/events      # {"id":1}, after the flush
 ```
 
@@ -89,8 +89,8 @@ Webhook("whsec_...").verify(body, {"webhook-id": "evt_1", "webhook-timestamp": "
                                    "webhook-signature": "v1,5Zm7..."})   # raises if the signature or timestamp is wrong
 ```
 
-**Several endpoints, and a faster schedule for trying things out.** `endpoints.conf` takes one endpoint a line (`#` comments and
-blank lines are ignored); the optional third argument replaces the retry delays, in milliseconds, and the fourth the time an attempt may take:
+**Several endpoints.** `endpoints.conf`, in the data directory, takes one endpoint a line (`#` comments and blank lines are
+ignored). It is its own file because it holds the secrets: give it the permissions secrets need, and keep it out of the settings.
 
 ```
 # <id> <host> <port> <secret>
@@ -98,11 +98,33 @@ blank lines are ignored); the optional third argument replaces the retry delays,
 1 127.0.0.1 9001 whsec_...
 ```
 
+**Settings**, from a file, from flags, or both (`docs/design.md` section 20). `--port` and `--dir` are required; the rest have defaults:
+
+| setting | default | what it is |
+|---|---|---|
+| `port` | (required) | the TCP port, 1 to 65535 |
+| `dir` | (required) | the data directory: the logs, and `endpoints.conf` |
+| `schedule` | `5000,300000,...` (nine delays, to a day) | retry delays in ms, comma separated; after the last, a dead letter |
+| `deadline-ms` | `2000` | how long one delivery attempt may take |
+| `window-ms` | `86400000` | how long an idempotency key is remembered |
+
 ```sh
-build/hooks 8080 /tmp/hooks-data 100,200,400,800    # four retries, then a dead letter after the fifth attempt
-build/hooks 8080 /tmp/hooks-data 100,200,400,800 500  # ... and give up on an attempt after 500 ms (the default is 2,000)
-build/hooks 8080 /tmp/hooks-data 100,200,400,800 500 60000  # ... and remember idempotency keys for 60 s (the default is a day)
+build/hooks --port 8080 --dir /tmp/hooks-data --schedule 100,200,400,800   # four retries, then a dead letter after the fifth attempt
+build/hooks --port=8080 --dir=/tmp/hooks-data --deadline-ms=500 --window-ms=60000
+build/hooks --config /etc/hooks/hooks.conf --window-ms 60000   # the file, then the flag over it
 ```
+
+```
+# hooks.conf: one `key = value` a line, `#` on a line of its own
+port = 8080
+dir = /var/lib/hooks
+schedule = 1000,5000,30000
+```
+
+The **last source that names a setting wins**: the defaults, then the file, then the flags in the order written (`--config`
+may stand anywhere among them; a second one replaces the first). Anything else is refused before the service listens or
+writes: exit 2 and a line on stderr that names the argument, or the line of the file. `GET /config` says what is in force.
+There are no environment variables and no positional arguments (the old `hooks <port> <dir> ...` is refused).
 
 **Idempotency.** Send the same `Idempotency-Key` with the same event and you get the same answer and one event, however often you retry:
 
@@ -122,6 +144,7 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `POST /events` | a JSON object with a string `"type"`, and optionally an `Idempotency-Key` (1 to 255 visible ASCII characters); answers `202 {"id":N}` after the flush, `422` for a body that is not one or a key already used for a different event, `400` for a bad or doubled key, `413` for an event too large (over 65,499 bytes, less 28 and the key's length with a key), `507` for a new key when 65,536 are held, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
 | `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys"}` |
+| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |
 | `GET /healthz` | `{"ok":true}` |
 
 A delivery is `POST /hook` to the endpoint, with the event as the body and three headers: `webhook-id` (`evt_<id>`, the same on
@@ -143,6 +166,7 @@ $LEX_SYS test tests/state_test.ls src/state.ls build/deps/*.ls --std     # the d
 $LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
 $LEX_SYS test tests/idem_test.ls src/idem.ls --std                                                       # the idempotency-key index
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
+python3 tests/config_test.py build/hooks           # settings: a file, flags, which wins, and every refusal
 python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
 python3 tests/retry_test.py build/hooks            # the retry delays, also across restarts, and the dead letter
 python3 tests/isolation_test.py build/hooks        # what a silent, slow or unreachable endpoint costs the others (gated)

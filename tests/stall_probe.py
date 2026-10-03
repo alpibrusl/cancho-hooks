@@ -77,7 +77,7 @@ datadir = tempfile.mkdtemp(prefix="hooks-stall-")
 with open(os.path.join(datadir, "endpoints.conf"), "w") as f:
     f.write(f"0 127.0.0.1 {rport} whsec_c2VjcmV0c2VjcmV0c2VjcmV0\n")
 port = free_port()
-p = subprocess.Popen([BIN, str(port), datadir], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+p = subprocess.Popen([BIN, "--port", str(port), "--dir", datadir], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
 p.stderr.readline()
 lat = []
 for n in range(int(os.environ.get('N', '40'))):

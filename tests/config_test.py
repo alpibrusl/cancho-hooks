@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""The settings (docs/design.md section 20): where they come from, which wins, and what is refused.
+
+    python3 tests/config_test.py build/hooks
+
+  1. every setting from a file, and the same five from flags, end up the same (read back from `GET /config`, and the data
+     directory is the one named)
+  2. the later source wins: defaults < file < flags, flags in the order written, `--config` wherever it stands, a second
+     `--config` replaces the first; a setting the flags do not name keeps the file's value
+  3. what is not set is the default (and the endpoints file in the data directory is not a setting: its secret is nowhere in
+     `GET /config`)
+  4. each way to be refused: the service exits 2 before it listens and before it writes anything to the data directory, and
+     says which argument, or which line of which file, is wrong
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos  # noqa: E402
+
+BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
+FAILS = []
+SECRET = "whsec_c2VjcmV0c2VjcmV0c2VjcmV0"
+
+
+def check(name, ok, detail=""):
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else f"  {detail}"))
+    if not ok:
+        FAILS.append(name)
+
+
+def settings(**kw):
+    base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
+            "deadline-ms": 2000, "window-ms": 86400000}
+    base.update(kw)
+    return base
+
+
+def seen(work):
+    return sorted(os.listdir(work))
+
+
+def launch(args, work):
+    """Start the service, wait for its first line of stderr, and read `GET /config` if it is listening."""
+    proc = subprocess.Popen([BIN, *args], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=work)
+    line = proc.stderr.readline().decode().strip()
+    cfg = None
+    if line == "listening":
+        port = int(args[args.index("--port") + 1]) if "--port" in args else None
+        if port is None:
+            conf = open(args[args.index("--config") + 1]).read()
+            port = int(next(l.split("=")[1] for l in conf.splitlines() if l.startswith("port")))
+        cfg = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/config", timeout=5).read())
+    proc.kill()
+    proc.wait()
+    return line, cfg
+
+
+def stage1():
+    want = settings(schedule=[100, 200, 400], **{"deadline-ms": 700, "window-ms": 60000})
+    p = chaos.free_port()
+    work = tempfile.mkdtemp(prefix="hooks-config-")
+    os.makedirs(os.path.join(work, "data"))
+    conf = os.path.join(work, "hooks.conf")
+    with open(conf, "w") as f:
+        f.write(f"# the service\nport = {p}\ndir = {work}/data\nschedule = 100,200,400\ndeadline-ms = 700\nwindow-ms = 60000\n")
+    line, cfg = launch(["--config", conf], work)
+    check("1. a file sets all five settings", line == "listening" and cfg == want, f"{line!r} {cfg}")
+    check("1. ... and the data directory is the one it names", "events.seg" in os.listdir(os.path.join(work, "data")),
+          str(os.listdir(os.path.join(work, "data"))))
+    shutil.rmtree(work)
+
+    p = chaos.free_port()
+    work = tempfile.mkdtemp(prefix="hooks-config-")
+    line, cfg = launch(["--port", str(p), "--dir", work, "--schedule", "100,200,400", "--deadline-ms=700",
+                        "--window-ms", "60000"], work)
+    check("1. the same five as flags, `--key value` and `--key=value` alike", cfg == want, f"{line!r} {cfg}")
+    check("1. ... in the directory they name", "events.seg" in os.listdir(work), str(os.listdir(work)))
+    shutil.rmtree(work)
+
+
+def serve(args, conf=None, extra_files=None):
+    """Run with a port and directory of its own appended; the config file (if any) is `hooks.conf` in the directory."""
+    p = chaos.free_port()
+    work = tempfile.mkdtemp(prefix="hooks-config-")
+    if conf is not None:
+        with open(os.path.join(work, "hooks.conf"), "w") as f:
+            f.write(conf.replace("@PORT", str(p)).replace("@DIR", work))
+    for name, text in (extra_files or {}).items():
+        with open(os.path.join(work, name), "w") as f:
+            f.write(text)
+    full = [a.replace("@", work) for a in args]
+    full += ["--port", str(p), "--dir", work]
+    proc = subprocess.Popen([BIN, *full], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=work)
+    line = proc.stderr.readline().decode().strip()
+    cfg = None
+    if line == "listening":
+        cfg = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{p}/config", timeout=5).read())
+        proc.kill()
+        proc.wait()
+        code = None
+    else:
+        code = proc.wait(timeout=10)
+    return code, line, cfg, work
+
+
+def stage2():
+    f = "window-ms = 1000\ndeadline-ms = 300\nschedule = 50,60\n"
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], f)
+    shutil.rmtree(w)
+    check("2. the file alone", cfg == settings(schedule=[50, 60], **{"deadline-ms": 300, "window-ms": 1000}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf", "--window-ms", "2000"], f)
+    shutil.rmtree(w)
+    check("2. a flag beats the file, and the file's other settings stay",
+          cfg == settings(schedule=[50, 60], **{"deadline-ms": 300, "window-ms": 2000}), str(cfg))
+    _, _, cfg, w = serve(["--window-ms", "2000", "--config", "@/hooks.conf"], f)
+    shutil.rmtree(w)
+    check("2. ... wherever `--config` stands among the flags",
+          cfg == settings(schedule=[50, 60], **{"deadline-ms": 300, "window-ms": 2000}), str(cfg))
+    _, _, cfg, w = serve(["--window-ms", "2000", "--window-ms=3000"], None)
+    shutil.rmtree(w)
+    check("2. the later of two flags wins", cfg == settings(**{"window-ms": 3000}), str(cfg))
+    work = tempfile.mkdtemp(prefix="hooks-config-")
+    other = os.path.join(work, "other.conf")
+    with open(other, "w") as fh:
+        fh.write("window-ms = 7000\n")
+    _, _, cfg, w = serve(["--config", "@/hooks.conf", "--config", other], f)
+    shutil.rmtree(w)
+    shutil.rmtree(work)
+    check("2. a second `--config` replaces the first (not both: the first's deadline is gone)",
+          cfg == settings(**{"window-ms": 7000}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], "window-ms = 1\nwindow-ms = 9\n")
+    shutil.rmtree(w)
+    check("2. the later of two lines wins", cfg == settings(**{"window-ms": 9}), str(cfg))
+
+
+def stage3():
+    _, _, cfg, w = serve([], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    body = json.dumps(cfg)
+    shutil.rmtree(w)
+    check("3. nothing else set: the defaults", cfg == settings(), str(cfg))
+    check("3. the endpoints file is not a setting: its secret and host are not in /config",
+          SECRET not in body and "127.0.0.1" not in body, body)
+
+
+def refused(name, args, files=None, expect=(), absent=()):
+    p = chaos.free_port()
+    work = tempfile.mkdtemp(prefix="hooks-config-")
+    for fname, text in (files or {}).items():
+        with open(os.path.join(work, fname), "w") as fh:
+            fh.write(text)
+    full = [a.replace("@PORT", str(p)).replace("@", work) for a in args]
+    proc = subprocess.run([BIN, *full], capture_output=True, timeout=10, cwd=work)
+    err = proc.stderr.decode()
+    ok = proc.returncode == 2 and "listening" not in err and all(e in err for e in expect)
+    listing = sorted(x for x in os.listdir(work) if x not in (files or {}))
+    check(f"4. {name}: exit 2, says why, writes nothing",
+          ok and not listing and not any(a in err for a in absent), f"exit {proc.returncode} {err!r} wrote {listing}")
+    shutil.rmtree(work)
+
+
+def stage4():
+    refused("a positional argument (the old form)", ["8080", "@/data"], expect=["`8080` is not a flag"])
+    refused("an unknown flag", ["--port", "@PORT", "--dir", "@", "--prot", "1"], expect=["`--prot` is not a setting"])
+    refused("a flag with no value", ["--dir", "@", "--port"], expect=["`--port` needs a value"])
+    refused("a bad port", ["--port", "70000", "--dir", "@"], expect=["`--port` has a value"])
+    refused("a bad window", ["--port", "@PORT", "--dir", "@", "--window-ms=-1"], expect=["`--window-ms=-1` has a value"])
+    refused("no port", ["--dir", "@"], expect=["--port and --dir are required"])
+    refused("no directory", ["--port", "@PORT"], expect=["--port and --dir are required"])
+    refused("a file that is not there", ["--config", "@/nope.conf"], expect=["nope.conf", "cannot be read"])
+    refused("a file with an unknown setting, with its line",
+            ["--config", "@/hooks.conf"], {"hooks.conf": "port = 1\n\nprot = 2\n"}, expect=["hooks.conf", "line 3", "none of"])
+    refused("a file with a bad value, with its line",
+            ["--config", "@/hooks.conf"], {"hooks.conf": "# c\nwindow-ms = soon\n"}, expect=["line 2", "value"])
+    refused("a file line that is not key = value", ["--config", "@/hooks.conf"], {"hooks.conf": "port\n"},
+            expect=["line 1", "key = value"])
+    refused("a file of 16 KiB or more", ["--config", "@/hooks.conf"], {"hooks.conf": "# " + "x" * 16384 + "\n"},
+            expect=["16 KiB"])
+    refused("a bad flag after a good file", ["--config", "@/hooks.conf", "--port", "0"],
+            {"hooks.conf": "dir = /tmp\nport = 5\n"}, expect=["`--port` has a value"])
+
+
+for stage in (stage1, stage2, stage3, stage4):
+    stage()
+print("FAILED: " + ", ".join(FAILS) if FAILS else "all config checks passed")
+sys.exit(1 if FAILS else 0)
