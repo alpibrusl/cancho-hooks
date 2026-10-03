@@ -7,8 +7,9 @@ on:
 
 env:
   # The compiler and the log these sources are built with. A source file does not record which `std` it was written
-  # against, so the revisions are part of the contract.
-  LEX_SYS_REV: 3d46717a124e833866480b2bd7966e513509f281
+  # against, so the revisions are part of the contract. The compiler is lex-sys PR #190 (`clock_unix_ms`, which the signing
+  # timestamp needs); move this to its main once that is merged.
+  LEX_SYS_REV: 095e772b782b6c17bd64560dbd33af21ad7bf6f3
   # lexsys-log main, with the append path (`src/log.ls`).
   LOG_REV: 2421a3717f2c4d74f02d61d4dc41bb9faedad590
 
@@ -52,14 +53,35 @@ jobs:
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh build/hooks
 
+      - name: The reference library for Standard Webhooks
+        run: pip install standardwebhooks
+
+      - name: Unit tests (the delivery window, the endpoints file)
+        working-directory: hooks
+        run: |
+          ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+          ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+
+      - name: Signatures and base64 against the reference library
+        working-directory: hooks
+        run: python3 tests/sign_test.py build/sign_probe
+
       - name: One delivery attempt, against each kind of receiver
         working-directory: hooks
         run: python3 tests/attempt_test.py build/attempt_probe
+
+      - name: The retry schedule, across restarts
+        working-directory: hooks
+        run: python3 tests/retry_test.py build/hooks
+
+      - name: A stalled or slow endpoint, and what it costs the others
+        working-directory: hooks
+        run: python3 tests/isolation_test.py build/hooks
 
       - name: No acknowledged event is lost (kill -9 as a power cut)
         working-directory: hooks
         run: python3 tests/chaos.py build/hooks 2000 8 50
 
-      - name: Every acknowledged event is delivered, with the receiver failing and the service killed
+      - name: Three endpoints, signed, retried, dead-lettered, with the service killed
         working-directory: hooks
         run: python3 tests/delivery.py build/hooks 300 4 150

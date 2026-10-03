@@ -55,11 +55,11 @@ So an accepted event touches **one** durable store on the accept path. Postgres 
 
 **Per-endpoint order.** Events accepted in sequence are *attempted* in sequence to one endpoint **when the endpoint is healthy**. After a failure the retry of event N and the first attempt of event N+1 are not ordered, because holding every later event behind a failing one is head-of-line blocking, which is the usual reason to want a queue in the first place. Strict ordering is a per-endpoint option that accepts the blocking, and is not in v1.
 
-**Retries.** A delivery succeeds on any `2xx`. Anything else, a timeout, or a connection failure is a failure. The schedule is exponential with jitter: 5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 10 h (the values Standard Webhooks suggests, so a subscriber used to Svix is not surprised), then dead-letter. `410 Gone` disables the endpoint. The delays are data in the group state, so a restart resumes them, and a restart does not retry everything at once.
+**Retries.** A delivery succeeds on any `2xx`. Anything else, a timeout, or a connection failure is a failure. The schedule is Standard Webhooks' (so a subscriber used to Svix is not surprised): 5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 14 h, 20 h, 24 h after the first attempt, then dead-letter. (This paragraph first said `10 h, 10 h` from memory; the specification, fetched when signing was built, lists `10 h, 14 h, 20 h, 24 h`. No jitter is built yet.) `410 Gone` disables the endpoint. The delays are data in the group state, so a restart resumes them, and a restart does not retry everything at once.
 
 **Dead letters** stay in the log and are visible by id; `POST /events/{id}/replay` puts one back.
 
-**Signing.** The format is [Standard Webhooks](https://www.standardwebhooks.com): headers `webhook-id`, `webhook-timestamp` and `webhook-signature`, the signature being `v1,` plus the base64 of HMAC-SHA256 over `id.timestamp.payload` with the endpoint's secret. It is chosen because a subscriber then needs no library of ours, and because there are independent implementations to check against. **I have not fetched the specification in this session**, and the header names and signing string above are from memory; the first step of the signing work is to read the specification and correct this paragraph where it is wrong.
+**Signing.** The format is [Standard Webhooks](https://www.standardwebhooks.com): headers `webhook-id`, `webhook-timestamp` and `webhook-signature`, the signature being `v1,` plus the base64 of HMAC-SHA256 over `id.timestamp.payload` with the endpoint's secret. It is chosen because a subscriber then needs no library of ours, and because there are independent implementations to check against. The specification was fetched when signing was built (section 15): the three header names and the signing string above are as it states them. Two things it leaves out are stated in section 15: the key is the base64-*decoded* secret, and it publishes no test vectors, so the reference Python library is the oracle.
 
 ## 5. The API, minimally
 
@@ -194,3 +194,43 @@ So criterion 3 (a stalled receiver does not stall the others) **fails by constru
 * **`log.read_at` reads only below the synced mark**, which is what stopped the delivery loop from sending an event whose `202` had not been given yet; nothing had to be added for that.
 
 **Not verified here:** more than one receiver; signing; the retry schedule (the pause is a fixed placeholder, 200 ms times the failures in a row, capped at 2 s); the kernel's connect timeout; throughput of delivery; behaviour with a backlog larger than a turn (16) under kills.
+
+## 15. What building the third step showed
+
+H1c replaces the one fixed receiver with **several endpoints**, signs every delivery, and retries on the Standard Webhooks schedule, ending in a dead letter.
+
+**Endpoints** are read from `<data-dir>/endpoints.conf`, one `<id> <host> <port> <secret>` a line (a stand-in for the Postgres table of section 3, read once at start). `GET /stats` answers the counters (`endpoints`, `attempts`, `delivered`, `failed`, `dead`). With no such file the service only ingests.
+
+**State.** `src/state.ls` keeps, for each endpoint, a **cursor** (every event up to it is final: delivered or dead-lettered) and a **window of 1,024 cells** above it holding, for events that finished out of order or are waiting for a retry, the attempts so far and the time of the next attempt. This is what removes the head-of-line blocking section 14 found in the single cursor: a failing event waits in its cell while later ones go past it. The price is stated in the code and here: an endpoint more than 1,024 events behind is not served until it catches up (backpressure, not a drop), and the cursor assumes ids are dense, which they are because ingest hands out `last + 1`.
+
+**The log of outcomes** (`delivery.seg`, which replaces `delivered.seg`) holds one record per attempt that ended in something: *delivered*, *failed* (with the attempts so far and the **Unix time** of the next attempt), or *dead*. Restart replays all of it, so the schedule, the counts and the delays survive a crash; nothing is flushed before an outcome is written, and one flush covers a turn's outcomes. It grows without bound (no compaction yet).
+
+**Signing (`src/sign.ls`)**: HMAC-SHA256 and base64 written in lex-sys on `std.crypto`'s SHA-256, no capability. Checked against the **reference Python library** (`standardwebhooks`) in 536 comparisons: every payload length around SHA-256's block boundaries, keys under, at and over the 64-byte HMAC block, a secret with and without its `whsec_` prefix, strict base64 decoding with seven malformed inputs. Ten mutants of `sign.ls` (the two pads, the long-key rule and its boundary, the separator, the prefix, padding, the tail, the length, the decoder's length check) are all killed. What the specification does not say, and the library settled: **the HMAC key is the base64-decoded secret**; and it publishes no test vectors, which is why an independent implementation, not a vector, is the oracle.
+
+**A gap found: lex-sys had no wall clock.** The timestamp header is Unix seconds and a receiver checks it, but `Clock` was monotonic only. Signing with that would have been refused as 50 years old, and the retry times persisted in the log need a clock that survives a restart. The fix is a builtin, `clock_unix_ms`, in lex-sys PR #190 (this repository's CI builds against that revision until it merges).
+
+**Tested.**
+
+| test | what it does | result |
+|---|---|---|
+| `tests/state_test.ls`, `tests/endpoints_test.ls` | the window (order, retries, edge, ring reuse, endpoints apart), the outcome record, the file and every kind of bad line | 9 + 2 pass |
+| `tests/retry_test.py` | schedule 200/400/800/1600 ms: gaps of 203, 404, 806, 1,610 ms; 100/100/100 ms: 4 attempts then one dead letter; 500/1000/2000 ms with a kill after every failure: gaps of 520, 1,013, 2,017 ms | pass |
+| `tests/delivery.py` | three endpoints (mostly healthy; flaky; poisoned), 100 kills as power cuts, 300 events, then a kill-free drain, quiet, a last cut and a restart | 300 acknowledged events (302 in the log); 18 poisoned events dead-lettered and none delivered; every request verified by the reference library; the next event overtook the poisoned one in 18 of 18 cases (the gate is 80%); 1,499 outcome records, 593 of them failed attempts |
+| `tests/isolation_test.py` | a stalled, then a slow endpoint beside two healthy ones; a burst behind a slow one | next table |
+
+**Mutants of the delivery logic: fourteen, all killed, and what it took.** Twelve changed the state, the schedule, the outcome log and the signing; two changed the bounds below. Four of them (ignore the next-attempt time; replay ignoring failed attempts; the next-attempt time not persisted; the attempt count not persisted) are killed **only** by `retry_test.py`, none by `delivery.py`, because under chaos a retry that happens too early or too late is still a delivery. The last of those survived the first version of the retry test too: it kills the service after every failure but only ever reached a third attempt, where a lost count changes nothing; a fourth attempt with stepped delays (500, 1,000, 2,000 ms) is what shows it. **One survived for a reason that was a bug in the harness, not the service**: "do not flush the outcome log" passed, because `chaos.py` still cut `delivered.seg`, the file's name in H1b, and so never cut the log under test. A mutant that survives a test written for exactly it is a reason to look at the test; this one found that the power-cut claim for the outcome log had not been exercised in the runs made between renaming the file and finding this. The H1b run (section 14) used the right name and is unaffected. The final run, with the right name, is the one in the table.
+
+**The first predicted gap, again.** Delivery still runs on the thread that serves ingest. Section 14 measured one stalled receiver; H1c made it worse before making it better: with a retry schedule every new event gets its own immediate first attempt, and with the same `most_per_turn` of 16 and a 2 s deadline a single silent endpoint held ingest for a median of **3,957 ms** a POST (it had been 1.6 ms). Two bounds fixed that: an attempt that **times out or cannot connect puts the endpoint to rest for 5 s**, and **a turn starts no new attempt after 250 ms**. Results (`tests/isolation_test.py`, 80 events at about 20 a second):
+
+| endpoint beside two healthy ones | ingest p50 | ingest p99 | healthy endpoints' delivery p99 |
+|---|---|---|---|
+| none (baseline) | 2.0 ms | 50 ms | 2 ms |
+| never answers | 2.1 ms | 1,956 ms (1% of POSTs over 500 ms) | 3 ms |
+| answers after 300 ms | **255.9 ms** | 282 ms | 305 ms |
+| burst of 40 queued behind the 300 ms one, then 25 probe POSTs | 506 ms | 605 ms (2,413 ms without the turn budget) | not measured |
+
+So **criterion 3 is not met**, and the table says how. A stalled endpoint costs ingest one 2 s deadline per rest period, which the cool-down limits; a *slow but answering* endpoint costs every POST its full answer time, 255.9 ms against the 50 ms median that was fixed before the run (the test reports it and does not gate on it, since loosening it would hide the finding). A `connect` that is never answered (a full accept queue) still blocks the whole service for as long as the kernel waits; re-measured here at 10 s or more per POST, with the kernel's own limit still not measured. The remedy for all three is the same and is not a tuning: an attempt that does not hold the loop, which means a non-blocking connect and a way to have several attempts in flight.
+
+**Not built:** idempotency keys; `410 Gone` disabling an endpoint; jitter; endpoints in Postgres, and the attempt history; the cache's circuit breaker; compaction of `delivery.seg`; `POST /events/{id}/replay`; the API of section 5 beyond `POST /events`, `GET /events/:id`, `GET /healthz` and `GET /stats`.
+
+**Not verified:** more than three endpoints at once, or any with a name to resolve (`getaddrinfo` blocks, and the tests dial IP addresses); behaviour past the 1,024-event window under kills; the rest period under kills; throughput of delivery; DNS, TLS and `https` endpoints, which do not exist here yet.

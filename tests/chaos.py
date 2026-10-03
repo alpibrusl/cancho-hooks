@@ -131,7 +131,7 @@ class Service:
 
     def power_cut(self):
         """Leave each file as a power cut could: all of what the last fsync covered, a random part of the rest."""
-        for name in ("events.seg", "delivered.seg"):
+        for name in ("events.seg", "delivery.seg"):
             self.cut_file(os.path.join(self.datadir, name))
 
     def cut_file(self, path):
