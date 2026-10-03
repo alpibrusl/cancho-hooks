@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  # The compiler and the log these sources are built with. A source file does not record which `std` it was written
+  # against, so the revisions are part of the contract.
+  LEX_SYS_REV: 3d46717a124e833866480b2bd7966e513509f281
+  # lexsys-log main, with the append path (`src/log.ls`).
+  LOG_REV: 2421a3717f2c4d74f02d61d4dc41bb9faedad590
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hooks
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ env.LEX_SYS_REV }}
+          path: lex-sys
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lexsys-log
+          ref: ${{ env.LOG_REV }}
+          path: lexsys-log
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: lex-sys/target/release/lex-sys
+          key: lex-sys-${{ env.LEX_SYS_REV }}
+
+      - name: Build lex-sys
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: lex-sys
+        run: cargo build --release -p lex-sys
+
+      - name: Formatting
+        working-directory: hooks
+        run: ../lex-sys/target/release/lex-sys fmt --check src
+
+      - name: Build the service and the fsync shim
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh build/hooks
+
+      - name: One delivery attempt, against each kind of receiver
+        working-directory: hooks
+        run: python3 tests/attempt_test.py build/attempt_probe
+
+      - name: No acknowledged event is lost (kill -9 as a power cut)
+        working-directory: hooks
+        run: python3 tests/chaos.py build/hooks 2000 8 50
+
+      - name: Every acknowledged event is delivered, with the receiver failing and the service killed
+        working-directory: hooks
+        run: python3 tests/delivery.py build/hooks 300 4 150
