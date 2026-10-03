@@ -9,8 +9,8 @@ env:
   # The compiler and the log these sources are built with. A source file does not record which `std` it was written
   # against, so the revisions are part of the contract.
   LEX_SYS_REV: 3d46717a124e833866480b2bd7966e513509f281
-  # lexsys-log's append path (`src/log.ls`); move this to its main once that is merged.
-  LOG_REV: 2c229c3bc8bbfc699affd36ec96a3aa3bb097d8b
+  # lexsys-log main, with the append path (`src/log.ls`).
+  LOG_REV: 2421a3717f2c4d74f02d61d4dc41bb9faedad590
 
 jobs:
   test:
