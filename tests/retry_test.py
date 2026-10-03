@@ -16,6 +16,7 @@ import http.server
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -77,6 +78,19 @@ def stop(svc, datadir):
     shutil.rmtree(datadir, ignore_errors=True)
 
 
+def durable_outcomes(datadir):
+    """How many outcome records `delivery.seg` holds that a power cut would leave: the whole file, or with the fsync shim the
+    prefix its side file says was synced."""
+    path = os.path.join(datadir, "delivery.seg")
+    if not os.path.exists(path):
+        return 0
+    data = open(path, "rb").read()
+    side = path + ".synced"
+    if os.path.exists(side):
+        data = data[: struct.unpack("<q", open(side, "rb").read(8))[0]]
+    return len(chaos.read_log(data)[0])
+
+
 def wait_for(cond, secs):
     end = time.time() + secs
     while time.time() < end:
@@ -124,7 +138,12 @@ def main():
     post_event(svc)
     for k in range(3):
         wait_for(lambda: len(r.times) >= k + 1, 6)
-        time.sleep(0.1)
+        # Kill once the failure is *durable*, not a fixed time after the receiver saw the request: the service records an
+        # outcome after the answer has come back, and a late answer (a slow receiver, a busy runner) made a fixed wait kill
+        # it first. The retry then came at the restart instead of after the delay: correct for what the log held, wrong for
+        # what this test means to ask.
+        if not wait_for(lambda: durable_outcomes(d) >= k + 1, 6):
+            bad.append(f"3: the outcome of attempt {k + 1} never became durable")
         svc.kill()
         svc.start()
     wait_for(lambda: len(r.times) >= 4, 6)
