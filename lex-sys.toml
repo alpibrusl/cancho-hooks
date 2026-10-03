@@ -4,7 +4,7 @@
 
 [package]
 name = "hooks"
-lex-sys = "1200968b81eafb6e0bc095d197e3d671c8f2e448"
+lex-sys = "052e623fb55a909f531456cd941bd375ab202dfc"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/lexsys-log"
@@ -25,4 +25,25 @@ std = true
 [[bin]]
 name = "sign_probe"
 sources = ["tests/sign_probe.ls", "src/sign.ls"]
+std = true
+
+# The unit tests (`lex-sys test`): each set is run against the installed libraries.
+[[test]]
+name = "state"
+sources = ["tests/state_test.ls", "src/state.ls"]
+std = true
+
+[[test]]
+name = "endpoints"
+sources = ["tests/endpoints_test.ls", "src/endpoints.ls", "src/sign.ls", "src/state.ls"]
+std = true
+
+[[test]]
+name = "idem"
+sources = ["tests/idem_test.ls", "src/idem.ls"]
+std = true
+
+[[test]]
+name = "config"
+sources = ["tests/config_test.ls", "src/config.ls"]
 std = true

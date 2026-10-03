@@ -50,11 +50,7 @@ jobs:
 
       - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings)
         working-directory: hooks
-        run: |
-          ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls build/deps/*.ls --std
-          ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
-          ../lex-sys/target/release/lex-sys test tests/idem_test.ls src/idem.ls --std
-          ../lex-sys/target/release/lex-sys test tests/config_test.ls src/config.ls --std
+        run: ../lex-sys/target/release/lex-sys test
 
       - name: Signatures and base64 against the reference library
         working-directory: hooks

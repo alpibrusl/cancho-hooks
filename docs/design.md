@@ -352,3 +352,7 @@ Section 18 put the two libraries in lock files and a script; lex-sys section 8 r
 * **The first test of "a bad window" expected the flag's name and got the whole argument** (`--window-ms=-1`): the message quotes what was typed, which is the better behaviour; the test changed, not the message.
 * **Not tested:** the effect of a file whose value is a number larger than 12 digits only through the unit test; `--dir` with a space; a directory that does not exist (refused later, by the log, with the existing status 10, not as a setting).
 
+## 21. What `lex-sys test` in a project showed
+
+The four unit-test commands (CI and the README spelled them out, with `build/deps/*.ls` to name the libraries) are four `[[test]]` sets in `lex-sys.toml`, and the compiler pin moves to the merge commit of lex-sys #194, which has them. `lex-sys test` runs all four against the installed libraries (9, 2, 6 and 7 tests) and `lex-sys test --test idem` one. Run here with `build/deps` removed first, so the project, not a left-over directory, supplies the libraries. The CI step is one line. Nothing else changed.
+
