@@ -30,6 +30,8 @@ import std.json;
 import std.route;
 import http.server;
 import log;
+import history;
+import pg.pool;
 import record;
 import attempt;
 import crc;
@@ -342,7 +344,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
     }
     if id == 4 {
         // GET /stats: the delivery counters, for the tests and for a human.
-        var w = json.writer(heap, 160);
+        var w = json.writer(heap, 320);
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "endpoints");
         w = json.put_int(heap, w, stats[c_endpoints()]);
@@ -358,6 +360,14 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, idem.count(ix));
         w = json.put_key(heap, w, "replays");
         w = json.put_int(heap, w, rp_cap() - rp_free(stats));
+        w = json.put_key(heap, w, "history_live");
+        w = json.put_int(heap, w, history.live(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "history_written");
+        w = json.put_int(heap, w, history.written(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "history_failed");
+        w = json.put_int(heap, w, history.failed(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "history_dropped");
+        w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -674,8 +684,13 @@ fn rp_stride() -> [] int {
     return 7;
 }
 
-fn dv_size() -> [] int {
+// The history ring and its counters (`history.ls`).
+fn off_hq() -> [] int {
     return off_rp() + rp_cap() * rp_stride();
+}
+
+fn dv_size() -> [] int {
+    return off_hq() + history.size();
 }
 
 // A replay attempt's id for the attempt machinery: the event's id plus this, so `finish_attempt` can tell it from a window's.
@@ -951,7 +966,7 @@ fn request_for[&h, &b, &k](heap: &!h Heap, id: int, body: &b [byte], key: &k [by
 // An attempt at a replay ended (`docs/design.md` section 23): the same rules as a window's attempt (a `2xx` delivers, a `410` kills
 // the event and disables the endpoint, the schedule running out kills it, anything else waits for the next delay), recorded
 // under the kinds of a replay. Answers 1 if an outcome record was appended.
-fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int) -> [file_write, clock] int {
+fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int, latency: int) -> [file_write, clock] int {
     dv[c_attempts()] = dv[c_attempts()] + 1;
     if dv[off_flying() + e] > 0 {
         dv[off_flying() + e] = dv[off_flying() + e] - 1;
@@ -988,6 +1003,15 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
             }
         }
     }
+    if ok == 1 {
+        var outcome = state.failed();
+        if kind == state.replay_delivered() {
+            outcome = state.delivered();
+        } else if kind == state.replay_dead() {
+            outcome = state.dead();
+        }
+        history.push(dv[off_hq()..off_hq() + history.size()], e, id, 1, tries, outcome, code, clock_unix_ms(clock), latency);
+    }
     if ok == 1 && code == 410 && !is_disabled(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
             set_disabled(dv, e, true);
@@ -1018,9 +1042,9 @@ fn find_offset[&l, &w](lg: &!l log.Log, window: &!w [byte], id: int) -> [file_re
 // An attempt ended: `code` is what `attempt` answered (an HTTP status, or a negative reason). Count it, write its outcome to
 // `done` (not yet flushed), apply it to the cells, and free the event to be tried again when its time comes. Answers 1 if an
 // outcome record was appended, 0 if the log refused it (then the cells are left alone and a restart repeats the attempt).
-fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int) -> [file_write, clock] int {
+fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int, latency: int) -> [file_write, clock] int {
     if id >= replay_base() {
-        return finish_replay(done, dv, clock, e, id - replay_base(), code);
+        return finish_replay(done, dv, clock, e, id - replay_base(), code, latency);
     }
     dv[c_attempts()] = dv[c_attempts()] + 1;
     dv[flight_at(e, id)] = 0;
@@ -1056,6 +1080,9 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
             ok = 1;
         }
     }
+    if ok == 1 {
+        history.push(dv[off_hq()..off_hq() + history.size()], e, id, 0, tries, kind, code, clock_unix_ms(clock), latency);
+    }
     if ok == 1 && code == 410 && !is_disabled(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
             set_disabled(dv, e, true);
@@ -1073,8 +1100,9 @@ fn settle[&g, &d, &k, &t, &p, &a, &r, &s](done: &!g log.Log, dv: &!d [int], cloc
     }
     let e = attempt.endpoint_of(at, slot);
     let id = attempt.event_of(at, slot);
+    let latency = clock_ms(clock) - (attempt.deadline_of(at, slot) - dv[c_deadline()]);
     attempt.finish(atab, at, slot);
-    return finish_attempt(done, dv, clock, e, id, code);
+    return finish_attempt(done, dv, clock, e, id, code, latency);
 }
 
 // End every attempt that has run past its deadline, as a timeout. Answers how many outcomes were written.
@@ -1086,8 +1114,9 @@ fn sweep[&g, &d, &k, &t, &a](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
         if attempt.expired(at, slot, now) {
             let e = attempt.endpoint_of(at, slot);
             let id = attempt.event_of(at, slot);
+            let latency = now - (attempt.deadline_of(at, slot) - dv[c_deadline()]);
             attempt.finish(atab, at, slot);
-            written = written + finish_attempt(done, dv, clock, e, id, attempt.timed_out());
+            written = written + finish_attempt(done, dv, clock, e, id, attempt.timed_out(), latency);
         }
         slot = slot + 1;
     }
@@ -1122,7 +1151,7 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
     // It could not even begin: that is an outcome like any other, and the event is not in flight.
     dv[flight_at(e, id)] = 1;
     dv[off_flying() + e] = dv[off_flying() + e] + 1;
-    return (table, finish_attempt(done, dv, clock, e, id, code));
+    return (table, finish_attempt(done, dv, clock, e, id, code, 0));
 }
 
 // Start an attempt at the replay in entry `r`, for the endpoint in table slot `i`. Answers the table and 1 if an outcome was
@@ -1137,11 +1166,11 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
     dv[base + 6] = 1;
     dv[off_flying() + e] = dv[off_flying() + e] + 1;
     if dv[base + 5] < 0 {
-        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect()));
+        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
     let r0 = log.read_at(lg, dv[base + 5], window);
     if r0.0 != 0 || record.ms_of(window, 0) != id {
-        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect()));
+        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
     let p = record.pair_at(window, record.first_pair(0));
     let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
@@ -1158,7 +1187,7 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
     if started >= 0 {
         return (table, 0);
     }
-    return (table, finish_replay(done, dv, clock, e, id, code));
+    return (table, finish_replay(done, dv, clock, e, id, code, 0));
 }
 
 // Start attempts: for each endpoint in turn, starting from a different one each time, every event in its window that is not
@@ -1244,10 +1273,17 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte]) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
+fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], pl0: pool.Pool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
+            // The database's connections (`history.ls`), watched in the same poller under tokens above the attempts'.
+            var pl = pl0;
+            borrow mut srv as &!sw in {
+                borrow mut pl as &!qw in {
+                    pool.start(qw, server.poller(sw), server.first_token(sw) + attempt.slots());
+                }
+            }
             var widest = 1;
             if route.most_params(router) > 1 {
                 widest = route.most_params(router);
@@ -1360,23 +1396,23 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                         n = n + 1;
                     }
                 }
-                if dv[c_endpoints()] > 0 {
-                    var token0 = 0;
-                    var nev = 0;
-                    borrow srv as &sr in {
-                        token0 = server.first_token(sr);
-                        nev = server.foreign_count(sr);
-                        if nev > 128 {
-                            nev = 128;
-                        }
-                        borrow mut events as &!ew in {
-                            var j = 0;
-                            while j < 2 * nev {
-                                contents(ew)[j] = server.foreign(sr)[j];
-                                j = j + 1;
-                            }
+                var token0 = 0;
+                var nev = 0;
+                borrow srv as &sr in {
+                    token0 = server.first_token(sr);
+                    nev = server.foreign_count(sr);
+                    if nev > 128 {
+                        nev = 128;
+                    }
+                    borrow mut events as &!ew in {
+                        var j = 0;
+                        while j < 2 * nev {
+                            contents(ew)[j] = server.foreign(sr)[j];
+                            j = j + 1;
                         }
                     }
+                }
+                if dv[c_endpoints()] > 0 {
                     borrow mut srv as &!sw in {
                         borrow mut at as &!aw in {
                             borrow mut req as &!qw in {
@@ -1390,7 +1426,28 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                         }
                     }
                 }
+                // The history: what the poller said about the database's connections, the answers, the rows that ended attempts
+                // left, and one write for the turn. Nothing here waits for the database.
+                if history.enabled(dv[off_hq()..off_hq() + history.size()]) {
+                    borrow mut srv as &!sw in {
+                        borrow mut pl as &!qw in {
+                            borrow events as &er in {
+                                var j = 0;
+                                while j < nev {
+                                    if pool.owns(qw, contents(er)[2 * j]) {
+                                        pool.pump(qw, server.poller(sw), contents(er)[2 * j], contents(er)[2 * j + 1]);
+                                    }
+                                    j = j + 1;
+                                }
+                            }
+                            history.settle(qw, dv[off_hq()..off_hq() + history.size()]);
+                            history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
+                            pool.flush(qw, server.poller(sw));
+                        }
+                    }
+                }
             }
+            pool.close(heap, pl);
             conns.drop(heap, atab);
             unbox_slice(heap, at);
             unbox_slice(heap, req);
@@ -1407,6 +1464,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
             return 0;
         }
         Polling::Failed(e) => {
+            pool.close(heap, pl0);
             return 4;
         }
     }
@@ -1752,12 +1810,38 @@ fn main(world: World) -> [] int {
                                                                                 borrow mut listener as &!lh in {
                                                                                     listener_nonblocking(lh);
                                                                                     let router = routes(h);
+                                                                                    // The database for the history, if one was named: connect and log in here, before the loop, and go on
+                                                                                    // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
+                                                                                    var hpool = pool.empty(h, 1, 1, 4096, 4096);
+                                                                                    if config.pg_host_len(cfg) > 0 {
+                                                                                        if config.pg_user_len(cfg) == 0 {
+                                                                                            config.set(cfg, cblob, "pg-user", "hooks");
+                                                                                        }
+                                                                                        if config.pg_database_len(cfg) == 0 {
+                                                                                            config.set(cfg, cblob, "pg-database", "hooks");
+                                                                                        }
+                                                                                        if config.pg_password_len(cfg) == 0 {
+                                                                                            config.set(cfg, cblob, "pg-password", "-");
+                                                                                        }
+                                                                                        let (opened, lanes) = history.open(h, nn, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], 2, fsr);
+                                                                                        pool.close(h, hpool);
+                                                                                        hpool = opened;
+                                                                                        history.enable(contents(dvw)[off_hq()..off_hq() + history.size()], lanes);
+                                                                                        if lanes < 2 {
+                                                                                            borrow mut io as &!i in {
+                                                                                                let nb = alloc_slice[a](12, byte_of(0));
+                                                                                                say(i, "hooks: the database: ");
+                                                                                                say(i, nb[0..digits_of(lanes, nb)]);
+                                                                                                say(i, " of 2 connections opened; history is written over those\n");
+                                                                                            }
+                                                                                        }
+                                                                                    }
                                                                                     borrow mut io as &!i in {
                                                                                         io.error_all(i, "listening\n");
                                                                                     }
                                                                                     borrow router as &r in {
                                                                                         borrow clock as &c in {
-                                                                                            status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw));
+                                                                                            status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), hpool);
                                                                                         }
                                                                                     }
                                                                                     route.drop(h, router);

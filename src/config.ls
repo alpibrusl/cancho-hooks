@@ -13,6 +13,9 @@ import std.bytes;
 //     schedule     the retry delays in ms, `100,200,400`           default: the built-in schedule (section 4)
 //     deadline-ms  how long one delivery attempt may take          default 0, which means the built-in 2000
 //     window-ms    how long an idempotency key is remembered       default 86400000 (a day)
+//     pg-host      the PostgreSQL to write the history to          default none: no history (section 24)
+//     pg-port      its port                                        default 5432, 1 to 65535
+//     pg-user, pg-database, pg-password                            default `hooks`, `hooks`, none
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -21,16 +24,34 @@ import std.bytes;
 // The settings are a table of integers and a blob of bytes, which the caller sizes with `size` and `blob_size`:
 //
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
-//     cfg[5] why the last refusal happened (`why_*`)    cfg[6], cfg[7] unused
+//     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
+//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] unused
 //
-//     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule
+//     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
+//     and password (256), at `pg_host_at()` and the offsets after it
 
 pub fn size() -> [] int {
-    return 8;
+    return 12;
 }
 
 pub fn blob_size() -> [] int {
+    return 2944;
+}
+
+pub fn pg_host_at() -> [] int {
     return 2304;
+}
+
+pub fn pg_user_at() -> [] int {
+    return 2560;
+}
+
+pub fn pg_database_at() -> [] int {
+    return 2624;
+}
+
+pub fn pg_password_at() -> [] int {
+    return 2688;
 }
 
 pub fn sched_at() -> [] int {
@@ -73,6 +94,26 @@ pub fn why[&c](cfg: &c [int]) -> [] int {
     return cfg[5];
 }
 
+pub fn pg_port[&c](cfg: &c [int]) -> [] int {
+    return cfg[6];
+}
+
+pub fn pg_host_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[7];
+}
+
+pub fn pg_user_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[8];
+}
+
+pub fn pg_database_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[9];
+}
+
+pub fn pg_password_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[10];
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -81,6 +122,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     }
     cfg[0] = 0 - 1;
     cfg[2] = 86400000;
+    cfg[6] = 5432;
     return 0;
 }
 
@@ -147,6 +189,37 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[2] = n;
+        }
+    } else if bytes.equal(key, "pg-host") {
+        if len(value) < 1 || len(value) > 253 {
+            why = why_value();
+        } else {
+            cfg[7] = keep(value, blob, pg_host_at());
+        }
+    } else if bytes.equal(key, "pg-port") {
+        let n = number(value);
+        if n < 1 || n > 65535 {
+            why = why_value();
+        } else {
+            cfg[6] = n;
+        }
+    } else if bytes.equal(key, "pg-user") {
+        if len(value) < 1 || len(value) > 63 {
+            why = why_value();
+        } else {
+            cfg[8] = keep(value, blob, pg_user_at());
+        }
+    } else if bytes.equal(key, "pg-database") {
+        if len(value) < 1 || len(value) > 63 {
+            why = why_value();
+        } else {
+            cfg[9] = keep(value, blob, pg_database_at());
+        }
+    } else if bytes.equal(key, "pg-password") {
+        if len(value) < 1 || len(value) > 255 {
+            why = why_value();
+        } else {
+            cfg[10] = keep(value, blob, pg_password_at());
         }
     } else {
         why = why_key();

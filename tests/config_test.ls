@@ -15,6 +15,8 @@ fn test_nothing_set_gives_the_defaults() -> [] int {
         test.assert_eq(config.window_ms(cfg), 86400000);
         test.assert_eq(config.dir_len(cfg), 0);
         test.assert_eq(config.sched_len(cfg), 0);
+        test.assert_eq(config.pg_port(cfg), 5432);
+        test.assert_eq(config.pg_host_len(cfg), 0);
     }
     return 0;
 }
@@ -159,5 +161,65 @@ fn test_one_argument_is_a_flag_with_its_value_or_without_it() -> [] int {
     test.assert_eq(config.split_flag("-p").0, 0 - 1);
     test.assert_eq(config.split_flag("--").0, 0 - 1);
     test.assert_eq(config.split_flag("").0, 0 - 1);
+    return 0;
+}
+
+// The database settings: each is kept where it says, the port is checked, and the strings do not run into each other.
+fn test_the_database_settings() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        let text = "pg-host = db.internal\npg-port = 6432\npg-user = hooks_rw\npg-database = hooksdb\npg-password = s3cret pass\n";
+        test.assert_eq(config.parse_file(text, cfg, blob), 0);
+        test.assert_eq(config.pg_port(cfg), 6432);
+        test.assert_eq(config.pg_host_len(cfg), 11);
+        test.assert_eq(int_of(blob[config.pg_host_at()]), 'd');
+        test.assert_eq(int_of(blob[config.pg_host_at() + 10]), 'l');
+        test.assert_eq(config.pg_user_len(cfg), 8);
+        test.assert_eq(int_of(blob[config.pg_user_at()]), 'h');
+        test.assert_eq(config.pg_database_len(cfg), 7);
+        test.assert_eq(int_of(blob[config.pg_database_at()]), 'h');
+        test.assert_eq(config.pg_password_len(cfg), 11);
+        test.assert_eq(int_of(blob[config.pg_password_at() + 6]), ' ');
+        test.assert_eq(int_of(blob[config.pg_password_at() + 10]), 's');
+        // the neighbours are not written over
+        test.assert_eq(int_of(blob[config.pg_host_at() + 11]), 0);
+        test.assert_eq(config.dir_len(cfg), 0);
+    }
+    return 0;
+}
+
+fn test_the_database_settings_have_limits() -> [] int {
+    test.assert_eq(refused_value("pg-port", "0"), config.why_value());
+    test.assert_eq(refused_value("pg-port", "65536"), config.why_value());
+    test.assert_eq(refused_value("pg-port", "five"), config.why_value());
+    test.assert_eq(refused_value("pg-host", ""), config.why_value());
+    test.assert_eq(refused_value("pg-user", ""), config.why_value());
+    test.assert_eq(refused_value("pg-database", ""), config.why_value());
+    test.assert_eq(refused_value("pg-password", ""), config.why_value());
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        let long = alloc_slice[a](300, byte_of('x'));
+        test.assert_eq(config.set(cfg, blob, "pg-host", long[0..253]), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-host", long[0..254]), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "pg-user", long[0..63]), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-user", long[0..64]), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "pg-database", long[0..63]), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-database", long[0..64]), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "pg-password", long[0..255]), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-password", long[0..256]), config.why_value());
+        // the largest of each ends inside its own place and touches no other
+        test.assert_eq(int_of(blob[config.pg_host_at() + 252]), 'x');
+        test.assert_eq(int_of(blob[config.pg_host_at() + 253]), 0);
+        test.assert_eq(int_of(blob[config.pg_user_at() + 62]), 'x');
+        test.assert_eq(int_of(blob[config.pg_user_at() + 63]), 0);
+        test.assert_eq(int_of(blob[config.pg_database_at() + 62]), 'x');
+        test.assert_eq(int_of(blob[config.pg_database_at() + 63]), 0);
+        test.assert_eq(int_of(blob[config.pg_password_at() + 254]), 'x');
+        test.assert_eq(int_of(blob[config.pg_password_at() + 255]), 0);
+    }
     return 0;
 }
