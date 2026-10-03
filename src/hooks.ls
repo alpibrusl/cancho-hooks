@@ -34,6 +34,7 @@ import history;
 import view;
 import queries;
 import pg.pool;
+import roster;
 import record;
 import attempt;
 import crc;
@@ -1610,9 +1611,9 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
     }
 }
 
-// Read `<dir>/endpoints.conf` into the delivery state. Answers the number of endpoints, 0 if there is no such file (the service
-// then only ingests), or a negative number: `0 - line` for the first bad line, -1000 if the file cannot be read or is too large.
-fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], dv: &!v [int], blob: &!b [byte]) -> [heap, fs_read(""), file_read] int {
+// Read `<dir>/endpoints.conf` into `out` (16 KiB). Answers the number of bytes, 0 if there is no such file (the service then only
+// ingests), or -1000 if the file cannot be read or is too large.
+fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte]) -> [fs_read(""), file_read] int {
     region a {
         let path_buf = alloc_slice[a](4096, byte_of(0));
         let path = path_buf[0..path_of(path_buf, dir, "endpoints.conf")];
@@ -1625,35 +1626,43 @@ fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [by
             }
             Opened::Ok(rd0) => {
                 var rd = rd0;
-                let text = box_slice(heap, 16384, byte_of(0));
                 var got = 0 - 1;
                 borrow mut rd as &!rh in {
-                    borrow mut text as &!tw in {
-                        match file_pread(rh, 0, contents(tw)) {
-                            Read::Got(n) => {
-                                got = n;
-                            }
-                            Read::End => {
-                                got = 0;
-                            }
-                            Read::Failed(e) => {
-                                got = 0 - 1;
-                            }
+                    match file_pread(rh, 0, out) {
+                        Read::Got(n) => {
+                            got = n;
+                        }
+                        Read::End => {
+                            got = 0;
+                        }
+                        Read::Failed(e) => {
+                            got = 0 - 1;
                         }
                     }
                 }
                 file_close(rd);
-                var result = 0 - 1000;
                 if got >= 0 && got < 16384 {
-                    borrow text as &tr in {
-                        result = endpoints.parse(contents(tr)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob);
-                    }
+                    return got;
                 }
-                unbox_slice(heap, text);
-                return result;
+                return 0 - 1000;
             }
         }
     }
+}
+
+// Read `<dir>/endpoints.conf` into the delivery state. Answers the number of endpoints, 0 if there is no such file (the service
+// then only ingests), or a negative number: `0 - line` for the first bad line, -1000 if the file cannot be read or is too large.
+fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], dv: &!v [int], blob: &!b [byte]) -> [heap, fs_read(""), file_read] int {
+    let text = box_slice(heap, 16384, byte_of(0));
+    var result = 0 - 1000;
+    borrow mut text as &!tw in {
+        let got = read_endpoints_file(fs, dir, contents(tw));
+        if got >= 0 {
+            result = endpoints.parse(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob);
+        }
+    }
+    unbox_slice(heap, text);
+    return result;
 }
 
 // Rebuild the idempotency index from the events log: every keyed record, in order, the later one of two with the same key
@@ -1693,7 +1702,7 @@ fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], a
 
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // scan of the events log positioned at the slowest endpoint. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte]) -> [heap, fs_read(""), file_read] int {
+fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool) -> [heap, fs_read(""), file_read] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
     dv[c_deadline()] = default_deadline_ms();
     if deadline_ms > 0 {
@@ -1706,7 +1715,13 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y](heap: &!h Heap, fs: &c Fs
     if rebuilt != 0 {
         return rebuilt;
     }
-    let n = load_endpoints(heap, fs, dir, dv, blob);
+    // The endpoints: the database's, as `roster.fetch` wrote them, or `endpoints.conf`.
+    var n = 0;
+    if from_db {
+        n = endpoints.parse(etext, dv[off_table()..off_table() + endpoints.table_size()], blob);
+    } else {
+        n = load_endpoints(heap, fs, dir, dv, blob);
+    }
     if n < 0 {
         return 13;
     }
@@ -1900,7 +1915,7 @@ fn main(world: World) -> [] int {
         }
         if bad == 0 {
             port = config.port_of(cfg);
-            if port < 1 || config.dir_len(cfg) == 0 {
+            if port < 1 && !config.import_endpoints(cfg) || config.dir_len(cfg) == 0 {
                 borrow mut io as &!i in {
                     say(i, "hooks: --port and --dir are required\n");
                 }
@@ -1912,7 +1927,123 @@ fn main(world: World) -> [] int {
         let sched_len = config.sched_len(cfg);
         let deadline_ms = config.deadline_ms(cfg);
         let window_ms = config.window_ms(cfg);
-        if port > 0 && port < 65536 && dir_len > 0 {
+        // The endpoints (section 24, C3c): with a database named they are its `endpoints` table, read here, before the logs are
+        // opened and before the service listens, and a database that cannot be read is a refusal to start (the file is not a
+        // fallback: a stale list delivers to the wrong receivers). `--import-endpoints 1` copies the file into the table and exits.
+        let etext = alloc_slice[a](16384, byte_of(0));
+        var etext_n = 0;
+        var from_db = false;
+        var go = bad == 0 && dir_len > 0;
+        if go && config.pg_host_len(cfg) > 0 {
+            if config.pg_user_len(cfg) == 0 {
+                config.set(cfg, cblob, "pg-user", "hooks");
+            }
+            if config.pg_database_len(cfg) == 0 {
+                config.set(cfg, cblob, "pg-database", "hooks");
+            }
+            if config.pg_password_len(cfg) == 0 {
+                config.set(cfg, cblob, "pg-password", "-");
+            }
+        }
+        if go && config.import_endpoints(cfg) {
+            go = false;
+            status = 20;
+            if config.pg_host_len(cfg) == 0 {
+                borrow mut io as &!i in {
+                    say(i, "hooks: --import-endpoints needs --pg-host\n");
+                }
+            } else {
+                let scratch = alloc_slice[a](endpoints.table_size(), 0);
+                let sblob = alloc_slice[a](16384, byte_of(0));
+                var text_len = 0;
+                borrow fs as &fs0 in {
+                    text_len = read_endpoints_file(fs0, cblob[0..dir_len], etext);
+                }
+                if text_len <= 0 {
+                    borrow mut io as &!i in {
+                        say(i, "hooks: no endpoints.conf to import in --dir\n");
+                    }
+                } else {
+                    let count = endpoints.parse(etext[0..text_len], scratch, sblob);
+                    if count < 0 {
+                        borrow mut io as &!i in {
+                            let nb = alloc_slice[a](12, byte_of(0));
+                            say(i, "hooks: endpoints.conf: line ");
+                            say(i, nb[0..digits_of(0 - count, nb)]);
+                            say(i, " is not valid; nothing was imported\n");
+                        }
+                        status = 13;
+                    } else {
+                        var added = 0 - 1;
+                        borrow mut heap as &!h0 in {
+                            borrow net as &nn0 in {
+                                borrow fs as &fs0 in {
+                                    added = roster.copy_in(h0, nn0, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], fs0, etext[0..text_len]);
+                                }
+                            }
+                        }
+                        borrow mut io as &!i in {
+                            let nb = alloc_slice[a](12, byte_of(0));
+                            if added < 0 {
+                                say(i, "hooks: the database refused the import; nothing was imported\n");
+                            } else {
+                                say(i, "hooks: imported ");
+                                say(i, nb[0..digits_of(added, nb)]);
+                                say(i, " of ");
+                                say(i, nb[0..digits_of(count, nb)]);
+                                say(i, " endpoints; one already there is not changed\n");
+                                status = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if go && config.pg_host_len(cfg) > 0 {
+            var got = 0 - 1;
+            borrow mut heap as &!h0 in {
+                borrow net as &nn0 in {
+                    borrow fs as &fs0 in {
+                        got = roster.fetch(h0, nn0, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], fs0, etext);
+                    }
+                }
+            }
+            if got < 0 {
+                go = false;
+                status = 20;
+                borrow mut io as &!i in {
+                    say(i, "hooks: the database's endpoints cannot be read: ");
+                    if got == 0 - 1 {
+                        say(i, "cannot connect\n");
+                    } else if got == 0 - 2 {
+                        say(i, "cannot log in\n");
+                    } else if got == 0 - 3 {
+                        say(i, "the query failed (is the endpoints table there? sql/schema.sql)\n");
+                    } else if got == 0 - 4 {
+                        say(i, "a row has an empty field or a byte that is not printable\n");
+                    } else {
+                        say(i, "the table is too large (the service reads at most 16 KiB of it)\n");
+                    }
+                }
+            } else {
+                etext_n = got;
+                from_db = true;
+                let scratch = alloc_slice[a](endpoints.table_size(), 0);
+                let sblob = alloc_slice[a](16384, byte_of(0));
+                let count = endpoints.parse(etext[0..etext_n], scratch, sblob);
+                if count < 0 {
+                    go = false;
+                    status = 13;
+                    borrow mut io as &!i in {
+                        let nb = alloc_slice[a](12, byte_of(0));
+                        say(i, "hooks: the endpoints table: row ");
+                        say(i, nb[0..digits_of(0 - count, nb)]);
+                        say(i, " is not valid (an id of 16 or more, a repeated id, a port, or a secret that is not whsec_ and base64)\n");
+                    }
+                }
+            }
+        }
+        if go && port > 0 && port < 65536 && dir_len > 0 {
             status = 3;
             borrow mut heap as &!h in {
                 var wbuf = buffer.empty(h, max_len() + 4096);
@@ -1941,7 +2072,7 @@ fn main(world: World) -> [] int {
                                                         borrow mut lg as &!lw in {
                                                             borrow mut dl as &!dw in {
                                                                 contents(ixw)[1] = window_ms;
-                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw));
+                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db);
                                                                 if status == 0 {
                                                                     borrow net as &nn in {
                                                                         match tcp_listen(nn, port, 1024, 0) {
@@ -1954,15 +2085,6 @@ fn main(world: World) -> [] int {
                                                                                     // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
                                                                                     var hpool = pool.empty(h, 1, 1, 4096, 4096);
                                                                                     if config.pg_host_len(cfg) > 0 {
-                                                                                        if config.pg_user_len(cfg) == 0 {
-                                                                                            config.set(cfg, cblob, "pg-user", "hooks");
-                                                                                        }
-                                                                                        if config.pg_database_len(cfg) == 0 {
-                                                                                            config.set(cfg, cblob, "pg-database", "hooks");
-                                                                                        }
-                                                                                        if config.pg_password_len(cfg) == 0 {
-                                                                                            config.set(cfg, cblob, "pg-password", "-");
-                                                                                        }
                                                                                         let (opened, lanes) = history.open(h, nn, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], 2, fsr);
                                                                                         pool.close(h, hpool);
                                                                                         hpool = opened;

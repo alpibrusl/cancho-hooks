@@ -223,3 +223,19 @@ fn test_the_database_settings_have_limits() -> [] int {
     }
     return 0;
 }
+
+fn test_import_endpoints_is_zero_or_one() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert(!config.import_endpoints(cfg));
+        test.assert_eq(config.set(cfg, blob, "import-endpoints", "1"), 0);
+        test.assert(config.import_endpoints(cfg));
+        test.assert_eq(config.set(cfg, blob, "import-endpoints", "yes"), config.why_value());
+        test.assert(config.import_endpoints(cfg));
+        test.assert_eq(config.set(cfg, blob, "import-endpoints", "0"), 0);
+        test.assert(!config.import_endpoints(cfg));
+    }
+    return 0;
+}

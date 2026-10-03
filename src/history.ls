@@ -144,7 +144,7 @@ pub fn sync[&q, &s](pl: &q pool.Pool, hs: &!s [int]) -> [] int {
 }
 
 // An unpredictable client nonce for the SCRAM login: 18 bytes from the kernel, as base64.
-fn fresh_nonce[&h, &f](heap: &!h Heap, fs: &f Fs("")) -> [heap, fs_read("")] buffer.Buffer {
+pub fn fresh_nonce[&h, &f](heap: &!h Heap, fs: &f Fs("")) -> [heap, fs_read("")] buffer.Buffer {
     var nonce = buffer.empty(heap, 1);
     region a {
         let raw = alloc_slice[a](18, byte_of(0));
@@ -157,8 +157,13 @@ fn fresh_nonce[&h, &f](heap: &!h Heap, fs: &f Fs("")) -> [heap, fs_read("")] buf
     return nonce;
 }
 
+// What `login` answers when the login worked and a query could not be prepared (a table is missing): above every status of `pg.login`.
+pub fn prepare_failed() -> [] int {
+    return 16;
+}
+
 // Log in on `conn` and prepare the queries: 0, or a nonzero status.
-fn login[&h, &c, &u, &w, &d, &z](heap: &!h Heap, conn: &!c Conn, user: &u [byte], password: &w [byte], database: &d [byte], rng: &z Fs("")) -> [heap, conn_read, conn_write, fs_read("")] int {
+pub fn login[&h, &c, &u, &w, &d, &z](heap: &!h Heap, conn: &!c Conn, user: &u [byte], password: &w [byte], database: &d [byte], rng: &z Fs("")) -> [heap, conn_read, conn_write, fs_read("")] int {
     let nonce = fresh_nonce(heap, rng);
     var status = 0;
     borrow nonce as &nr in {
@@ -171,10 +176,13 @@ fn login[&h, &c, &u, &w, &d, &z](heap: &!h Heap, conn: &!c Conn, user: &u [byte]
         return status;
     }
     let (refused, prepared) = queries.prepare_all(heap, conn);
-    var bad = prepared;
+    var bad = 0;
+    if prepared != 0 {
+        bad = prepare_failed();
+    }
     borrow refused as &fr in {
         if pg.failure(buffer.bytes(fr)) >= 0 {
-            bad = 6;
+            bad = prepare_failed();
         }
     }
     buffer.drop(heap, refused);

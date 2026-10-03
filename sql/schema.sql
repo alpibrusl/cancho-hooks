@@ -22,3 +22,14 @@ create table if not exists attempts (
 
 -- Asking "what happened to event 41" is the question this table is for.
 create index if not exists attempts_event on attempts (event);
+
+-- The endpoints the service delivers to, when it is given a database (docs/design.md section 24, C3c). `id` is the endpoint's
+-- identity in the outcome log, so it is written, never counted, and below the service's limit of 16; `secret` is the Standard
+-- Webhooks one (`whsec_` and base64), exactly as it is given to the receiver. It has to be kept in a form the service can sign
+-- with, so anyone who can read this table can sign as the service: give the table the permissions of a secret.
+create table if not exists endpoints (
+    id smallint primary key check (id >= 0),
+    host text not null,
+    port int not null check (port between 1 and 65535),
+    secret text not null
+);

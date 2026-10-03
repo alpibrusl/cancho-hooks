@@ -118,6 +118,86 @@ pub fn attempts_of_latency_ms[&m](m: &m [byte], row: int) -> [] int {
     return pg.int_text(m, from, to);
 }
 
+// endpoints_all_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn endpoints_all_start[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "endpoints_all", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// endpoints_all: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn endpoints_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "endpoints_all", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn endpoints_all_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn endpoints_all_host[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn endpoints_all_port[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 2);
+    return pg.int_text(m, from, to);
+}
+
+pub fn endpoints_all_secret[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+// add_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn add_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "add_endpoint", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// add_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn add_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "add_endpoint", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
 // Parse every query above on this connection, once, after login: PostgreSQL then parses and plans each
 // one once instead of on every call. Answers the reply of the first refusal (`pg.failure` says what the
 // server objected to) or an empty one, and a status; the queries are not to be run unless both are clean.
@@ -130,5 +210,11 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms from attempts where event = $1 order by endpoint, replay, attempt limit 200");
     reply = r1;
     status = s1;
+    let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret from endpoints order by id");
+    reply = r2;
+    status = s2;
+    let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing");
+    reply = r3;
+    status = s3;
     return (reply, status);
 }

@@ -7,3 +7,9 @@ insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, 
 
 -- name: attempts_of event
 select endpoint, replay, attempt, outcome, status, at_ms, latency_ms from attempts where event = $1 order by endpoint, replay, attempt limit 200
+
+-- name: endpoints_all
+select id, host, port, secret from endpoints order by id
+
+-- name: add_endpoint id host port secret
+insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing

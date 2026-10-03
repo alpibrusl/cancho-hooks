@@ -11,7 +11,7 @@ with SCRAM-SHA-256 using it (and `psql` gets it as PGPASSWORD); without, the ser
      and how long it took; and there are as many rows as the service counted attempts
   2. the reasons that are not a status: nothing listening (-1) and a receiver that never answers (-3, after the deadline)
   3. a replay's attempts are rows of their own (replay = 1, numbered from 1)
-  4. a database that is not there at start: the service starts, says so, delivers, and counts the rows it could not write
+  4. a database that is not there at start: the service refuses to start (its endpoints are in it), status 20 and a message
   5. a database that is up and never answers: delivery is as fast as with it, the ring fills and rows are dropped and counted
   6. a database that goes away in the middle: delivery goes on, the service goes on, the rows are counted as lost
   7. no database named: nothing is counted and nothing is written
@@ -139,6 +139,11 @@ def start_service(endpoints, pg_port, schedule="100", deadline=800, extra_flags=
     with open(os.path.join(datadir, "endpoints.conf"), "w") as f:
         for i, port in enumerate(endpoints):
             f.write(f"{i} 127.0.0.1 {port} {secret}\n")
+    if pg_flags is not False:
+        # With a database named the endpoints are its table (section 24, C3c), and the file is not read.
+        psql("truncate endpoints")
+        for i, port in enumerate(endpoints):
+            psql(f"insert into endpoints values ({i}, '127.0.0.1', {port}, '{secret}')")
     port = chaos.free_port()
     flags = [BIN, "--port", str(port), "--dir", datadir, "--schedule", schedule, "--deadline-ms", str(deadline)]
     if pg_flags is True:
@@ -153,15 +158,17 @@ def start_service(endpoints, pg_port, schedule="100", deadline=800, extra_flags=
     while True:
         line = proc.stderr.readline().decode().strip()
         lines.append(line)
-        if line == "listening":
+        if line == "listening" or line == "":
             break
     svc = type("Svc", (), {})()
     svc.port, svc.proc, svc.datadir, svc.lines = port, proc, datadir, lines
+    svc.exited = line != "listening"
     return svc
 
 
 def stop(svc):
-    svc.proc.terminate()
+    if not svc.exited:
+        svc.proc.terminate()
     svc.proc.wait()
     shutil.rmtree(svc.datadir, ignore_errors=True)
 
@@ -206,21 +213,17 @@ def main():
     check("3. and the first run's rows are untouched", len(rows("where replay = 0 and endpoint = 0")) == 2, str(rows("where endpoint = 0")))
     stop(svc)
 
-    # 4. no database at start
+    # 4. no database at start: the endpoints are its table, so the service refuses to start (it does not guess who to deliver to)
     psql("truncate attempts")
     svc = start_service([b.port], closed_port())
-    check("4. the service starts and says the database is not there", any("the database: 0 of 2" in l for l in svc.lines), str(svc.lines))
-    b.seen.clear()
-    post(svc, 1)
-    check("4. delivery works", wait_for(lambda: stats(svc)["delivered"] == 1, 5), str(stats(svc)))
-    st = stats(svc)
-    check("4. history is off and the row is counted as dropped", st["history_live"] == 0 and st["history_dropped"] == 1 and st["history_written"] == 0, str(st))
+    check("4. the service does not start when the database it reads its endpoints from is not there",
+          svc.exited and svc.proc.wait() == 20 and any("cannot connect" in l for l in svc.lines), str(svc.lines))
     stop(svc)
 
     if PG_PASSWORD:
         svc = start_service([b.port], PG_PORT, pg_flags=["--pg-host", PG_HOST, "--pg-port", str(PG_PORT), "--pg-user", PG_USER, "--pg-database", PG_DB,
                                                          "--pg-password", PG_PASSWORD + "-wrong"])
-        check("4. a wrong password is refused (the service starts, with 0 of 2 connections)", any("the database: 0 of 2" in l for l in svc.lines), str(svc.lines))
+        check("4. a wrong password is refused (the service does not start, status 20)", svc.exited and svc.proc.wait() == 20 and any("cannot log in" in l for l in svc.lines), str(svc.lines))
         stop(svc)
 
     # 5. a database that never answers
@@ -298,6 +301,7 @@ def main():
     psql("drop role if exists hooks")
     psql("create role hooks login")
     psql("grant insert, select on attempts to hooks")
+    psql("grant select on endpoints to hooks")
     if PG_DB != "hooks" or PG_PASSWORD:
         print("skipped 9: the defaults are database `hooks` and no password")
     else:
@@ -309,6 +313,7 @@ def main():
               str(psql("select usename, datname from pg_stat_activity where datname = 'hooks'")))
         stop(svc)
     psql("revoke insert, select on attempts from hooks")
+    psql("revoke select on endpoints from hooks")
     psql("drop role hooks")
 
     # 10. reading the history back

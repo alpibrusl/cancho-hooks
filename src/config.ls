@@ -16,6 +16,7 @@ import std.bytes;
 //     pg-host      the PostgreSQL to write the history to          default none: no history (section 24)
 //     pg-port      its port                                        default 5432, 1 to 65535
 //     pg-user, pg-database, pg-password                            default `hooks`, `hooks`, none
+//     import-endpoints  `1`: copy `endpoints.conf` into the database and exit   default 0 (section 24)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -25,7 +26,7 @@ import std.bytes;
 //
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
-//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] unused
+//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it
@@ -112,6 +113,10 @@ pub fn pg_database_len[&c](cfg: &c [int]) -> [] int {
 
 pub fn pg_password_len[&c](cfg: &c [int]) -> [] int {
     return cfg[10];
+}
+
+pub fn import_endpoints[&c](cfg: &c [int]) -> [] bool {
+    return cfg[11] == 1;
 }
 
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
@@ -220,6 +225,14 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[10] = keep(value, blob, pg_password_at());
+        }
+    } else if bytes.equal(key, "import-endpoints") {
+        if bytes.equal(value, "1") {
+            cfg[11] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[11] = 0;
+        } else {
+            why = why_value();
         }
     } else {
         why = why_key();

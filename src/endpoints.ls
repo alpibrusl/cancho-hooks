@@ -35,7 +35,7 @@ fn is_space(c: int) -> [] bool {
 }
 
 // The next field of the line `[from, to)` of `text`: `(start, end)` with `start == end` if there is none.
-fn field[&t](text: &t [byte], from: int, to: int) -> [] (int, int) {
+pub fn field[&t](text: &t [byte], from: int, to: int) -> [] (int, int) {
     var s = from;
     while s < to && is_space(int_of(text[s])) {
         s = s + 1;
@@ -47,7 +47,7 @@ fn field[&t](text: &t [byte], from: int, to: int) -> [] (int, int) {
     return (s, e);
 }
 
-fn number[&t](text: &t [byte], from: int, to: int) -> [] int {
+pub fn number[&t](text: &t [byte], from: int, to: int) -> [] int {
     if to == from || to - from > 6 {
         return 0 - 1;
     }
