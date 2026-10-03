@@ -434,7 +434,7 @@ def stage_broken():
         signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
         resource.setrlimit(resource.RLIMIT_FSIZE, (6000, 6000))
 
-    proc = subprocess.Popen([BIN, str(port), datadir], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
+    proc = subprocess.Popen([BIN, *chaos.flags(port, datadir)], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL,
                             preexec_fn=limited)
     proc.stderr.readline()
     acked, first_refusal = {}, None

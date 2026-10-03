@@ -48,16 +48,21 @@ jobs:
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks
 
-      - name: Unit tests (the delivery window, the endpoints file, the idempotency index)
+      - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings)
         working-directory: hooks
         run: |
           ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls build/deps/*.ls --std
           ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
           ../lex-sys/target/release/lex-sys test tests/idem_test.ls src/idem.ls --std
+          ../lex-sys/target/release/lex-sys test tests/config_test.ls src/config.ls --std
 
       - name: Signatures and base64 against the reference library
         working-directory: hooks
         run: python3 tests/sign_test.py build/sign_probe
+
+      - name: Settings, from a file and from flags (precedence, refusals)
+        working-directory: hooks
+        run: python3 tests/config_test.py build/hooks
 
       - name: One delivery attempt, against each kind of receiver
         working-directory: hooks

@@ -105,6 +105,14 @@ def read_log(data):
 
 # ---- the service under chaos -----------------------------------------------------------------------------------
 
+def flags(port, datadir, extra=()):
+    """The command line for a service: `extra` is the optional settings in the order they were once positional."""
+    out = ["--port", str(port), "--dir", datadir]
+    for name, value in zip(("schedule", "deadline-ms", "window-ms"), extra):
+        out += [f"--{name}", str(value)]
+    return out
+
+
 class Service:
     def __init__(self, port, datadir, extra=()):
         self.port, self.datadir, self.proc, self.starts = port, datadir, None, 0
@@ -116,7 +124,7 @@ class Service:
             env = dict(os.environ)
             if POWER_LOSS:
                 env["LD_PRELOAD"] = os.path.abspath(SHIM)
-            self.proc = subprocess.Popen([BIN, str(self.port), self.datadir, *self.extra], stderr=subprocess.PIPE,
+            self.proc = subprocess.Popen([BIN, *flags(self.port, self.datadir, self.extra)], stderr=subprocess.PIPE,
                                          stdout=subprocess.DEVNULL, env=env)
             self.starts += 1
             self.proc.stderr.readline()  # "listening"

@@ -2,14 +2,14 @@ edition 5;
 
 // `hooks` -- a webhook delivery service (`docs/design.md`).
 //
-//     hooks <port> <data-dir> [<retry delays in ms, comma separated> [<attempt deadline in ms> [<idempotency window in ms>]]]
+//     hooks --port <port> --dir <data-dir> [--schedule <ms,ms,...>] [--deadline-ms <ms>] [--window-ms <ms>] [--config <file>]
 //
 // This is step H1a: **ingest**. `POST /events` takes a JSON object with a string `"type"`, appends it to a durable log
 // (`lexsys-log`'s `log.ls`), and answers `202` with its id **only after the flush that covers it**. Requests that arrive in
 // the same turn of the loop share one flush (group commit), which is the whole reason the server holds a request and
 // answers it later. `GET /events/:id` reads one back, and `GET /healthz` says the service is up.
 //
-// **Step H1b: delivery to one fixed receiver** (`hooks <port> <data-dir> <receiver-host> <receiver-port>`). After each turn the
+// **Step H1b: delivery to one fixed receiver** (once `hooks <port> <data-dir> <receiver-host> <receiver-port>`; section 13). After each turn the
 // service sends the events the log has flushed, in order, to `POST http://<receiver>/hook`, and counts one delivered on any
 // `2xx`. What is delivered is remembered in a second log, `delivered.seg`, one record per delivered event whose id *is* the
 // event's id: because delivery is strictly in order, the last record is the cursor, and recovery of that log yields it.
@@ -23,6 +23,7 @@ edition 5;
 // strictly increasing, survives a restart (recovery finds the last one), and says nothing about the time.
 
 import std.buffer;
+import std.bytes;
 import std.http;
 import std.io;
 import std.json;
@@ -35,6 +36,7 @@ import crc;
 import idem;
 import std.conns;
 import endpoints;
+import config;
 import sign;
 import state;
 
@@ -363,6 +365,32 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y](heap: &!h Heap, ro
         buffer.drop(heap, body);
         return answer;
     }
+    if id == 5 {
+        // GET /config: the settings in force (`src/config.ls`), as they ended up after the file and the flags. The endpoints and
+        // their secrets are not settings and are not here.
+        var w = json.writer(heap, 160);
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "schedule");
+        w = json.begin_array(heap, w);
+        var k = 0;
+        while k < stats[off_sched()] {
+            w = json.put_int(heap, w, stats[off_sched() + 1 + k]);
+            k = k + 1;
+        }
+        w = json.end_array(heap, w);
+        w = json.put_key(heap, w, "deadline-ms");
+        w = json.put_int(heap, w, stats[c_deadline()]);
+        w = json.put_key(heap, w, "window-ms");
+        w = json.put_int(heap, w, idem.window_ms(ix));
+        w = json.end_object(heap, w);
+        let body = json.finish(w);
+        var answer = out;
+        borrow body as &sb in {
+            answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, body);
+        return answer;
+    }
     if id == 0 - 2 {
         var extra = buffer.append(heap, buffer.empty(heap, 48), "Allow: ");
         extra = route.allowed(heap, router, path, params, extra);
@@ -383,6 +411,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "POST", "/events", 2);
     r = route.add(heap, r, "GET", "/events/:id", 3);
     r = route.add(heap, r, "GET", "/stats", 4);
+    r = route.add(heap, r, "GET", "/config", 5);
     return r;
 }
 
@@ -867,7 +896,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, window, contents(cw), contents(nw), dv[0..16], ix, arena, clock_unix_ms(clock), out);
+                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, window, contents(cw), contents(nw), dv[0..off_sched() + 17], ix, arena, clock_unix_ms(clock), out);
                                     }
                                 }
                             }
@@ -1108,55 +1137,193 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y](heap: &!h Heap, fs: &c Fs
     return 0;
 }
 
+// The settings file named by `--config`, read into `cfg` and `blob` (`src/config.ls`). Answers 0, -1 if it cannot be read, -2 if
+// it is 16 KiB or more, or the number of the first bad line (`config.why` says what is wrong with it).
+fn load_config[&f, &p, &c, &b](fs: &f Fs(""), path: &p [byte], cfg: &!c [int], blob: &!b [byte]) -> [fs_read(""), file_read] int {
+    region a {
+        let text = alloc_slice[a](16384, byte_of(0));
+        match open_read(fs, path) {
+            Opened::Failed(e) => {
+                return 0 - 1;
+            }
+            Opened::Ok(rd0) => {
+                var rd = rd0;
+                var got = 0 - 1;
+                borrow mut rd as &!rh in {
+                    match file_pread(rh, 0, text) {
+                        Read::Got(n) => {
+                            got = n;
+                        }
+                        Read::End => {
+                            got = 0;
+                        }
+                        Read::Failed(e) => {
+                            got = 0 - 1;
+                        }
+                    }
+                }
+                file_close(rd);
+                if got < 0 {
+                    return 0 - 1;
+                }
+                if got >= 16384 {
+                    return 0 - 2;
+                }
+                return config.parse_file(text[0..got], cfg, blob);
+            }
+        }
+    }
+}
+
+// Go through the command line, `--key value` or `--key=value`. In pass 0 only `--config` is looked at and its value is copied
+// into `path`; in pass 1 every other flag is applied to `cfg` and `blob` in the order written. Answers `(code, path length)`:
+// code 0, or `8 * the index of the argument + why`, where `why` is `config.why_key()`, `config.why_value()`, 3 for an argument
+// that is not a flag, or 4 for a flag with no value.
+fn apply_flags[&g, &c, &b, &p](a: &g Args, cfg: &!c [int], blob: &!b [byte], path: &!p [byte], pass: int) -> [args] (int, int) {
+    var plen = 0;
+    var i = 1;
+    while i < arg_count(a) {
+        let x = arg(a, i);
+        let at = i;
+        let f = config.split_flag(x);
+        if f.0 < 0 {
+            return (8 * i + 3, plen);
+        }
+        var value = x[0..0];
+        if f.2 >= 0 {
+            value = x[f.2..f.3];
+        } else {
+            if i + 1 >= arg_count(a) {
+                return (8 * i + 4, plen);
+            }
+            i = i + 1;
+            value = arg(a, i);
+        }
+        let key = x[f.0..f.1];
+        if bytes.equal(key, "config") {
+            if pass == 0 {
+                if len(value) < 1 || len(value) > 4000 {
+                    return (8 * at + config.why_value(), plen);
+                }
+                var k = 0;
+                while k < len(value) {
+                    path[k] = value[k];
+                    k = k + 1;
+                }
+                plen = len(value);
+            }
+        } else if pass == 1 {
+            let why = config.set(cfg, blob, key, value);
+            if why != 0 {
+                return (8 * at + why, plen);
+            }
+        }
+        i = i + 1;
+    }
+    return (0, plen);
+}
+
+// The decimal digits of `n` into `buf`; answers how many.
+fn digits_of[&b](n: int, buf: &!b [byte]) -> [] int {
+    var width = 1;
+    var t = n;
+    while t >= 10 {
+        t = t / 10;
+        width = width + 1;
+    }
+    var k = width;
+    var m = n;
+    while k > 0 {
+        buf[k - 1] = byte_of('0' + m % 10);
+        m = m / 10;
+        k = k - 1;
+    }
+    return width;
+}
+
+fn say[&i, &t](out: &!i Io, text: &t [byte]) -> [err_write] int {
+    return io.error_all(out, text);
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock } = split(world);
     release(ffi);
     var port = 0 - 1;
     var status = 2;
     region a {
-        // The data directory and the retry schedule, copied out of the argument borrow so they can be used after it.
-        let dir_buf = alloc_slice[a](2048, byte_of(0));
-        var dir_len = 0;
-        let sched_buf = alloc_slice[a](256, byte_of(0));
-        var sched_len = 0;
-        var deadline_ms = 0;
-        var window_ms = 86400000;
+        // The settings (`src/config.ls`): the defaults, then the file named by `--config`, then the flags.
+        let cfg = alloc_slice[a](config.size(), 0);
+        let cblob = alloc_slice[a](config.blob_size(), byte_of(0));
+        let cpath = alloc_slice[a](4096, byte_of(0));
+        config.defaults(cfg);
+        var bad = 0;
         borrow args as &g in {
-            if arg_count(g) > 1 {
-                port = number_of(arg(g, 1));
-            }
-            if arg_count(g) > 2 {
-                let d = arg(g, 2);
-                if len(d) < 2000 {
-                    var k = 0;
-                    while k < len(d) {
-                        dir_buf[k] = d[k];
-                        k = k + 1;
+            let first = apply_flags(g, cfg, cblob, cpath, 0);
+            var code = first.0;
+            if code == 0 && first.1 > 0 {
+                var file = 0;
+                borrow fs as &fsr in {
+                    file = load_config(fsr, cpath[0..first.1], cfg, cblob);
+                }
+                if file != 0 {
+                    borrow mut io as &!i in {
+                        say(i, "hooks: --config ");
+                        say(i, cpath[0..first.1]);
+                        if file == 0 - 1 {
+                            say(i, ": cannot be read\n");
+                        } else if file == 0 - 2 {
+                            say(i, ": is 16 KiB or more\n");
+                        } else {
+                            let nb = alloc_slice[a](12, byte_of(0));
+                            say(i, ": line ");
+                            say(i, nb[0..digits_of(file, nb)]);
+                            if config.why(cfg) == config.why_key() {
+                                say(i, " names a setting there is none of\n");
+                            } else if config.why(cfg) == config.why_value() {
+                                say(i, " has a value that setting does not take\n");
+                            } else {
+                                say(i, " is not `key = value`\n");
+                            }
+                        }
                     }
-                    dir_len = len(d);
+                    code = 1;
                 }
             }
-            if arg_count(g) > 3 {
-                let sc = arg(g, 3);
-                if len(sc) < 250 {
-                    var k = 0;
-                    while k < len(sc) {
-                        sched_buf[k] = sc[k];
-                        k = k + 1;
+            if code == 0 {
+                code = apply_flags(g, cfg, cblob, cpath, 1).0;
+            }
+            if code >= 8 {
+                borrow mut io as &!i in {
+                    let why = code % 8;
+                    say(i, "hooks: `");
+                    say(i, arg(g, code / 8));
+                    if why == config.why_key() {
+                        say(i, "` is not a setting\n");
+                    } else if why == config.why_value() {
+                        say(i, "` has a value that setting does not take\n");
+                    } else if why == 3 {
+                        say(i, "` is not a flag: settings are `--key value` or `--key=value`\n");
+                    } else {
+                        say(i, "` needs a value\n");
                     }
-                    sched_len = len(sc);
                 }
             }
-            if arg_count(g) > 4 {
-                deadline_ms = number_of(arg(g, 4));
-            }
-            if arg_count(g) > 5 {
-                window_ms = number_of(arg(g, 5));
-                if window_ms < 0 {
-                    port = 0 - 1;
+            bad = code;
+        }
+        if bad == 0 {
+            port = config.port_of(cfg);
+            if port < 1 || config.dir_len(cfg) == 0 {
+                borrow mut io as &!i in {
+                    say(i, "hooks: --port and --dir are required\n");
                 }
             }
         }
+        let dir_buf = cblob;
+        let dir_len = config.dir_len(cfg);
+        let sched_buf = cblob[config.sched_at()..config.sched_at() + config.sched_len(cfg)];
+        let sched_len = config.sched_len(cfg);
+        let deadline_ms = config.deadline_ms(cfg);
+        let window_ms = config.window_ms(cfg);
         if port > 0 && port < 65536 && dir_len > 0 {
             status = 3;
             borrow mut heap as &!h in {
