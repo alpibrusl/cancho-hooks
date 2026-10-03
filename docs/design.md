@@ -356,3 +356,25 @@ Section 18 put the two libraries in lock files and a script; lex-sys section 8 r
 
 The four unit-test commands (CI and the README spelled them out, with `build/deps/*.ls` to name the libraries) are four `[[test]]` sets in `lex-sys.toml`, and the compiler pin moves to the merge commit of lex-sys #194, which has them. `lex-sys test` runs all four against the installed libraries (9, 2, 6 and 7 tests) and `lex-sys test --test idem` one. Run here with `build/deps` removed first, so the project, not a left-over directory, supplies the libraries. The CI step is one line. Nothing else changed.
 
+## 22. Disabling an endpoint
+
+*Written with the code, like section 20: the rule was decided first, the checks were written with the tests.*
+
+**What asked for it.** Section 4 says `410 Gone` disables the endpoint. Until now a `410` was a failure like any other: the event was retried nine times over a day against a receiver that had said, in the clearest status there is, that it was never coming back.
+
+**The rule.**
+
+* A `410` from an endpoint makes **that event a dead letter at once** (it will not be delivered there, and retrying cannot change that) and **disables the endpoint**: it gets no new attempts. Attempts already in flight finish and are recorded as usual.
+* A disabled endpoint's later events are not failed and not dead: they wait, uncounted, exactly where they are, so its cursor stays behind them. The window (section 15) is what bounds this: more than 1,024 events behind, the endpoint is not served at all, as for any endpoint that far behind. Nothing is dropped.
+* **A person enables it again**: `POST /endpoints/:id/enable`. The events that waited are then delivered, in the window's order. The event that got the `410` stays dead; putting it back is replay (not built). Enabling an endpoint that is enabled answers `200` and writes nothing.
+* No other status disables anything: a `404` or a `301` is a failure, with the schedule. Only `410`.
+* `GET /endpoints` lists each endpoint's id, port, cursor and `disabled`. It does not list the host, and never the secret.
+
+**How it survives a restart.** Two new kinds of record in `delivery.seg`, `disabled` and `enabled` (4 and 5), with the endpoint's id and nothing else. Recovery replays them in order into one bit per endpoint; `state.apply` ignores them (it used to treat any kind that was not `failed` as final, so it now says which kinds it means). A crash between the `dead` record and the `disabled` record leaves the event dead and the endpoint enabled: the next event is tried, gets its `410`, and the endpoint is disabled then (reasoned, not tested: no test kills the service in that gap). Enabling flushes before it answers; a failed flush is a `503` and the endpoint stays disabled (also not tested: no test breaks the delivery log).
+
+**What it does not do.** No automatic re-enabling, no disabling by a person (only by the receiver), no per-endpoint reason or time recorded. Endpoints still come from `endpoints.conf`, which a restart re-reads: removing a line removes the endpoint, and its records are then ignored.
+
+**What the tests check.** `tests/gone_test.py`: a `404` retries and disables nothing; a `410` on a retry disables, dead-letters the event at once, and leaves the other endpoint alone; later events reach only the other endpoint, and the disabled receiver sees nothing for longer than an attempt takes; a restart keeps it disabled; `enable` delivers the events that waited and not the dead one, and a restart keeps it enabled with nothing repeated; the refusals (`404` unknown, `400` out of range, `405` on `GET`); the endpoints are told apart (a non-zero id, both disabled, enabling one of two leaves the other, across a restart); an enable of an enabled endpoint writes no record. `tests/state_test.ls`: the two kinds read back and change no cell.
+
+**Mutants: fifteen, fifteen killed.** The 410 rule removed; the disable not written; attempts not skipped for a disabled endpoint; recovery ignoring the records, or reading them inverted; enable not clearing the bit, not writing its record, writing one when there is nothing to enable, accepting an unknown endpoint; `/endpoints` always saying enabled; the bit always bit 0; the clear clearing every endpoint; the disable bit set without the record; `apply` treating the new kinds as final; the new kinds not read back. **Three survived the first tests, and each was a test that checked less than it said:** an enable of an enabled endpoint was claimed to write nothing and nothing looked; every disabled endpoint in the test was id 0, so a bit mask that only ever used bit 0 passed; and clearing every endpoint's bit when enabling one passed because the other endpoint, cleared, was disabled again a few milliseconds later by the `410` it still answered (the receivers now answer `204` before the enable, so a wrongly enabled endpoint stays enabled and shows).
+

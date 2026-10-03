@@ -39,6 +39,16 @@ pub fn dead() -> [] int {
     return 3;
 }
 
+// Two records that are about an endpoint, not an event: it was disabled (a `410 Gone`, or a person), and it was enabled again.
+// Their `id`, `attempts` and `next_at` are 0, and `apply` does nothing with them.
+pub fn disabled() -> [] int {
+    return 4;
+}
+
+pub fn enabled() -> [] int {
+    return 5;
+}
+
 // The size of the cell array for `n` endpoints: three ints (final, attempts, next attempt) per cell.
 pub fn cells(n: int) -> [] int {
     return n * span() * 3;
@@ -73,9 +83,13 @@ pub fn next_at[&w](w: &w [int], e: int, id: int) -> [] int {
     return w[cell(e, id) + 2];
 }
 
-// Apply one outcome. `delivered` and `dead` make `id` final; `failed` records `attempts` and `next_at`. Answers 0, or -1 if
+// Apply one outcome. `delivered` and `dead` make `id` final; `failed` records `attempts` and `next_at`; any other kind (the
+// endpoint records) changes nothing. Answers 0, or -1 if
 // `id` is above the window (nothing is changed). An id at or below the cursor is already final and is ignored (answers 0).
 pub fn apply[&w, &c](w: &!w [int], cur: &!c [int], e: int, kind: int, id: int, attempts: int, next_at: int) -> [] int {
+    if kind != failed() && kind != delivered() && kind != dead() {
+        return 0;
+    }
     if id <= cur[e] {
         return 0;
     }
@@ -134,7 +148,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 3 {
+    if kind < 1 || kind > 5 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

@@ -161,3 +161,25 @@ fn test_a_foreign_record_is_not_an_outcome() -> [] int {
     }
     return 0;
 }
+
+// The endpoint records (disabled, enabled) read back as themselves, and `apply` does nothing with them: an id of 0 is at or
+// below every cursor, but a record with an id in the window must not make that id final either.
+fn test_endpoint_records_read_back_and_change_no_cell() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        state.put_outcome(buf, 0, 7, state.disabled(), 2, 0, 0, 0);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, state.disabled());
+        test.assert_eq(o.1, 2);
+        state.put_outcome(buf, 0, 8, state.enabled(), 2, 0, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, state.enabled());
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.disabled(), 1, 1, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.enabled(), 1, 1, 0), 0);
+        test.assert_eq(c[0], 0);
+        test.assert(!state.is_final(w, c, 0, 1));
+        test.assert_eq(state.attempts(w, 0, 1), 0);
+    }
+    return 0;
+}

@@ -60,6 +60,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/config_test.py build/hooks
 
+      - name: 410 Gone disables an endpoint; enabling it again
+        working-directory: hooks
+        run: python3 tests/gone_test.py build/hooks
+
       - name: One delivery attempt, against each kind of receiver
         working-directory: hooks
         run: python3 tests/attempt_test.py build/hooks
@@ -83,3 +87,19 @@ jobs:
       - name: Idempotency keys (the contract, refusals, restarts, chaos, a broken log, the full index)
         working-directory: hooks
         run: FULL=1 python3 tests/idempotency_test.py build/hooks
+
+      # Only a binary that passed every step above is kept. It is the service as built by the compiler this commit pins, linked
+      # against the runner's glibc (ubuntu-latest) and so for a Linux x86-64 host with that glibc or newer. A zip loses the
+      # executable bit: `chmod +x` after downloading.
+      - name: Keep the service binary
+        run: |
+          mkdir dist
+          cp hooks/build/hooks dist/hooks-linux-x86_64
+          (cd dist && sha256sum hooks-linux-x86_64 > hooks-linux-x86_64.sha256)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hooks-linux-x86_64-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
