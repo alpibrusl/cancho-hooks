@@ -112,31 +112,35 @@ pub fn drain[&h, &q, &s](heap: &!h Heap, pl: &!q pool.Pool, hs: &!s [int], most:
     return sent;
 }
 
-// Take every answer the pool has: a row is written if the reply is not a failure, else counted as failed. Keeps `live` as
-// the pool says it is.
-pub fn settle[&q, &s](pl: &!q pool.Pool, hs: &!s [int]) -> [] int {
-    var n = 0;
-    var tag = pool.next_done(pl);
-    while tag >= 0 {
-        var bad = pool.status(pl) != 0;
-        if !bad {
-            if pg.failure(pool.reply(pl)) >= 0 {
-                bad = true;
-            }
+// The tags of the requests on the pool: an insert is 1, and a request for the API (a query somebody is waiting for) is
+// `query_base()` and above, each its own.
+pub fn query_base() -> [] int {
+    return 100;
+}
+
+// The request `pool.next_done` last answered was an insert: count it as written, or as failed if the reply is not a success.
+pub fn account[&q, &s](pl: &q pool.Pool, hs: &!s [int]) -> [] int {
+    var bad = pool.status(pl) != 0;
+    if !bad {
+        if pg.failure(pool.reply(pl)) >= 0 {
+            bad = true;
         }
-        if bad {
-            hs[5] = hs[5] + 1;
-        } else {
-            hs[4] = hs[4] + 1;
-        }
-        if hs[7] > 0 {
-            hs[7] = hs[7] - 1;
-        }
-        n = n + 1;
-        tag = pool.next_done(pl);
     }
+    if bad {
+        hs[5] = hs[5] + 1;
+    } else {
+        hs[4] = hs[4] + 1;
+    }
+    if hs[7] > 0 {
+        hs[7] = hs[7] - 1;
+    }
+    return 0;
+}
+
+// Keep `live` as the pool says it is.
+pub fn sync[&q, &s](pl: &q pool.Pool, hs: &!s [int]) -> [] int {
     hs[2] = pool.live(pl);
-    return n;
+    return 0;
 }
 
 // An unpredictable client nonce for the SCRAM login: 18 bytes from the kernel, as base64.

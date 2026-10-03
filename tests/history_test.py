@@ -17,6 +17,12 @@ with SCRAM-SHA-256 using it (and `psql` gets it as PGPASSWORD); without, the ser
   7. no database named: nothing is counted and nothing is written
   8. a database that answers with an SQL error (the table is gone): rows counted as failed, delivery unaffected, writing resumes
   9. the defaults (user and database `hooks`, no password), when the server trusts the connection
+ 10. `GET /events/:id/attempts` (C3b): the rows of an event as JSON, in order, with a replay's among them; an event with no rows is
+     `[]`; an unknown event is a 404 and event 0 a 400; no database named is a 503; concurrent requests are each answered with their
+     own event's rows; on a connection kept alive two requests in a row work
+ 11. the same request when the database is slow, gone or wrong: a database that never answers is a 504 after five seconds, the
+     slots of the requests that waited are given back (the 65th waiting request is a 503 and a later one is accepted again),
+     a cut database or an SQL error is a 503, and delivery is not touched by any of it
 """
 import base64
 import http.server
@@ -29,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -303,6 +310,179 @@ def main():
         stop(svc)
     psql("revoke insert, select on attempts from hooks")
     psql("drop role hooks")
+
+    # 10. reading the history back
+    psql("truncate attempts")
+    a.status, b.status, d.stall = 500, 204, 3
+    svc = start_service([a.port, b.port, dead_port, d.port], PG_PORT)
+    post(svc, 1)
+    wait_for(lambda: stats(svc)["dead"] == 3 and stats(svc)["history_written"] == stats(svc)["attempts"], 15)
+    a.status = 204
+    urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{svc.port}/events/1/replay/0", method="POST", data=b""), timeout=5).read()
+    wait_for(lambda: stats(svc)["history_written"] == stats(svc)["attempts"] and stats(svc)["attempts"] >= 8, 10)
+    got = get(svc, "/events/1/attempts")
+    want = [(0, False, 1, "failed", 500), (0, False, 2, "dead", 500), (0, True, 1, "delivered", 204), (1, False, 1, "delivered", 204),
+            (2, False, 1, "failed", -1), (2, False, 2, "dead", -1), (3, False, 1, "failed", -3), (3, False, 2, "dead", -3)]
+    check("10. the attempts of event 1, in order of endpoint, replay and attempt, with their outcomes and statuses",
+          [(r["endpoint"], r["replay"], r["attempt"], r["outcome"], r["status"]) for r in got] == want, str(got))
+    check("10. each row also says when it ended and how long it took",
+          all(isinstance(r["at"], int) and r["at"] >= t0 - 1000 and isinstance(r["latency_ms"], int) for r in got)
+          and all(700 <= r["latency_ms"] <= 2500 for r in got if r["status"] == -3), str(got))
+    check("10. the answer is the database's, row for row", [(int(x[0]), x[2] == "1", int(x[3]), int(x[5])) for x in rows("where event = 1")] ==
+          [(r["endpoint"], r["replay"], r["attempt"], r["status"]) for r in got], str(got))
+    post(svc, 2)
+    wait_for(lambda: len(rows("where event = 2")) == 6, 15)
+    check("10. event 2's answer holds only event 2's rows", {r["endpoint"] for r in get(svc, "/events/2/attempts")} == {0, 1, 2, 3} and
+          len(get(svc, "/events/2/attempts")) == 6, str(get(svc, "/events/2/attempts")))
+    import http.client
+    c = http.client.HTTPConnection("127.0.0.1", svc.port, timeout=5)
+    c.request("GET", "/events/1/attempts")
+    r1 = c.getresponse()
+    body1 = r1.read()
+    c.request("GET", "/events/2/attempts")
+    r2 = c.getresponse()
+    body2 = r2.read()
+    check("10. two requests on one connection kept alive are each answered", r1.status == 200 and r2.status == 200 and len(json.loads(body1)) == 8 and len(json.loads(body2)) == 6,
+          f"{r1.status} {r2.status}")
+    c.close()
+    results = {}
+
+    def ask(k):
+        try:
+            results[k] = (get(svc, f"/events/{1 + k % 2}/attempts"), 1 + k % 2)
+        except Exception as e:
+            results[k] = (str(e), 0)
+
+    threads = [threading.Thread(target=ask, args=(k,)) for k in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("10. 50 requests at once are each answered with their own event's rows",
+          all(isinstance(v[0], list) and len(v[0]) == (8 if v[1] == 1 else 6) for v in results.values()), str({k: v for k, v in results.items() if not isinstance(v[0], list)}))
+    code404 = urllib.request.Request(f"http://127.0.0.1:{svc.port}/events/99/attempts")
+    try:
+        urllib.request.urlopen(code404, timeout=5)
+        c404 = 200
+    except urllib.error.HTTPError as e:
+        c404 = e.code
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/0/attempts", timeout=5)
+        c400 = 200
+    except urllib.error.HTTPError as e:
+        c400 = e.code
+    check("10. an unknown event is a 404 and event 0 a 400", (c404, c400) == (404, 400), f"{c404} {c400}")
+    ok_all = True
+    for k in range(150):
+        try:
+            if len(get(svc, "/events/1/attempts")) != 8:
+                ok_all = False
+        except Exception:
+            ok_all = False
+    check("10. 150 requests one after another are all answered (a slot is given back when its request is answered)", ok_all)
+    c = http.client.HTTPConnection("127.0.0.1", svc.port, timeout=5)
+    c.request("GET", "/events/1/attempts", headers={"Connection": "close"})
+    rc = c.getresponse()
+    rc.read()
+    check("10. a request that asked for Connection: close is answered with it", rc.status == 200 and (rc.getheader("Connection") or "").lower() == "close", str(rc.getheaders()))
+    c.close()
+    c = http.client.HTTPConnection("127.0.0.1", svc.port, timeout=5)
+    c.request("GET", "/events/1/attempts")
+    rk = c.getresponse()
+    rk.read()
+    check("10. and one that did not is kept alive", rk.status == 200 and (rk.getheader("Connection") or "keep-alive").lower() != "close", str(rk.getheaders()))
+    c.close()
+    stop(svc)
+
+    # an event nobody tried to deliver (no endpoints) has no rows: []
+    psql("truncate attempts")
+    svc = start_service([], PG_PORT)
+    post(svc, 1)
+    check("10. an event with no attempts is an empty list", get(svc, "/events/1/attempts") == [], str(get(svc, "/events/1/attempts")))
+    stop(svc)
+    svc = start_service([b.port], 0, pg_flags=False)
+    post(svc, 1)
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/1/attempts", timeout=5)
+        cn, msg = 200, b""
+    except urllib.error.HTTPError as e:
+        cn, msg = e.code, e.read()
+    check("10. without a database named it is a 503 that says why", cn == 503 and b"no database is named" in msg, f"{cn} {msg}")
+    stop(svc)
+
+    # 11. the same request, when the database is not right
+    psql("truncate attempts")
+    proxy = PgProxy(PG_HOST, PG_PORT)
+    svc = start_service([b.port], proxy.port)
+    for n in range(5):
+        post(svc, n)
+    wait_for(lambda: stats(svc)["history_written"] == 5, 10)
+    proxy.mode = "hold"
+    t = time.time()
+    codes = {}
+
+    def ask_held(k):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/1/attempts", timeout=30) as r:
+                codes[k] = (r.status, time.time() - t)
+        except urllib.error.HTTPError as e:
+            codes[k] = (e.code, time.time() - t)
+        except Exception as e:
+            codes[k] = (str(e), time.time() - t)
+
+    threads = [threading.Thread(target=ask_held, args=(k,)) for k in range(70)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    fives = sorted(v[0] for v in codes.values())
+    check("11. a database that never answers: 64 requests wait and are a 504 after about five seconds, the other 6 are a 503 at once",
+          fives.count(504) == 64 and fives.count(503) == 6 and all(4.5 <= v[1] <= 8 for v in codes.values() if v[0] == 504)
+          and all(v[1] < 2 for v in codes.values() if v[0] == 503), str(sorted(codes.values())[:3]) + str(fives[:3]) + str(fives[-3:]))
+    t = time.time()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/1/attempts", timeout=30)
+        cs, took = 200, time.time() - t
+    except urllib.error.HTTPError as e:
+        cs, took = e.code, time.time() - t
+    check("11. the slots were given back: the next request is accepted again (waits, then 504), not refused", cs == 504 and took >= 4.5, f"{cs} {took:.1f}")
+    check("11. and delivery was never touched", get(svc, "/healthz") == {"ok": True})
+    stop(svc)
+    proxy.close()
+
+    psql("truncate attempts")
+    proxy = PgProxy(PG_HOST, PG_PORT)
+    svc = start_service([b.port], proxy.port)
+    post(svc, 1)
+    wait_for(lambda: stats(svc)["history_written"] == 1, 10)
+    proxy.cut()
+    time.sleep(0.3)
+    t = time.time()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/1/attempts", timeout=30)
+        cc = 200
+    except urllib.error.HTTPError as e:
+        cc = e.code
+    check("11. a database that was cut: a 503 (not a wait)", cc == 503 and time.time() - t < 3, f"{cc} {time.time() - t:.1f}")
+    stop(svc)
+    proxy.close()
+
+    psql("truncate attempts")
+    svc = start_service([b.port], PG_PORT)
+    post(svc, 1)
+    wait_for(lambda: stats(svc)["history_written"] == 1, 10)
+    psql("alter table attempts rename to attempts_away")
+    try:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/1/attempts", timeout=10)
+            ce = 200
+        except urllib.error.HTTPError as e:
+            ce = e.code
+        check("11. an SQL error (the table is gone): a 503", ce == 503, str(ce))
+    finally:
+        psql("alter table attempts_away rename to attempts")
+    check("11. and when the table is back the same connections answer", get(svc, "/events/1/attempts") != [] and len(get(svc, "/events/1/attempts")) == 1, str(get(svc, "/events/1/attempts")))
+    stop(svc)
 
     print("FAILED: " + ", ".join(FAILS) if FAILS else "all history checks passed")
     sys.exit(1 if FAILS else 0)

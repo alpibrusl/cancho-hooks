@@ -19,3 +19,6 @@ create table if not exists attempts (
     latency_ms int not null,
     primary key (endpoint, event, replay, attempt)
 );
+
+-- Asking "what happened to event 41" is the question this table is for.
+create index if not exists attempts_event on attempts (event);

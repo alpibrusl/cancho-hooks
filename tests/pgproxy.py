@@ -29,6 +29,7 @@ class PgProxy:
                 continue
             try:
                 u = socket.create_connection(self.target, timeout=5)
+                u.settimeout(None)   # the timeout is for connecting: an idle database connection is not an error
             except OSError:
                 c.close()
                 continue

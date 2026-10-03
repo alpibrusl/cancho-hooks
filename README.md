@@ -173,6 +173,7 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `GET /events/:id` | the stored event, `404` if there is none |
 | `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys","replays","history_live","history_written","history_failed","history_dropped"}` |
 | `POST /events/:id/replay` | send the event again to every endpoint; `/replay/:endpoint` for one. `202 {"event","endpoints"}`, `404` for an unknown event or endpoint, `507` if 32 replays already wait. Same `webhook-id`, same schedule (design.md section 23) |
+| `GET /events/:id/attempts` | the attempts of an event from the database, as `[{"endpoint","replay","attempt","outcome","status","at","latency_ms"}]`; `503` if no database is named or it cannot answer, `504` after five seconds |
 | `GET /endpoints` | each endpoint's `{"id","port","cursor","disabled"}` (not the host, not the secret) |
 | `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
 | `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |

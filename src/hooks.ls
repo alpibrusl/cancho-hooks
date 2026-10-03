@@ -31,6 +31,8 @@ import std.route;
 import http.server;
 import log;
 import history;
+import view;
+import queries;
 import pg.pool;
 import record;
 import attempt;
@@ -520,6 +522,22 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         buffer.drop(heap, body);
         return answer;
     }
+    if id == 10 {
+        // GET /events/:id/attempts: what happened to the event, from the database. The request is held until it answers (`run`).
+        let want = route.param_nat(path, params, 0);
+        if want < 1 {
+            return server.failure(heap, out, 400, "the id must be a positive number", keep);
+        }
+        if want > log.last_ms(lg) {
+            return server.failure(heap, out, 404, "no such event", keep);
+        }
+        if !history.enabled(stats[off_hq()..off_hq() + history.size()]) {
+            return server.failure(heap, out, 503, "no database is named, so no history is kept", keep);
+        }
+        note[0] = 0 - 2;
+        note[1] = want;
+        return out;
+    }
     if id == 0 - 2 {
         var extra = buffer.append(heap, buffer.empty(heap, 48), "Allow: ");
         extra = route.allowed(heap, router, path, params, extra);
@@ -545,6 +563,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/endpoints", 7);
     r = route.add(heap, r, "POST", "/events/:id/replay", 8);
     r = route.add(heap, r, "POST", "/events/:id/replay/:endpoint", 9);
+    r = route.add(heap, r, "GET", "/events/:id/attempts", 10);
     return r;
 }
 
@@ -757,6 +776,15 @@ fn flight_at(e: int, id: int) -> [] int {
 // The most attempts one turn starts, so a long backlog does not starve the requests behind it.
 fn most_starts() -> [] int {
     return 16;
+}
+
+// The requests for the history that may wait for the database at once, and how long one waits (ms) before it is a 504.
+fn pq_cap() -> [] int {
+    return 64;
+}
+
+fn query_wait_ms() -> [] int {
+    return 5000;
 }
 
 // The most attempts one endpoint has in flight together: a stalled endpoint holds this many slots and no more.
@@ -1290,7 +1318,11 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
             }
             let params = box_slice(heap, 2 * widest, 0);
             let scratch = box_slice(heap, max_len() + 8192, byte_of(0));
-            let note = box_slice(heap, 1, 0);
+            let note = box_slice(heap, 2, 0);
+            // The requests for the history that wait for the database: per slot, the pool's tag (0 for a free slot), the ticket of the
+            // held connection, whether to keep it alive, and when to give up.
+            let pq = box_slice(heap, pq_cap() * 4, 0);
+            var next_tag = history.query_base();
             // The delivery attempts in flight: their state, request and response bytes, the poller events that concern them, and
             // their connections.
             let at = box_slice(heap, attempt.at_size(), 0);
@@ -1331,10 +1363,57 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                             }
                         }
                         var accepted = 0 - 1;
+                        var asked = 0 - 1;
                         borrow note as &nr in {
                             accepted = contents(nr)[0];
+                            if contents(nr)[0] == 0 - 2 {
+                                asked = contents(nr)[1];
+                            }
                         }
-                        if accepted >= 0 && held < most_held() {
+                        if asked >= 0 {
+                            // A request for the history: queue it on the pool and hold the connection until the answer comes, or
+                            // say at once that it cannot be done (every slot taken, the pool full, no connection live).
+                            var qslot = 0 - 1;
+                            borrow pq as &pr in {
+                                var k = 0;
+                                while k < pq_cap() {
+                                    if contents(pr)[4 * k] == 0 && qslot < 0 {
+                                        qslot = k;
+                                    }
+                                    k = k + 1;
+                                }
+                            }
+                            var sent = 0 - 1;
+                            if qslot >= 0 {
+                                let request = queries.attempts_of_start(heap, asked);
+                                borrow request as &rb in {
+                                    borrow mut pl as &!qw in {
+                                        sent = pool.submit(qw, next_tag, buffer.bytes(rb));
+                                    }
+                                }
+                                buffer.drop(heap, request);
+                            }
+                            if sent == 0 {
+                                var ticket = 0 - 1;
+                                borrow mut srv as &!sw in {
+                                    ticket = server.hold(sw);
+                                }
+                                borrow mut pq as &!pw in {
+                                    contents(pw)[4 * qslot] = next_tag;
+                                    contents(pw)[4 * qslot + 1] = ticket;
+                                    contents(pw)[4 * qslot + 2] = keep;
+                                    contents(pw)[4 * qslot + 3] = clock_ms(clock) + query_wait_ms();
+                                }
+                                next_tag = next_tag + 1;
+                            } else {
+                                out = server.failure(heap, out, 503, "the history cannot be read now", keep == 1);
+                                borrow mut srv as &!sw in {
+                                    borrow out as &ob in {
+                                        server.respond(sw, buffer.bytes(ob));
+                                    }
+                                }
+                            }
+                        } else if accepted >= 0 && held < most_held() {
                             var ticket = 0 - 1;
                             borrow mut srv as &!sw in {
                                 ticket = server.hold(sw);
@@ -1440,7 +1519,67 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                                     j = j + 1;
                                 }
                             }
-                            history.settle(qw, dv[off_hq()..off_hq() + history.size()]);
+                            // every request the pool has an answer for: an insert is counted, a request for the API is answered
+                            var tag = pool.next_done(qw);
+                            while tag >= 0 {
+                                if tag < history.query_base() {
+                                    history.account(qw, dv[off_hq()..off_hq() + history.size()]);
+                                } else {
+                                    var slotq = 0 - 1;
+                                    borrow pq as &pr in {
+                                        var k = 0;
+                                        while k < pq_cap() {
+                                            if contents(pr)[4 * k] == tag {
+                                                slotq = k;
+                                            }
+                                            k = k + 1;
+                                        }
+                                    }
+                                    // (a slot that is not found timed out already and was answered then)
+                                    if slotq >= 0 {
+                                        var ticket = 0 - 1;
+                                        var keep_it = true;
+                                        borrow pq as &pr in {
+                                            ticket = contents(pr)[4 * slotq + 1];
+                                            keep_it = contents(pr)[4 * slotq + 2] == 1;
+                                        }
+                                        let reply = view.attempts_reply(heap, pool.reply(qw), pool.status(qw), keep_it);
+                                        borrow reply as &rb in {
+                                            server.answer(sw, ticket, buffer.bytes(rb));
+                                        }
+                                        buffer.drop(heap, reply);
+                                        borrow mut pq as &!pw in {
+                                            contents(pw)[4 * slotq] = 0;
+                                        }
+                                    }
+                                }
+                                tag = pool.next_done(qw);
+                            }
+                            history.sync(qw, dv[off_hq()..off_hq() + history.size()]);
+                            // the ones the database has not answered in time are answered now, and forgotten
+                            let now_ms = clock_ms(clock);
+                            var q = 0;
+                            while q < pq_cap() {
+                                var due = false;
+                                var ticket = 0 - 1;
+                                var keep_it = true;
+                                borrow pq as &pr in {
+                                    due = contents(pr)[4 * q] != 0 && now_ms >= contents(pr)[4 * q + 3];
+                                    ticket = contents(pr)[4 * q + 1];
+                                    keep_it = contents(pr)[4 * q + 2] == 1;
+                                }
+                                if due {
+                                    let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time", keep_it);
+                                    borrow late as &lb in {
+                                        server.answer(sw, ticket, buffer.bytes(lb));
+                                    }
+                                    buffer.drop(heap, late);
+                                    borrow mut pq as &!pw in {
+                                        contents(pw)[4 * q] = 0;
+                                    }
+                                }
+                                q = q + 1;
+                            }
                             history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
                             pool.flush(qw, server.poller(sw));
                         }
@@ -1458,6 +1597,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
             unbox_slice(heap, params);
             unbox_slice(heap, scratch);
             unbox_slice(heap, note);
+            unbox_slice(heap, pq);
             unbox_slice(heap, tickets);
             unbox_slice(heap, ids);
             unbox_slice(heap, keeps);
