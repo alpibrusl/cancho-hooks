@@ -1,0 +1,131 @@
+# lexsys-hooks: webhook delivery on lex-sys
+
+Status: **design only.** Nothing is built. This project exists to be a realistic program that needs every component the lex-sys stack has, so that what is *missing* shows up as a failing test and not as an opinion. Section 9 lists what is predicted to be missing; it is a list of guesses, and the first job of the build is to find out which are wrong.
+
+## 1. What this is, and what it is for
+
+A customer's application posts **events** to an HTTP API. The service stores each event durably, then **delivers** it to every subscriber URL registered for that event's type: an HTTP `POST`, signed, retried with backoff on failure, with a record of every attempt. Svix and Hookdeck are products of this kind.
+
+It is chosen because the properties that make it hard are exactly the properties the components claim, and each can be tested from outside:
+
+| property | what has to be true | which component's claim it tests |
+|---|---|---|
+| an accepted event is never lost | a `2xx` from the API means the event survives `kill -9` at any instant | `lexsys-log` recovery (its design, section 6) |
+| delivery is at least once | an event is delivered, or visibly dead-lettered, never silently dropped | consumer groups, the group log |
+| a slow subscriber does not stall the others | one endpoint timing out for 30 s does not delay another's delivery | the event loop, outbound sockets, timers |
+| the signature is checkable by anyone | an independent implementation verifies every delivery | `std.crypto` (plus HMAC, which is missing) |
+| the authority is small and visible | the service touches one data directory, one listening port, and outbound network | `lex-sys authority`, `lex-os` grants |
+
+The claim, in one sentence: **a single-node webhook service in lex-sys, with no `Ffi`, that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one.
+
+## 2. What is built from what
+
+| role | component | notes |
+|---|---|---|
+| HTTP API | `lexsys-web`, `lexsys-schema` | request validation by schema, `problem+json` errors |
+| configuration data | Postgres via `lexsys-pg` (pool, and the pooler in front) | endpoints, subscriptions, attempt history |
+| the queue | `lexsys-log`, Redis Streams front-end not needed here: the engine is used as a library | one stream, one consumer group of delivery workers |
+| idempotency, rate limits, circuit state | `lexsys-cache` | *only* facts that can be lost without harm (section 4) |
+| the audit trail | `lexsys-log` in trail mode, `lex-trail` events | one event per attempt |
+| the authority check | `lex-sys authority`, `lex-os` grant | section 7 |
+| signing | `std.crypto` SHA-256 plus an HMAC to be written | section 5 |
+
+Where this needs something that does not exist, the project does not paper over it: it records the gap (section 9) and either works around it in the open or stops.
+
+## 3. The data, and which store owns each fact
+
+Two durable stores is the usual way a design like this loses events: the service writes an event to one, crashes, and the other never hears of it. The rule that prevents it is **one source of truth for each fact**, and nothing that must be consistent across two stores.
+
+| fact | owner | why there |
+|---|---|---|
+| an event exists, and its payload | **the log** | accepted means "in the log and flushed" |
+| what is pending, in flight, retried at time T, dead-lettered | **the log's consumer-group state** | it changes on every attempt; a log of changes is the cheap way to make it durable |
+| endpoints, their secrets, which event types each wants | **Postgres** | rarely changed, queried by many, needs ordinary transactions |
+| the history of attempts (status, latency, response body prefix) | **Postgres, written by the worker after the attempt** | for humans and the API; an `INSERT` with the attempt's id as a unique key, so a repeat is harmless |
+| an event's idempotency key | **the log**, in the record, with an in-memory index rebuilt on open | a dedupe that forgets across a crash would double-send the event it was supposed to protect |
+| per-endpoint failure counts, a circuit breaker's state, rate-limit counters | **the cache** | losing them costs a few extra attempts, never an event |
+
+So an accepted event touches **one** durable store on the accept path. Postgres is on the accept path only for *reading* the subscriptions, and a Postgres outage degrades the service to "accepts events and queues them, cannot fan out until the subscriptions load", which is a stated mode and not a surprise. The attempt history can lag or be lost without losing a delivery.
+
+## 4. Delivery semantics
+
+**At least once.** After a crash an event can be delivered twice; it cannot be delivered zero times unless it is dead-lettered, and a dead letter is a recorded outcome the API shows.
+
+**Idempotency on the way in.** A client may send an `Idempotency-Key`. A second `POST` with the same key within the window answers the first one's response, byte for byte, and writes nothing. The window is configurable; the keys live in the log (section 3), so the guarantee survives a crash.
+
+**Per-endpoint order.** Events accepted in sequence are *attempted* in sequence to one endpoint **when the endpoint is healthy**. After a failure the retry of event N and the first attempt of event N+1 are not ordered, because holding every later event behind a failing one is head-of-line blocking, which is the usual reason to want a queue in the first place. Strict ordering is a per-endpoint option that accepts the blocking, and is not in v1.
+
+**Retries.** A delivery succeeds on any `2xx`. Anything else, a timeout, or a connection failure is a failure. The schedule is exponential with jitter: 5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 10 h (the values Standard Webhooks suggests, so a subscriber used to Svix is not surprised), then dead-letter. `410 Gone` disables the endpoint. The delays are data in the group state, so a restart resumes them, and a restart does not retry everything at once.
+
+**Dead letters** stay in the log and are visible by id; `POST /events/{id}/replay` puts one back.
+
+**Signing.** The format is [Standard Webhooks](https://www.standardwebhooks.com): headers `webhook-id`, `webhook-timestamp` and `webhook-signature`, the signature being `v1,` plus the base64 of HMAC-SHA256 over `id.timestamp.payload` with the endpoint's secret. It is chosen because a subscriber then needs no library of ours, and because there are independent implementations to check against. **I have not fetched the specification in this session**, and the header names and signing string above are from memory; the first step of the signing work is to read the specification and correct this paragraph where it is wrong.
+
+## 5. The API, minimally
+
+| | |
+|---|---|
+| `POST /endpoints` | register a URL, the event types it wants; answers its id and signing secret once |
+| `GET /endpoints/{id}`, `PATCH`, `DELETE` | ordinary |
+| `POST /events` | `{type, payload}`, optional `Idempotency-Key`; **`202` with the event id, only after the flush** |
+| `GET /events/{id}` | the event and, per endpoint, its delivery state |
+| `GET /events/{id}/attempts` | the attempt history |
+| `POST /events/{id}/replay` | re-deliver, including a dead letter |
+| `GET /healthz`, `GET /metrics` | liveness; counters in the Prometheus text format |
+
+Request bodies are validated with `lexsys-schema`, and the errors are `problem+json`, as in `lexsys-web`.
+
+## 6. The test scenario, fixed before the build
+
+A harness drives the service with a **receiver** it controls (it records every request and can be told to fail, stall or answer with a status) and a **chaos** process that `kill -9`s the service and restarts it.
+
+1. **No acknowledged event is lost.** Send 10,000 events, killing the service at random instants at least 200 times. Every event that received a `202` is, at the end, delivered at least once or dead-lettered. The count of events the harness saw acknowledged and the count in the log after the last restart are compared by id.
+2. **Retries follow the schedule.** A receiver that fails the first *k* attempts sees the documented delays within a stated tolerance (a scaled-down schedule for the test), then one success, then nothing more.
+3. **A stalled receiver does not stall the others.** One endpoint that never answers; a hundred others healthy. The healthy ones' p99 delivery latency with the stalled one present is within a stated factor of without it.
+4. **Idempotency survives a crash.** The same key sent before and after a kill gets the same answer and one delivery.
+5. **Signatures verify** against an independent implementation (Python's `hmac` and `base64`), for every delivery in the run.
+6. **The authority report** has no `ffi`, names one filesystem prefix, one bound port, and outbound network only. Pinned by a test.
+7. **Reported, not gated:** events accepted per second with the flush policy `always`; p50 and p99 of time from `202` to first delivery; memory and descriptors at 1,000 endpoints. The comparison is a Python service (FastAPI, Redis Streams, one worker) built to the same specification; its numbers are measured before ours and the method is written down before either.
+
+If a criterion cannot be met because a component is missing, the result says which component and what the failure looked like. That is a finding, and the purpose.
+
+## 7. Running under a grant
+
+The deployment target is a `lex-os` box. The grant the service needs is the point of the authority report: a data directory it may read and write, a port it may listen on, and outbound network to anything (a webhook service cannot know its subscribers in advance, which is the one place the authority is *wide* and the design says so).
+
+**An expected tension.** `narrow` takes its prefix as a literal at compile time, so a data directory chosen at run time from a configuration file cannot be a narrowed `Fs`: it would be the unnarrowed root, and the report would say `fs_write("")`, which says nothing. Either the directory is a build-time constant (precise, awkward to deploy), or the report is wide and the `lex-os` grant carries the real limit. Which one is workable is something this project is placed to find out, and it is listed in section 9.
+
+## 8. What is not in v1
+
+Multiple nodes or any replication; per-tenant isolation beyond API keys; a dashboard; transformations of payloads; strict per-endpoint ordering; a retry schedule per endpoint; response-body storage beyond a prefix; webhook *receiving* helpers.
+
+## 9. Missing pieces, predicted
+
+Each is a prediction from reading the code, with how the project will find out.
+
+| predicted gap | what in the scenario exposes it |
+|---|---|
+| **Outbound TLS.** Almost every real subscriber is `https`. lex-sys has a TLS client example over `Ffi` and OpenSSL and no native one. | any `https` receiver; the authority report gains `ffi` |
+| **Non-blocking connect and name resolution.** `tcp_connect` blocks, and so does `getaddrinfo`. On one thread, one slow subscriber stalls every delivery. | criterion 3 |
+| **Timers.** Backoff, delayed retry and request timeouts are time-ordered work; there is a clock and a poll timeout but no timer queue. | criterion 2 |
+| **Signals and a graceful shutdown.** Nothing catches `SIGTERM` to stop accepting, drain in-flight attempts and flush. | a restart under load |
+| **HMAC-SHA256.** Not in `std.crypto`; SHA-256 is. | criterion 5 |
+| **Runtime-configured `Fs` narrowing** (section 7). | criterion 6 |
+| **URL parsing**, a **JSON writer for larger bodies**, **configuration**, **structured logging**. | everywhere |
+| **Several workers on one log.** Threads and forked heaps exist; sharing the log between them needs a communication primitive lex-sys does not have (`parallelism.md`, T5). | throughput past one core |
+| **Process supervision** of a service and its workers. | probably `lex-os`'s job |
+
+What this project does **not** test: horizontal scale, replication, a large number of tenants.
+
+## 10. Order of work
+
+1. **`lexsys-log` L0 to L2** (record format and recovery, the stream commands, consumer groups). Needed whatever else happens; the service can use a simpler in-process queue to start.
+2. **The API and the store**, delivering to plain `http://` receivers, with the receiver and the chaos harness. Criteria 1, 4 and 6 can be tested here.
+3. **Retries, backoff, dead-letter, signing.** Criteria 2 and 5.
+4. **The first gap measured for real**, with the evidence from steps 2 and 3, decides which lex-sys work comes next (most likely non-blocking connect, then timers, then TLS).
+
+## 11. Open questions
+
+1. **Should the log be used as a library or over RESP?** As a library it is faster and has no wire protocol to keep compatible; over RESP the service tests the Streams front-end as a client would. The scenario favours the library; the Redis-compatibility claim favours RESP. This design assumes the library, and says so in section 2.
+2. **A single process or a service and workers?** One process is simpler and shares the log; separate workers survive a service crash independently. The scenario's first criterion is easier to read with one process.
+3. **Is the Python baseline worth building?** It costs about as much as a day of the project and is the only way the throughput numbers mean anything.
