@@ -298,3 +298,17 @@ H1e is idempotency on the way in (section 4): a client may send `Idempotency-Key
 * `202` is sent with the reason phrase `Unknown`: `std.http` has none for it. Harmless, and a lex-sys change.
 
 **Not built:** the index does not shrink (65,536 keys, ever, until compaction of the events log exists); the rebuild reads the whole events log at start (0.24 s for 65,537 records, linear); a client that repeats a key with a different event after the window gets a new event, by design. Replay and `410 Gone` (the next steps), endpoints and attempt history in Postgres, jitter, TLS are as in section 16.
+
+## 18. What moving the dependencies into locks showed
+
+Until here the build needed three clones and two SHAs: the compiler, `lexsys-log` (its four `src/*.ls`, named by relative path) and lex-sys's `packages/http-server/server.ls` (read out of the compiler's own checkout). lex-sys's `docs/package-system.md` section 7 built what replaces that, and this is the first program to use it.
+
+**What changed.** `deps/log.lock` pins a commit of `lexsys-log` and `deps/server.lock` a commit of lex-sys, each with `--all` of the store's declarations; `scripts/build.sh` runs `lex-sys vcs fetch` on each (the commit is fetched into `~/.cache/lex-sys/git/<commit>/` once, every pin is re-parsed, re-typechecked and re-hashed, and the sources land in `build/deps/<hash>.ls`) and passes them to `build`. `scripts/lock.sh <log commit> <lex-sys commit>` moves the pins. CI no longer checks out `lexsys-log` and drops `LOG_REV`; its one pin is the compiler's. `LOG_STORE` and `SERVER_STORE` point `build.sh` at a local store when a dependency is being changed.
+
+**Checked.** Every suite of sections 13 to 17 passes on a binary built this way: the three unit suites, signatures (536 checks), the receiver kinds, the retry schedule, isolation, chaos (2,000 events under power cuts, none lost), delivery (300 events, three endpoints, 101 kills), and idempotency including the 65,536-key stage. The tests that used `../lexsys-log/src/record.ls` now use `build/deps/*.ls`.
+
+**Found.**
+
+* **A fetched file is named by its hash, so an old one is a second declaration.** Moving a pin leaves the previous commit's files in `build/deps` next to the new ones and `build` refuses the duplicates; `build.sh` clears the directory first. (lex-sys's own `fetch_net_dependencies` test helper says the same about two fetches of one package.)
+* **The pin on `lexsys-log` is a commit of a branch that has not been merged** when this is written (`lexsys-log` PR #6, which adds the published stores). A squash merge makes a new commit with the same tree, so after it merges `scripts/lock.sh` is run once with the merge commit; the entries inside the locks do not change, only the commit.
+* **Still two hand-kept lists:** the source files `build.sh` names (`src/*.ls`), and the test commands. A project file (lex-sys section 7.5, step 3) would hold both.
