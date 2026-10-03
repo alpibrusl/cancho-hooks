@@ -312,3 +312,13 @@ Until here the build needed three clones and two SHAs: the compiler, `lexsys-log
 * **A fetched file is named by its hash, so an old one is a second declaration.** Moving a pin leaves the previous commit's files in `build/deps` next to the new ones and `build` refuses the duplicates; `build.sh` clears the directory first. (lex-sys's own `fetch_net_dependencies` test helper says the same about two fetches of one package.)
 * **The pin on `lexsys-log` had to move once, after the merge.** It was first the head of the pull request that added the published stores; a squash merge makes a new commit with the same tree, so `scripts/lock.sh` was run again with the merge commit (`6b4f46f`) and the diff of `deps/log.lock` was that one `rev` line, as predicted: the entries inside do not change, only where they are fetched from.
 * **Still two hand-kept lists:** the source files `build.sh` names (`src/*.ls`), and the test commands. A project file (lex-sys section 7.5, step 3) would hold both.
+
+## 19. What moving the dependencies into the project file showed
+
+Section 18 put the two libraries in lock files and a script; lex-sys section 8 replaces both with `lex-sys.toml`, and this is the second program on it.
+
+**What changed.** `lex-sys.toml` holds the compiler the sources were written for (`[package] lex-sys`, a commit), the two libraries (`[dependencies.log]` and `[dependencies.server]`: repository, a full commit hash, the store inside it) and the two programs to build (`hooks` from `src/`, `sign_probe` from `tests/sign_probe.ls` and `src/sign.ls`). `deps/` and `scripts/lock.sh` are gone. `scripts/build.sh` is `lex-sys build` and the `fsync` shim the crash tests preload. The CI workflow reads the compiler's commit out of `lex-sys.toml` to know which lex-sys to build, so there is one place to change it, and the compiler checks it again: `lex-sys build` refuses any other.
+
+**Checked.** Every suite of sections 13 to 17 on a binary built this way, locally; the table is in the pull request. A cold `lex-sys build` (the two libraries fetched from GitHub, then compiled) took 5.7 s.
+
+**Found.** The compiler pin cannot name the commit that contains the project file before that commit exists, so the first version of this file named a build of the branch, and it was moved to the merge commit (`1200968`) once there was one. A pin that moves is the cost of pinning what you also change.

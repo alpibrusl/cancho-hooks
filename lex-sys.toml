@@ -1,0 +1,28 @@
+# The project file (lex-sys docs/package-system.md section 8): the compiler these sources were written for, the libraries
+# they use, and the programs to build. `lex-sys build` installs the libraries and builds the programs; `lex-sys add` adds
+# a library, pinned to a commit.
+
+[package]
+name = "hooks"
+lex-sys = "1200968b81eafb6e0bc095d197e3d671c8f2e448"
+
+[dependencies.log]
+git = "https://github.com/alpibrusl/lexsys-log"
+rev = "6b4f46fd045f9e6c1a3f4bda22ee9d850daf63d1"
+path = ".lex-sys-vcs/log"
+
+[dependencies.server]
+git = "https://github.com/alpibrusl/lex-sys"
+rev = "f804ce7e6fcf5717ea52442bf648a1fe81090f98"
+path = "packages/http-server/.lex-sys-vcs"
+
+[[bin]]
+name = "hooks"
+sources = ["src"]
+std = true
+
+# The probe that tests signing and base64 on their own (tests/sign_test.py).
+[[bin]]
+name = "sign_probe"
+sources = ["tests/sign_probe.ls", "src/sign.ls"]
+std = true
