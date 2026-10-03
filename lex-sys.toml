@@ -4,7 +4,7 @@
 
 [package]
 name = "hooks"
-lex-sys = "6204963a54ccf1d18ede7fb0b98fbd207c534d78"
+lex-sys = "1200968b81eafb6e0bc095d197e3d671c8f2e448"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/lexsys-log"

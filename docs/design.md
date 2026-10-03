@@ -321,4 +321,4 @@ Section 18 put the two libraries in lock files and a script; lex-sys section 8 r
 
 **Checked.** Every suite of sections 13 to 17 on a binary built this way, locally; the table is in the pull request. A cold `lex-sys build` (the two libraries fetched from GitHub, then compiled) took 5.7 s.
 
-**Found.** The compiler pin cannot name the commit that contains the project file before that commit exists, so the first version of this file named a build of the branch and moves to the merge commit once there is one. A pin that moves is the cost of pinning what you also change.
+**Found.** The compiler pin cannot name the commit that contains the project file before that commit exists, so the first version of this file named a build of the branch, and it was moved to the merge commit (`1200968`) once there was one. A pin that moves is the cost of pinning what you also change.
