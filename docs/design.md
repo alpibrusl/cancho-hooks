@@ -129,3 +129,29 @@ What this project does **not** test: horizontal scale, replication, a large numb
 1. **Should the log be used as a library or over RESP?** As a library it is faster and has no wire protocol to keep compatible; over RESP the service tests the Streams front-end as a client would. The scenario favours the library; the Redis-compatibility claim favours RESP. This design assumes the library, and says so in section 2.
 2. **A single process or a service and workers?** One process is simpler and shares the log; separate workers survive a service crash independently. The scenario's first criterion is easier to read with one process.
 3. **Is the Python baseline worth building?** It costs about as much as a day of the project and is the only way the throughput numbers mean anything.
+
+## 13. What building the first step showed
+
+H1a is ingest only: `POST /events` appends to `lexsys-log`'s `log.ls` and answers `202` after a flush, `GET /events/:id`, `GET /healthz`, one process, one thread. Requests that arrive in one turn of the loop are **held** (`http.server`'s `hold`/`answer`), the turn's appends are covered by **one** `flush`, and then each is answered: group commit, as `lexsys-log` section 5 describes.
+
+**The first criterion, tested (`tests/chaos.py`).** Eight threads post 3,000 events while the harness `kill -9`s the service at random instants and restarts it; a client whose request fails tries the same event again. The result on this machine: 155 kills, 3,001 records in the log, 3,000 acknowledged, every acknowledged event present and byte-identical, ids dense from 1.
+
+**A `kill -9` is not a power cut, and a test that only kills the process cannot see a missing flush.** The kernel keeps every byte a killed process had written. The first version of this harness passed against a service that acknowledged *before* flushing, which is exactly the bug it exists to find. So `tests/fsync_shim.c` is an `LD_PRELOAD` shim that records, beside each `*.seg` file, how long it was when its last `fsync` returned; at every kill the harness truncates the file to that length plus a random part of the rest (and sometimes zeroes the last block of that part), which is a state a power cut can leave. With it:
+
+| mutant of `src/hooks.ls` (a scratch copy, never committed) | result |
+|---|---|
+| acknowledge without flushing at all | **killed**: 228 acknowledged events missing |
+| flush *after* sending the acknowledgements | **killed in 6 of 6 runs**, and by a *worse* symptom than loss: 6 to 8 acknowledged ids were **reused by a different event** after the cut, because the lost record's id was handed out again |
+| append skipped but still acknowledged | **killed**: the event is missing |
+
+(A fourth mutant, recovery skipped at open, would not compile: it removed the only use of `file_read` in that function and this language refuses a row that is not exact. That recovery is mutation-tested in `lexsys-log` instead.)
+
+**Findings about lex-sys, from building it.**
+
+* **`http.reason` has no `202`**, so the status line reads `HTTP/1.1 202 Unknown`. Cosmetic, in `std.http`, and a one-line fix.
+* **`GET /events/:id` is a linear scan.** The log keeps no index yet. Fine for a few thousand events, not for a large log; the sparse index of `lexsys-log` section 4 is what it needs, and nothing else in this step does.
+* **The data directory is an argument, so the service holds the unnarrowed `Fs("")`** and `lex-sys authority` says `fs_write("")`. This is the tension section 7 predicted, now seen in a real program.
+* **A region's arena is 64 KiB**, so the 68 KiB scan window and the 20 KiB record scratch are heap boxes (`lexsys-log` section 12).
+* **A `res` enum cannot be assigned over**, so a function that opens a log returns from inside the `match` instead of building an answer in a variable. Not a bug; it shaped the code.
+
+**Not built yet:** endpoints, delivery, retries, signing, idempotency. Next is H1b, delivery to one fixed receiver, which will meet the first predicted gap (a blocking connect).
