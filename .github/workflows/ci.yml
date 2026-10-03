@@ -6,12 +6,10 @@ on:
   pull_request:
 
 env:
-  # The compiler and the log these sources are built with. A source file does not record which `std` it was written
-  # against, so the revisions are part of the contract. The compiler is lex-sys main with `tcp_connect_start`, which
-  # attempts that do not wait need.
-  LEX_SYS_REV: b255e8392dbc38ff790f28cade9aa34eec5a1d80
-  # lexsys-log main, with the append path (`src/log.ls`).
-  LOG_REV: c0c3852541e927c3e893331207f1a0aaf184bc2e
+  # The compiler these sources are built with. A source file does not record which `std` it was written against, so the
+  # revision is part of the contract. It is lex-sys main with packages across repositories (#192): `vcs fetch` of a lock with
+  # an origin. The two libraries are not pinned here but in `deps/` (`scripts/lock.sh` moves them).
+  LEX_SYS_REV: f804ce7e6fcf5717ea52442bf648a1fe81090f98
 
 jobs:
   test:
@@ -26,12 +24,6 @@ jobs:
           repository: alpibrusl/lex-sys
           ref: ${{ env.LEX_SYS_REV }}
           path: lex-sys
-
-      - uses: actions/checkout@v4
-        with:
-          repository: alpibrusl/lexsys-log
-          ref: ${{ env.LOG_REV }}
-          path: lexsys-log
 
       - name: Cache the compiler
         id: compiler
@@ -59,8 +51,8 @@ jobs:
       - name: Unit tests (the delivery window, the endpoints file, the idempotency index)
         working-directory: hooks
         run: |
-          ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
-          ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+          ../lex-sys/target/release/lex-sys test tests/state_test.ls src/state.ls build/deps/*.ls --std
+          ../lex-sys/target/release/lex-sys test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
           ../lex-sys/target/release/lex-sys test tests/idem_test.ls src/idem.ls --std
 
       - name: Signatures and base64 against the reference library

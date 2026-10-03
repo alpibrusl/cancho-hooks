@@ -20,25 +20,23 @@ attempt history in Postgres, `410 Gone` handling, jitter, replay, TLS (`https`) 
 
 ## Requirements
 
-- The **lex-sys** compiler and a checkout of **lexsys-log**, both at the revisions this repository's CI builds with (below).
-  The compiler needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190, merged) and `tcp_connect_start` (attempts that do not wait; lex-sys PR #191, merged).
+- The **lex-sys** compiler at the revision this repository's CI builds with (below). It needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190),
+  `tcp_connect_start` (attempts that do not wait; #191) and `vcs fetch` of a lock with an origin (#192), all merged.
+- `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are locked in `deps/` and fetched, and checked, by `lex-sys vcs fetch`.
 - Rust, to build the compiler; `gcc`, to build the small `fsync` shim the crash tests use.
 - To run the tests: `python3` and `pip install standardwebhooks` (the independent implementation signatures are checked against).
 
 ## Quick start
 
 ```sh
-git clone https://github.com/alpibrusl/lex-sys
-git clone https://github.com/alpibrusl/lexsys-log
+git clone https://github.com/alpibrusl/lex-sys                          # the compiler, and nothing else to clone
 git clone https://github.com/alpibrusl/lexsys-hooks && cd lexsys-hooks
 
-REV=$(sed -n 's/^ *LEX_SYS_REV: *//p' .github/workflows/ci.yml)           # the revisions CI uses
-LOG=$(sed -n 's/^ *LOG_REV: *//p' .github/workflows/ci.yml)
+REV=$(sed -n 's/^ *LEX_SYS_REV: *//p' .github/workflows/ci.yml)           # the revision CI uses
 (cd ../lex-sys && git fetch -q origin && git checkout "$REV" && cargo build --release -p lex-sys)
-(cd ../lexsys-log && git checkout "$LOG")
 export LEX_SYS=$PWD/../lex-sys/target/release/lex-sys
 
-scripts/build.sh                      # builds build/hooks (and the test probes and the fsync shim)
+scripts/build.sh                      # fetches the two locked libraries, then builds build/hooks (and the test probes and the fsync shim)
 
 # one endpoint: <id> <host> <port> <secret>
 mkdir -p /tmp/hooks-data
@@ -140,8 +138,8 @@ request held; after the turn one `flush` covers every append and the held reques
 ## Tests
 
 ```sh
-$LEX_SYS test tests/state_test.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std     # the delivery window
-$LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls ../lexsys-log/src/record.ls ../lexsys-log/src/crc.ls --std
+$LEX_SYS test tests/state_test.ls src/state.ls build/deps/*.ls --std     # the delivery window (after scripts/build.sh has fetched build/deps)
+$LEX_SYS test tests/endpoints_test.ls src/endpoints.ls src/sign.ls src/state.ls build/deps/*.ls --std
 $LEX_SYS test tests/idem_test.ls src/idem.ls --std                                                       # the idempotency-key index
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 python3 tests/attempt_test.py build/hooks          # one delivery attempt against eight kinds of receiver
@@ -169,7 +167,9 @@ src/state.ls       the per-endpoint cursor and window, and the outcome record
 src/idem.ls        the idempotency-key index (rebuilt from the log at start)
 src/endpoints.ls   the endpoints file
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
-scripts/build.sh   builds the service, the probes and the fsync shim
+scripts/build.sh   fetches the locked libraries and builds the service, the probes and the fsync shim
+scripts/lock.sh    moves the pins in deps/ to other commits
+deps/              log.lock and server.lock: which commits of lexsys-log and lex-sys the build uses
 tests/             unit tests (lex-sys) and harnesses (Python)
 docs/design.md     the design and what building it found
 ```
