@@ -706,3 +706,10 @@ and the benchmark's ten-endpoint case, three runs after the fix: 50,000 attempts
 
 **Consequence.** The service is not production-ready: **one customer's broken receiver halts delivery to every other customer** once about a thousand events have accumulated. The fix is the first item of `docs/production.md`.
 
+## 30. Signing the largest events trapped; HMAC moves to lex-sys's `std.hmac`
+
+**Found while building lex-sys's `std.hmac` (lex-sys `docs/hkdf.md` §2, PR #229).** `src/sign.ls`'s `hmac_sha256` put `ipad || id.timestamp.payload` in a heap box, because an arena is 64 KiB, and then handed it to `crypto.sha256`. That function built its padded copy of the whole message in an arena. Ingest accepts an event of up to 65,498 bytes (section 27), so **any accepted event of 65,446 bytes or more (65,451 with a one-digit id) trapped the service when its delivery was signed** (`SIGILL`, status -4 from `build/sign_probe`, with the compiler pinned before this change; the reference library's signature from the new one). The event is already in the log by then, so it was very likely a crash on every restart as well, though that was not run end to end.
+
+**The fix is lex-sys's**, not this repository's. Its SHA-2 now streams over a small state and copies nothing the size of the message, so moving the compiler pin is what removes the trap. **The change here:** `sign.hmac_sha256` is deleted, `signature` calls `hmac.sha256` from `std.hmac`, and the compiler pin moves to a lex-sys commit that has it. This moves the one HMAC implementation out of this repository, as lex-sys issue #201 asks. `tests/sign_test.py` now signs payloads of 65,400 to 70,000 bytes against the reference library, through the range that trapped.
+
+**Cost:** lex-sys measures its `hmac.sha256` at 2.6 µs on 64 bytes, 9.9 µs on 1 KiB and 120 µs on 16 KiB, against 21.8, 32.7 and 184 µs for this file's old HMAC over the old SHA-256 (lex-sys `docs/hkdf.md` §6).

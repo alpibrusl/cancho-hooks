@@ -6,7 +6,8 @@ Python's `base64` for the encoding.
     python3 tests/sign_test.py build/sign_probe
 
 Lengths are chosen around SHA-256's block boundaries (55, 56, 63, 64, 65 bytes of signed content) and HMAC's key boundary
-(secrets that decode to under, exactly, and over 64 bytes, where the key is hashed first).
+(secrets that decode to under, exactly, and over 64 bytes, where the key is hashed first), and up to the largest event the
+service accepts, where the old HMAC trapped (`docs/design.md` section 30).
 """
 import base64
 import os
@@ -62,6 +63,17 @@ def main():
         check(f"sig without prefix key={key_len}", run("sig", bare, "evt_1", "5", "{}"),
               wh.sign("evt_1", __import__("datetime").datetime.fromtimestamp(5, __import__("datetime").timezone.utc), "{}").encode())
     check("sig of a non-base64 secret", run("sig", "whsec_not base64!", "a", "1", "b"), b"error")
+
+    # The largest events the service accepts (65,498 bytes unkeyed, docs/design.md section 30): with the old HMAC, signing
+    # any payload from 65,446 bytes up trapped, because `crypto.sha256` copied the signed content into a 64 KiB arena.
+    key = os.urandom(32)
+    secret = "whsec_" + base64.b64encode(key).decode()
+    wh = Webhook(secret)
+    for payload_len in [65400, 65445, 65446, 65460, 65498, 70000]:
+        payload = "".join(chr(rng.randrange(32, 127)) for _ in range(payload_len))
+        for msg_id in ["evt_1", "evt_123456789"]:
+            want = wh.sign(msg_id, __import__("datetime").datetime.fromtimestamp(1700000000, __import__("datetime").timezone.utc), payload).encode()
+            check(f"sig payload={payload_len} id={msg_id}", run("sig", secret, msg_id, "1700000000", payload), want)
     print(f"{checks} checks, {fails} failures")
     return 1 if fails else 0
 

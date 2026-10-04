@@ -2,7 +2,7 @@ edition 5;
 
 module sign;
 
-import std.crypto;
+import std.hmac;
 
 // `sign` -- Standard Webhooks signatures (`docs/design.md` section 4; https://www.standardwebhooks.com).
 //
@@ -13,8 +13,11 @@ import std.crypto;
 // say in so many words and every implementation does; the test (`tests/sign_test.py`) compares against the reference
 // Python library for exactly that reason.
 //
-// Nothing here has a capability: it is arithmetic on slices. The one allocation, a copy of the message in front of the key
-// pad, comes from a `Heap` the caller lends, because a payload can be 64 KiB and an arena is not.
+// Nothing here has a capability: it is arithmetic on slices. HMAC-SHA256 is lex-sys's `std.hmac` (lex-sys `docs/hkdf.md`),
+// which streams: it copies nothing the size of the message. The one allocation here, the signed content
+// `<id>.<timestamp>.<payload>`, comes from a `Heap` the caller lends, because a payload can be 64 KiB and an arena is not.
+// (This file's own HMAC put that content behind the key pad in a heap box too, and then handed it to `crypto.sha256`, which
+// copied it into an arena again and trapped: `docs/design.md` section 30.)
 
 fn alphabet() -> [] &static [byte] {
     return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -106,54 +109,6 @@ pub fn b64_decode[&t, &o](text: &t [byte], out: &!o [byte]) -> [] int {
     return at;
 }
 
-// HMAC-SHA256 (RFC 2104, block size 64) of `msg` under `key`, 32 bytes into `out`. Answers 0.
-pub fn hmac_sha256[&h, &k, &m, &o](heap: &!h Heap, key: &k [byte], msg: &m [byte], out: &!o [byte]) -> [heap] int {
-    region a {
-        let block = alloc_slice[a](64, byte_of(0));
-        if len(key) > 64 {
-            crypto.sha256(key, block[0..32]);
-        } else {
-            var i = 0;
-            while i < len(key) {
-                block[i] = key[i];
-                i = i + 1;
-            }
-        }
-        // inner = (key ^ ipad) || msg
-        let inner = box_slice(heap, 64 + len(msg), byte_of(0));
-        let digest = alloc_slice[a](32, byte_of(0));
-        borrow mut inner as &!iw in {
-            let s = contents(iw);
-            var i = 0;
-            while i < 64 {
-                s[i] = byte_of(int_of(block[i]) ^ 0x36);
-                i = i + 1;
-            }
-            var j = 0;
-            while j < len(msg) {
-                s[64 + j] = msg[j];
-                j = j + 1;
-            }
-            crypto.sha256(s[0..64 + len(msg)], digest);
-        }
-        unbox_slice(heap, inner);
-        // outer = (key ^ opad) || inner digest
-        let outer = alloc_slice[a](96, byte_of(0));
-        var i = 0;
-        while i < 64 {
-            outer[i] = byte_of(int_of(block[i]) ^ 0x5c);
-            i = i + 1;
-        }
-        var j = 0;
-        while j < 32 {
-            outer[64 + j] = digest[j];
-            j = j + 1;
-        }
-        crypto.sha256(outer, out);
-    }
-    return 0;
-}
-
 // The decimal text of `n` (not negative) into `out`; answers its length. At most 19 bytes.
 pub fn nat_text[&o](n: int, out: &!o [byte]) -> [] int {
     var digits = 1;
@@ -213,7 +168,7 @@ pub fn signature[&h, &k, &i, &t, &p, &o](heap: &!h Heap, key: &k [byte], id: &i 
                 at = at + 1;
                 j = j + 1;
             }
-            hmac_sha256(heap, key, s[0..at], mac);
+            hmac.sha256(key, s[0..at], mac);
         }
         out[0] = byte_of('v');
         out[1] = byte_of('1');
