@@ -491,6 +491,41 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         note[0] = 0 - 3;
         return out;
     }
+    if id == 13 {
+        // PATCH /endpoints/:id (`docs/design.md` section 25.3): change an endpoint's host, port or secret. Judged here like `POST /endpoints` and
+        // kept for the turn that sends it to the database; the table in memory changes only when the database says commit.
+        let auth = manage.authorize(request, table, stats[off_token()..off_token() + manage.token_size()]);
+        if auth == 1 {
+            return server.failure(heap, out, 403, "endpoint management is off: the service was not given an admin-token", keep);
+        }
+        if auth == 2 {
+            return server.failure_with(heap, out, 401, "a valid bearer token is required", keep, "WWW-Authenticate: Bearer\r\n");
+        }
+        if !history.enabled(stats[off_hq()..off_hq() + history.size()]) {
+            return server.failure(heap, out, 503, "endpoints are managed in the database and none is named (--pg-host)", keep);
+        }
+        let want = route.param_nat(path, params, 0);
+        if want < 0 {
+            return server.failure(heap, out, 400, "the id must be a number", keep);
+        }
+        if index_of_id(stats, want) < 0 {
+            return server.failure(heap, out, 404, "no such endpoint", keep);
+        }
+        if stats[off_mg() + manage.mg_state()] != 0 {
+            return server.failure(heap, out, 409, "another change is waiting for the database", keep);
+        }
+        let parsed = manage.parse_patch(heap, body, scratch, stats[off_mg()..off_mg() + manage.mg_size()], stats[c_private()] == 1);
+        if parsed.0 != 0 {
+            return server.failure(heap, out, 400, manage.why(parsed.0), keep);
+        }
+        if parsed.1 & 4 != 0 && sign.secret_key(scratch[256..256 + stats[off_mg() + manage.mg_secret_len()]], scratch[400..496]) < 0 {
+            return server.failure(heap, out, 400, manage.why(4), keep);
+        }
+        stats[off_mg() + manage.mg_target()] = want;
+        stats[off_mg() + manage.mg_state()] = 1;
+        note[0] = 0 - 3;
+        return out;
+    }
     if id == 12 {
         // GET /endpoints/:id: one endpoint, as `GET /endpoints` lists it. Not the host and not the secret.
         let want = route.param_nat(path, params, 0);
@@ -638,6 +673,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/events/:id/attempts", 10);
     r = route.add(heap, r, "POST", "/endpoints", 11);
     r = route.add(heap, r, "GET", "/endpoints/:id", 12);
+    r = route.add(heap, r, "PATCH", "/endpoints/:id", 13);
     return r;
 }
 
@@ -1656,7 +1692,10 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, route
                             // database and hold the connection until the database answers; or say at once that it cannot be done.
                             var sent = 0 - 1;
                             var made = 0;
-                            if dv[off_mg() + manage.mg_make()] == 1 {
+                            if dv[off_mg() + manage.mg_kind()] == 1 && fill_change(dv, blob) != 0 {
+                                made = 0 - 1;
+                            }
+                            if made == 0 && dv[off_mg() + manage.mg_make()] == 1 {
                                 made = manage.make_secret(heap, fs, dv[off_mg()..off_mg() + manage.mg_size()]);
                             }
                             if made == 0 {
@@ -1667,7 +1706,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, route
                                     let secret = alloc_slice[ra](96, byte_of(0));
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), hl, host);
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_secret(), sl, secret);
-                                    let request = queries.create_endpoint_start(heap, host[0..hl], dv[off_mg() + manage.mg_port()], secret[0..sl]);
+                                    let request = change_request(heap, dv, host[0..hl], secret[0..sl]);
                                     borrow request as &rb in {
                                         borrow mut pl as &!qw in {
                                             sent = pool.submit(qw, next_tag, buffer.bytes(rb));
@@ -1850,7 +1889,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, route
                             while tag >= 0 {
                                 if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
                                     // the database has answered the insert of a new endpoint
-                                    let created = finish_create(heap, dv, blob, lg, done, window, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                    let created = finish_change(heap, dv, blob, lg, done, window, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
                                     borrow created as &cb in {
                                         server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
                                     }
@@ -1917,7 +1956,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, route
                             if dv[off_mg() + manage.mg_state()] == 2 && now_ms >= dv[off_mg() + manage.mg_deadline()] {
                                 // The insert may still commit: the next start finds the row (section 25.2), and `GET /endpoints/:id` says what this
                                 // process believes.
-                                let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the endpoint may still have been stored", dv[off_mg() + manage.mg_keep()] == 1);
+                                let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the change may still have been stored", dv[off_mg() + manage.mg_keep()] == 1);
                                 borrow late as &lb in {
                                     server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(lb));
                                 }
@@ -2205,6 +2244,126 @@ fn say[&i, &t](out: &!i Io, text: &t [byte]) -> [err_write] int {
 // The database has answered the insert of a new endpoint (`docs/design.md` section 25.2): give it a slot, say so in the log (flushed), start its
 // cursor at the last event so that it gets what comes after and not the log's past, add it to the table, and answer `201` with the secret,
 // which nothing answers again. Answers the whole HTTP response. Nothing is changed in memory or in the log unless the database said commit.
+// The members of a change that the request did not name, filled in from the endpoint as it is now (a `PATCH` that names only the
+// secret still sends the host and the port, so one statement serves). Answers 0, or 1 if the endpoint is not there.
+fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
+    let f = dv[off_mg() + manage.mg_fields()];
+    let i = index_of_id(dv, dv[off_mg() + manage.mg_target()]);
+    if i < 0 {
+        return 1;
+    }
+    if f & 1 == 0 {
+        let host = endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i);
+        var k = 0;
+        while k < len(host) {
+            dv[off_mg() + manage.mg_host() + k] = int_of(host[k]);
+            k = k + 1;
+        }
+        dv[off_mg() + manage.mg_host_len()] = len(host);
+    }
+    if f & 2 == 0 {
+        dv[off_mg() + manage.mg_port()] = endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i);
+    }
+    return 0;
+}
+
+// The statement for the change that waits in `mg`: the insert of a new endpoint, the update of an address, or of the address and the secret.
+fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte]) -> [heap] buffer.Buffer {
+    if dv[off_mg() + manage.mg_kind()] != 1 {
+        return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret);
+    }
+    if dv[off_mg() + manage.mg_fields()] & 12 != 0 {
+        return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret);
+    }
+    return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
+}
+
+fn finish_change[&h, &b, &l, &g, &d, &w, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], rep: &m [byte], status: int, keep: bool) -> [heap, file_read, file_write] buffer.Buffer {
+    if dv[off_mg() + manage.mg_kind()] == 1 {
+        return finish_patch(heap, dv, blob, rep, status, keep);
+    }
+    return finish_create(heap, dv, blob, lg, done, window, rep, status, keep);
+}
+
+// The database has answered a `PATCH`: on commit the table in memory takes the new address (and key), so the next attempt, a retry of an event
+// first tried under the old secret included, uses them; an attempt on the wire finishes against what it began with. The answer carries the
+// secret if the change made or brought one, as `POST /endpoints` does.
+fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], rep: &m [byte], status: int, keep: bool) -> [heap] buffer.Buffer {
+    let out = buffer.empty(heap, 512);
+    if status != 0 || pg.failure(rep) >= 0 {
+        return server.failure(heap, out, 503, "the database did not store the change", keep);
+    }
+    let row = pg.first_row(rep);
+    if row < 0 {
+        return server.failure(heap, out, 404, "the endpoint is not in the database (its row is gone); nothing was changed", keep);
+    }
+    let mg = off_mg();
+    let target = dv[mg + manage.mg_target()];
+    let i = index_of_id(dv, target);
+    if i < 0 || queries.patch_address_id(rep, row) != target {
+        return server.failure(heap, out, 503, "the database answered for another endpoint; nothing was changed", keep);
+    }
+    let hl = dv[mg + manage.mg_host_len()];
+    let sl = dv[mg + manage.mg_secret_len()];
+    let port = dv[mg + manage.mg_port()];
+    let fields = dv[mg + manage.mg_fields()];
+    let scratch = box_slice(heap, endpoints.text_limit(), byte_of(0));
+    var failed = false;
+    region a {
+        let host = alloc_slice[a](253, byte_of(0));
+        let secret = alloc_slice[a](96, byte_of(0));
+        let key = alloc_slice[a](96, byte_of(0));
+        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
+        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_secret(), sl, secret);
+        var klen = 0;
+        if fields & 12 != 0 {
+            klen = sign.secret_key(secret[0..sl], key);
+        } else {
+            let old = endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i);
+            klen = len(old);
+            var k = 0;
+            while k < klen {
+                key[k] = old[k];
+                k = k + 1;
+            }
+        }
+        if klen < 0 {
+            failed = true;
+        } else {
+            borrow mut scratch as &!sc in {
+                if endpoints.replace(dv[off_table()..off_table() + endpoints.table_size()], blob, dv[c_endpoints()], i, port, host[0..hl], key[0..klen], contents(sc)) != 0 {
+                    failed = true;
+                }
+            }
+        }
+        if !failed {
+            var wr = json.writer(heap, 256);
+            wr = json.begin_object(heap, wr);
+            wr = json.put_key(heap, wr, "id");
+            wr = json.put_int(heap, wr, target);
+            wr = json.put_key(heap, wr, "host");
+            wr = json.put_string(heap, wr, host[0..hl]);
+            wr = json.put_key(heap, wr, "port");
+            wr = json.put_int(heap, wr, port);
+            if fields & 12 != 0 {
+                wr = json.put_key(heap, wr, "secret");
+                wr = json.put_string(heap, wr, secret[0..sl]);
+            }
+            wr = json.end_object(heap, wr);
+            let body = json.finish(wr);
+            unbox_slice(heap, scratch);
+            var answer = out;
+            borrow body as &sb in {
+                answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+            }
+            buffer.drop(heap, body);
+            return answer;
+        }
+    }
+    unbox_slice(heap, scratch);
+    return server.failure(heap, out, 507, "the change was stored in the database but the service has no room for it (restart it)", keep);
+}
+
 fn finish_create[&h, &b, &l, &g, &d, &w, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], rep: &m [byte], status: int, keep: bool) -> [heap, file_read, file_write] buffer.Buffer {
     let out = buffer.empty(heap, 512);
     if status != 0 || pg.failure(rep) >= 0 {

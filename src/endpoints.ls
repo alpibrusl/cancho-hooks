@@ -210,3 +210,73 @@ pub fn append[&n, &b, &h, &k](table: &!n [int], blob: &!b [byte], count: int, sl
     table[base + 6] = ident;
     return count + 1;
 }
+
+// Move every host and key to the front of `blob`, in the order of the table, so that what `replace` left behind is room again. `scratch`
+// is as long as `blob`. Answers the bytes in use.
+pub fn compact[&n, &b, &s](table: &!n [int], blob: &!b [byte], count: int, scratch: &!s [byte]) -> [] int {
+    var used = 0;
+    var i = 0;
+    while i < count {
+        let base = i * stride();
+        var k = 0;
+        while k < table[base + 3] {
+            scratch[used + k] = blob[table[base + 2] + k];
+            k = k + 1;
+        }
+        table[base + 2] = used;
+        used = used + table[base + 3];
+        k = 0;
+        while k < table[base + 5] {
+            scratch[used + k] = blob[table[base + 4] + k];
+            k = k + 1;
+        }
+        table[base + 4] = used;
+        used = used + table[base + 5];
+        i = i + 1;
+    }
+    var j = 0;
+    while j < used {
+        blob[j] = scratch[j];
+        j = j + 1;
+    }
+    return used;
+}
+
+// Give the `i`th of the first `count` endpoints a new port, host and key (`docs/design.md` section 25.3). The new bytes go after the used
+// ones, and the old ones are left behind until the blob is full, when `compact` takes them out (the endpoint's own old bytes too, if the new
+// ones fit only without them). Answers 0, or -1 if there is no room even then (nothing is changed).
+pub fn replace[&n, &b, &h, &k, &s](table: &!n [int], blob: &!b [byte], count: int, i: int, port: int, host: &h [byte], key: &k [byte], scratch: &!s [byte]) -> [] int {
+    var at = blob_used(table, count);
+    if at + len(host) + len(key) > len(blob) {
+        compact(table, blob, count, scratch);
+        at = blob_used(table, count);
+        if at + len(host) + len(key) > len(blob) {
+            // The endpoint's own old bytes are about to be replaced: if the new ones fit without them, they are taken out too.
+            let own = i * stride();
+            if at - table[own + 3] - table[own + 5] + len(host) + len(key) > len(blob) {
+                return 0 - 1;
+            }
+            table[own + 3] = 0;
+            table[own + 5] = 0;
+            compact(table, blob, count, scratch);
+            at = blob_used(table, count);
+        }
+    }
+    var j = 0;
+    while j < len(host) {
+        blob[at + j] = host[j];
+        j = j + 1;
+    }
+    j = 0;
+    while j < len(key) {
+        blob[at + len(host) + j] = key[j];
+        j = j + 1;
+    }
+    let base = i * stride();
+    table[base + 1] = port;
+    table[base + 2] = at;
+    table[base + 3] = len(host);
+    table[base + 4] = at + len(host);
+    table[base + 5] = len(key);
+    return 0;
+}

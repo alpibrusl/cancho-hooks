@@ -236,6 +236,84 @@ pub fn create_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
     return pg.int_text(m, from, to);
 }
 
+// patch_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn patch_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "patch_endpoint", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// patch_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn patch_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "patch_endpoint", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn patch_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+// patch_address_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn patch_address_start[&h, &a2](heap: &!h Heap, id: int, host: &a2 [byte], port: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "patch_address", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// patch_address: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn patch_address[&h, &c, &a2](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "patch_address", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn patch_address_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
 // Parse every query above on this connection, once, after login: PostgreSQL then parses and plans each
 // one once instead of on every call. Answers the reply of the first refusal (`pg.failure` says what the
 // server objected to) or an empty one, and a status; the queries are not to be run unless both are clean.
@@ -257,5 +335,11 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id");
     reply = r4;
     status = s4;
+    let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret = $4::text where id = $1::int returning id");
+    reply = r5;
+    status = s5;
+    let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
+    reply = r6;
+    status = s6;
     return (reply, status);
 }
