@@ -171,7 +171,7 @@ footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; fl
     <p class="badge">Work in progress, single node, not for production</p>
     <h1 id="h-title">lexsys-hooks</h1>
     <p class="lede">A webhook delivery service, written in <a href="https://github.com/alpibrusl/lex-sys">lex-sys</a>. You <code>POST</code> it an event; it stores the event durably and delivers it, signed, to every configured endpoint, at least once, retrying on a schedule and keeping what it could not deliver as a dead letter.</p>
-    <p class="muted prose">It keeps its two logs in lexsys-log and talks to PostgreSQL through lexsys-pg, with no <code>Ffi</code> and no <code>unsafe</code>. The repository&rsquo;s design document records what each step built and measured, including what failed.</p>
+    <p class="muted prose">It keeps its two logs in lexsys-log and talks to PostgreSQL through lexsys-pg, with no <code>unsafe</code> and one foreign authority (four libc signal functions, until lex-sys has a signal builtin). The repository&rsquo;s design document records what each step built and measured, including what failed.</p>
     <div class="cta">
       <a class="btn primary" href="#quickstart">Quick start</a>
       <a class="btn secondary" href="https://github.com/alpibrusl/lexsys-hooks">Source on GitHub</a>
