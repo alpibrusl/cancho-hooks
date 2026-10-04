@@ -3,6 +3,7 @@ edition 5;
 module roster;
 
 import std.buffer;
+import std.bytes;
 import endpoints;
 import history;
 import pg;
@@ -49,6 +50,27 @@ fn put[&o, &r](out: &!o [byte], at: int, rep: &r [byte], span: (int, int), last:
         out[end] = byte_of(' ');
     }
     return end + 1;
+}
+
+// An optional column: empty, or a run of printable bytes with no space (the same rule as `plain`).
+fn optional[&r](rep: &r [byte], span: (int, int)) -> [] bool {
+    if span.1 <= span.0 {
+        return true;
+    }
+    return plain(rep, span);
+}
+
+// ` prefix` and the value of `span` and a space, as `put` does for a field: the word of an optional column. Answers where the next goes, or -1.
+fn put_word[&o, &r](out: &!o [byte], at: int, prefix: &static [byte], rep: &r [byte], span: (int, int)) -> [] int {
+    if at + len(prefix) > len(out) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(prefix) {
+        out[at + i] = prefix[i];
+        i = i + 1;
+    }
+    return put(out, at + len(prefix), rep, span, false);
 }
 
 // Open one connection and log in. `Dialed::Ok` is a connection that is logged in with the queries prepared; `Dialed::Failed` carries
@@ -99,7 +121,11 @@ pub fn fetch[&h, &n, &t, &u, &w, &d, &z, &o](heap: &!h Heap, net: &n Net(""), ho
                             let hostspan = pg.value(rep, row, 1);
                             let portspan = pg.value(rep, row, 2);
                             let secret = pg.value(rep, row, 3);
-                            if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) {
+                            let typesspan = pg.value(rep, row, 4);
+                            let headersspan = pg.value(rep, row, 5);
+                            let oldspan = pg.value(rep, row, 6);
+                            let untilspan = pg.value(rep, row, 7);
+                            if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) && optional(rep, typesspan) && optional(rep, headersspan) && optional(rep, oldspan) && optional(rep, untilspan) {
                                 at = put(out, at, rep, id, false);
                                 if at >= 0 {
                                     at = put(out, at, rep, hostspan, false);
@@ -108,7 +134,23 @@ pub fn fetch[&h, &n, &t, &u, &w, &d, &z, &o](heap: &!h Heap, net: &n Net(""), ho
                                     at = put(out, at, rep, portspan, false);
                                 }
                                 if at >= 0 {
-                                    at = put(out, at, rep, secret, true);
+                                    at = put(out, at, rep, secret, false);
+                                }
+                                if at >= 0 && typesspan.1 > typesspan.0 {
+                                    at = put_word(out, at, "types=", rep, typesspan);
+                                }
+                                if at >= 0 && headersspan.1 > headersspan.0 {
+                                    at = put_word(out, at, "headers=", rep, headersspan);
+                                }
+                                if at >= 0 && oldspan.1 > oldspan.0 && untilspan.1 > untilspan.0 && pg.int_text(rep, untilspan.0, untilspan.1) > 0 {
+                                    at = put_word(out, at, "old=", rep, oldspan);
+                                    if at >= 0 {
+                                        out[at - 1] = byte_of('@');
+                                        at = put(out, at, rep, untilspan, false);
+                                    }
+                                }
+                                if at >= 0 {
+                                    out[at - 1] = byte_of('\n');
                                 }
                                 if at < 0 {
                                     why = 0 - 5;
@@ -165,7 +207,35 @@ pub fn copy_in[&h, &n, &t, &u, &w, &d, &z, &x](heap: &!h Heap, net: &n Net(""), 
                         let hostf = endpoints.field(text, first.1, end);
                         let portf = endpoints.field(text, hostf.1, end);
                         let secret = endpoints.field(text, portf.1, end);
-                        let (reply, st) = queries.add_endpoint(heap, ch, endpoints.number(text, first.0, first.1), text[hostf.0..hostf.1], endpoints.number(text, portf.0, portf.1), text[secret.0..secret.1]);
+                        // the optional words (`endpoints.parse_x` has judged them)
+                        var types_w = text[0..0];
+                        var headers_w = text[0..0];
+                        var old_w = text[0..0];
+                        var until = 0;
+                        var rest = secret.1;
+                        var more = true;
+                        while more {
+                            let w = endpoints.field(text, rest, end);
+                            if w.0 == w.1 {
+                                more = false;
+                            } else {
+                                rest = w.1;
+                                let word = text[w.0..w.1];
+                                if bytes.starts_with(word, "types=") {
+                                    types_w = word[6..len(word)];
+                                } else if bytes.starts_with(word, "headers=") {
+                                    headers_w = word[8..len(word)];
+                                } else if bytes.starts_with(word, "old=") {
+                                    var at2 = 4;
+                                    while at2 < len(word) && int_of(word[at2]) != '@' {
+                                        at2 = at2 + 1;
+                                    }
+                                    old_w = word[4..at2];
+                                    until = endpoints.number_ms(word, at2 + 1, len(word));
+                                }
+                            }
+                        }
+                        let (reply, st) = queries.add_endpoint(heap, ch, endpoints.number(text, first.0, first.1), text[hostf.0..hostf.1], endpoints.number(text, portf.0, portf.1), text[secret.0..secret.1], types_w, headers_w, old_w, until);
                         borrow reply as &rb in {
                             if st != 0 || pg.failure(buffer.bytes(rb)) >= 0 {
                                 bad = true;

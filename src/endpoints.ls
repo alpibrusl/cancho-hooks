@@ -3,16 +3,24 @@ edition 5;
 module endpoints;
 
 import destination;
+import epx;
+import filter;
+import hdrs;
 import sign;
 import state;
+import std.bytes;
 
 // `endpoints` -- the endpoints a service delivers to, read from a text file (`docs/design.md` sections 3 and 15).
 //
 // This is a stand-in for the Postgres table section 3 gives them: it is read once at start, one endpoint a line,
 //
-//     <id> <host> <port> <secret>
+//     <id> <host> <port> <secret> [types=<patterns>] [headers=<spec>] [old=<secret>@<until>]
 //
-// with `#` comments and blank lines ignored. The id is a number of at most six digits and is the endpoint's identity, so it
+// with `#` comments and blank lines ignored. The words after the secret are optional and in any order, each at most once (design section 35):
+// `types=` the event types the endpoint subscribes to, comma separated (`filter.ls`: `invoice.paid,user.*`; none: every event), `headers=` the
+// custom headers of every attempt, `Name:value` pairs separated by commas with each value percent-encoded (`hdrs.ls`), and `old=` the previous
+// secret and the Unix ms until which deliveries are signed with it as well (a rotation that overlaps). They are judged by the rules that judge
+// them in the API, and a line with a word that is none of these is refused like any other bad line. A line without them is what it always was. The id is a number of at most six digits and is the endpoint's identity, so it
 // must not change when the file is reordered: it is written, not counted. The secret is a Standard
 // Webhooks one (`whsec_` and base64); what is kept is the key it decodes to.
 //
@@ -72,10 +80,32 @@ pub fn number[&t](text: &t [byte], from: int, to: int) -> [] int {
     return n;
 }
 
+// A decimal number of 1 to 16 digits in `text[from..to]` (a time in Unix ms), or -1.
+pub fn number_ms[&t](text: &t [byte], from: int, to: int) -> [] int {
+    if to <= from || to - from > 16 {
+        return 0 - 1;
+    }
+    var n = 0;
+    var i = from;
+    while i < to {
+        let c = int_of(text[i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        n = n * 10 + (c - '0');
+        i = i + 1;
+    }
+    return n;
+}
+
 // Parse the file. Answers the number of endpoints, or `0 - line` (the 1-based line number, negated) of the first line that is
 // wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a host that is not a public IPv4 address (unless `open`: section 26), a secret that
-// is not base64, a host that is not a public IPv4 address (unless `open`: `destination.ls`), or more than `state.max_endpoints()` endpoints.
-pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], open: bool) -> [] int {
+// is not base64, a host that is not a public IPv4 address (unless `open`: `destination.ls`), a word after the secret that is not one of the three above
+// or is one twice or is not good, or more than `state.max_endpoints()` endpoints.
+//
+// `xt` is where the optional words go (`epx.ls`: a row of `epx.stride()` integers an endpoint, in the table's order): they are judged whatever its
+// length, and kept in it only if it holds a row for the endpoint. `parse` is this without somewhere to keep them.
+pub fn parse_x[&t, &n, &b, &x](text: &t [byte], table: &!n [int], blob: &!b [byte], open: bool, xt: &!x [int]) -> [] int {
     var count = 0;
     var line = 0;
     var at = 0;
@@ -91,8 +121,7 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], op
             let host = field(text, first.1, end);
             let port = field(text, host.1, end);
             let secret = field(text, port.1, end);
-            let extra = field(text, secret.1, end);
-            if host.0 == host.1 || port.0 == port.1 || secret.0 == secret.1 || extra.0 != extra.1 {
+            if host.0 == host.1 || port.0 == port.1 || secret.0 == secret.1 {
                 return 0 - line;
             }
             let id = number(text, first.0, first.1);
@@ -128,12 +157,73 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], op
             table[base + 4] = used;
             table[base + 5] = klen;
             table[base + 6] = id;
+            // The optional words. Their bytes go to `xt`, not to `blob`; the old key is decoded into the free end of `blob` for a moment.
+            let keep = len(xt) >= (count + 1) * epx.stride();
+            if keep {
+                epx.clear_row(xt, count);
+            }
+            var seen = 0;
+            var rest = secret.1;
+            var more = true;
+            while more {
+                let w = field(text, rest, end);
+                if w.0 == w.1 {
+                    more = false;
+                } else {
+                    rest = w.1;
+                    let word = text[w.0..w.1];
+                    if bytes.starts_with(word, "types=") && seen & 1 == 0 {
+                        seen = seen | 1;
+                        if len(word) == 6 || filter.check_list(word[6..len(word)]) != 0 {
+                            return 0 - line;
+                        }
+                        if keep {
+                            epx.set_types(xt, count, word[6..len(word)]);
+                        }
+                    } else if bytes.starts_with(word, "headers=") && seen & 2 == 0 {
+                        seen = seen | 2;
+                        if len(word) == 8 || hdrs.check_spec(word[8..len(word)]) != 0 {
+                            return 0 - line;
+                        }
+                        if keep {
+                            epx.set_spec(xt, count, word[8..len(word)]);
+                        }
+                    } else if bytes.starts_with(word, "old=") && seen & 4 == 0 {
+                        seen = seen | 4;
+                        var at = 4;
+                        while at < len(word) && int_of(word[at]) != '@' {
+                            at = at + 1;
+                        }
+                        let until = number_ms(word, at + 1, len(word));
+                        if at >= len(word) || until < 1 || at == 4 {
+                            return 0 - line;
+                        }
+                        let olen = sign.secret_key(word[4..at], blob[used + klen..len(blob)]);
+                        if olen < 1 || olen > 96 {
+                            return 0 - line;
+                        }
+                        if keep {
+                            epx.set_old(xt, count, blob[used + klen..used + klen + olen], until);
+                        }
+                    } else {
+                        return 0 - line;
+                    }
+                }
+            }
             used = used + klen;
             count = count + 1;
         }
         at = end + 1;
     }
     return count;
+}
+
+// `parse_x` for a caller that has nowhere to keep the optional words (a check that a file is good, a test): they are judged and dropped.
+pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], open: bool) -> [] int {
+    region a {
+        let none = alloc_slice[a](1, 0);
+        return parse_x(text, table, blob, open, none);
+    }
 }
 
 // The `i`th endpoint's slot, id, port, host and key.

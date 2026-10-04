@@ -53,6 +53,10 @@ import reason;
 import metrics;
 import authz;
 import perm;
+import epx;
+import filter;
+import wire;
+import hdrs;
 
 fn max_len() -> [] int {
     return 65536;
@@ -164,9 +168,12 @@ fn id_body[&h](heap: &!h Heap, id: int) -> [heap] buffer.Buffer {
     return json.finish(w);
 }
 
-// Is `body` a JSON object with a string `"type"`? Answers 0, or the reason as a static message (nonzero length).
-fn invalid_event[&h, &b](heap: &!h Heap, body: &b [byte]) -> [heap] &static [byte] {
+// Is `body` a JSON object with a string `"type"`? Answers the reason as a static message (nonzero length) or none, and, for an event that is good, how many
+// integers of `typ` (128 at least, a byte to an integer) are its type as the record keeps it (`filter.storable`: 0 for a type that is empty, longer than 128 bytes or has a control
+// character in it, which the record then keeps as no type at all).
+fn invalid_event[&h, &b, &y](heap: &!h Heap, body: &b [byte], typ: &!y [int]) -> [heap] (&static [byte], int) {
     var reason = "";
+    var tlen = 0;
     let tape = box_slice(heap, json.tape_len(body), 0);
     borrow mut tape as &!tw in {
         let t = contents(tw);
@@ -179,11 +186,24 @@ fn invalid_event[&h, &b](heap: &!h Heap, body: &b [byte]) -> [heap] &static [byt
             let kind = json.get(body, t, 0, "type");
             if kind < 0 || !json.is_string(t, kind) {
                 reason = "the event needs a string \"type\"";
+            } else {
+                region a {
+                    let decoded = alloc_slice[a](filter.max_type() + 8, byte_of(0));
+                    let n = json.string_into(body, t, kind, decoded);
+                    if n > 0 {
+                        tlen = filter.storable(decoded[0..n]);
+                    }
+                    var k = 0;
+                    while k < tlen {
+                        typ[k] = int_of(decoded[k]);
+                        k = k + 1;
+                    }
+                }
             }
         }
     }
     unbox_slice(heap, tape);
-    return reason;
+    return (reason, tlen);
 }
 
 // The event with id `id`, as a JSON body `{"id":N,"event":<the stored object>}`, or an empty buffer if there is none.
@@ -253,15 +273,32 @@ fn bytes_equal_lower[&a, &b](name: &a [byte], want: &b [byte]) -> [] bool {
     return true;
 }
 
-// Build the record of event `ms` in `scratch`: the body, and for a keyed event the key and the time `now` (Unix ms, eight bytes).
-// Answers the record's length.
-fn event_record[&c, &b, &k](scratch: &!c [byte], ms: int, body: &b [byte], key: &k [byte], keyed: bool, now: int) -> [] int {
-    if !keyed {
-        let p = record.begin(scratch, 0, ms, 0, 1);
-        return record.seal(scratch, 0, record.put_pair(scratch, p, "event", body));
+// Build the record of event `ms` in `scratch`: the body, then its type if it has one (`typ`, the pair `typ`: design section 35), and for a keyed event
+// the key and the time `now` (Unix ms, eight bytes). Answers the record's length.
+fn event_record[&c, &b, &y, &k](scratch: &!c [byte], ms: int, body: &b [byte], typ: &y [int], tlen: int, key: &k [byte], keyed: bool, now: int) -> [] int {
+    var fields = 1;
+    if tlen > 0 {
+        fields = fields + 1;
     }
-    let p = record.begin(scratch, 0, ms, 0, 3);
+    if keyed {
+        fields = fields + 2;
+    }
+    let p = record.begin(scratch, 0, ms, 0, fields);
     var end = record.put_pair(scratch, p, "event", body);
+    if tlen > 0 {
+        region ty {
+            let tb = alloc_slice[ty](filter.max_type() + 8, byte_of(0));
+            var k = 0;
+            while k < tlen {
+                tb[k] = byte_of(typ[k]);
+                k = k + 1;
+            }
+            end = record.put_pair(scratch, end, "typ", tb[0..tlen]);
+        }
+    }
+    if !keyed {
+        return record.seal(scratch, 0, end);
+    }
     end = record.put_pair(scratch, end, "key", key);
     region a {
         let stamp = alloc_slice[a](8, byte_of(0));
@@ -273,13 +310,13 @@ fn event_record[&c, &b, &k](scratch: &!c [byte], ms: int, body: &b [byte], key: 
 
 // Append the event `body` (already judged) to the log, under `key` if it is `keyed`, and note the key in the index. This is the whole of storing an event: `POST /events`
 // and a schedule's fire (`fire_cron`) both end here, so a fire is an ordinary event. `sum` is the CRC-32C of `body`, `entry` the index entry of a key that is
-// held (an expired one, whose entry is overwritten) or -1. Answers `(code, id)`: 0 and the event's id, or what `log.append` refused with.
-fn store_event[&c, &b, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], now: int) -> [file_write] (int, int) {
+// held (an expired one, whose entry is overwritten) or -1. `typ[0..tlen]` is the type the record keeps (`tlen` 0 for none). Answers `(code, id)`: 0 and the event's id, or what `log.append` refused with.
+fn store_event[&c, &b, &t, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], typ: &t [int], tlen: int, key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], now: int) -> [file_write] (int, int) {
     var ms = 1;
     if log.last_ms(lg) >= 1 {
         ms = log.last_ms(lg) + 1;
     }
-    let total = event_record(scratch, ms, body, key, keyed, now);
+    let total = event_record(scratch, ms, body, typ, tlen, key, keyed, now);
     let code = log.append(lg, scratch[0..total], ms, 0);
     if code != 0 {
         return (code, 0);
@@ -502,7 +539,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     }
     if id == 2 {
         // POST /events
-        let invalid = invalid_event(heap, body);
+        let (invalid, tlen) = invalid_event(heap, body, stats[off_ex() + ex_type()..off_ex() + ex_type() + filter.max_type()]);
         if len(invalid) > 0 {
             return refuse_event(heap, out, stats, 422, invalid, keep);
         }
@@ -535,7 +572,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
                 return refuse_event(heap, out, stats, 507, "too many Idempotency-Keys are held", keep);
             }
         }
-        let stored = store_event(scratch, body, key, keyed, sum, entry, lg, ix, arena, now);
+        let stored = store_event(scratch, body, stats[off_ex() + ex_type()..off_ex() + ex_type() + filter.max_type()], tlen, key, keyed, sum, entry, lg, ix, arena, now);
         if stored.0 == log.too_long() {
             return refuse_event(heap, out, stats, 413, "the event is too large", keep);
         }
@@ -606,6 +643,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, sched.errors(sg));
         w = json.put_key(heap, w, "cron_skipped");
         w = json.put_int(heap, w, sched.skipped(sg));
+        w = json.put_key(heap, w, "filtered");
+        w = json.put_int(heap, w, stats[off_ex() + ex_filtered()]);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -646,6 +685,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, ops.stop_deadline(ops_of(stats)));
         w = json.put_key(heap, w, "repair-logs");
         w = json.put_int(heap, w, ops.repair_flag(ops_of(stats)));
+        w = json.put_key(heap, w, "rotation-grace-ms");
+        w = json.put_int(heap, w, stats[off_ex() + ex_grace()]);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -699,6 +740,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             w = json.put_bool(heap, w, is_paused(stats, e));
             w = json.put_key(heap, w, "failing_since");
             w = json.put_int(heap, w, stats[off_streak() + e]);
+            w = epx.put_members(heap, w, stats[off_xt()..off_xt() + epx.xt_size()], i, now);
             w = json.end_object(heap, w);
             i = i + 1;
         }
@@ -740,7 +782,12 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         if parsed.3 > 0 && sign.secret_key(scratch[256..256 + parsed.3], scratch[400..496]) < 0 {
             return server.failure(heap, out, 400, manage.why(4), keep);
         }
-        if endpoints.blob_used(stats[off_table()..off_table() + endpoints.table_size()], stats[c_endpoints()]) + parsed.2 + 48 > endpoints.text_limit() {
+        // The subscription and the headers (`epx.ls`): judged here, kept in the delivery state until the database answers.
+        let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], false, stats[off_ex() + ex_grace()], now);
+        if named != 0 {
+            return server.failure(heap, out, 400, epx.why(named), keep);
+        }
+        if endpoints.blob_used(stats[off_table()..off_table() + endpoints.table_size()], stats[c_endpoints()]) + parsed.2 + 48 + epx.text_used(stats[off_xt()..off_xt() + epx.xt_size()], stats[c_endpoints()]) + epx.pending_types_len(stats[off_xg()..off_xg() + epx.xg_size()]) + epx.pending_spec_len(stats[off_xg()..off_xg() + epx.xg_size()]) > endpoints.text_limit() {
             return server.failure(heap, out, 507, "there is no room for another host name", keep);
         }
         stats[off_mg() + manage.mg_state()] = 1;
@@ -776,6 +823,18 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         }
         if parsed.1 & 4 != 0 && sign.secret_key(scratch[256..256 + stats[off_mg() + manage.mg_secret_len()]], scratch[400..496]) < 0 {
             return server.failure(heap, out, 400, manage.why(4), keep);
+        }
+        // The subscription, the headers, and how long the previous secret stays valid (`epx.ls`).
+        epx.clear_pending(stats[off_xg()..off_xg() + epx.xg_size()]);
+        if parsed.1 & 16 != 0 {
+            let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], true, stats[off_ex() + ex_grace()], now);
+            if named != 0 {
+                return server.failure(heap, out, 400, epx.why(named), keep);
+            }
+            // Keeping a previous secret without making a new one needs one to keep (to end the overlap there need not be).
+            if epx.pending_mask(stats[off_xg()..off_xg() + epx.xg_size()]) & epx.m_keep() != 0 && parsed.1 & 12 == 0 && epx.pending_keep_until(stats[off_xg()..off_xg() + epx.xg_size()]) > 0 && !epx.old_active(stats[off_xt()..off_xt() + epx.xt_size()], index_of_id(stats, want), now) {
+                return server.failure(heap, out, 400, epx.why(305), keep);
+            }
         }
         stats[off_mg() + manage.mg_target()] = want;
         stats[off_mg() + manage.mg_state()] = 1;
@@ -840,6 +899,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_bool(heap, w, is_paused(stats, slot));
         w = json.put_key(heap, w, "failing_since");
         w = json.put_int(heap, w, stats[off_streak() + slot]);
+        w = epx.put_members(heap, w, stats[off_xt()..off_xt() + epx.xt_size()], wi, now);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -871,11 +931,22 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         if offset < 0 {
             return server.failure(heap, out, 404, "no such event", keep);
         }
+        // A replay to every endpoint goes to those whose subscription wants the event's type; a replay to one endpoint, named, goes whatever it
+        // subscribes to (section 35). The type is read from the record, which is left in `window` for the loops below.
+        var tstart = 0;
+        var tlen = 0;
+        if only < 0 {
+            if log.read_at(lg, offset, window).0 == 0 {
+                let t = filter.type_in(window);
+                tstart = t.0;
+                tlen = t.1;
+            }
+        }
         var needed = 0;
         var i = 0;
         while i < stats[c_endpoints()] {
             let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
-            if (only < 0 || e == only) && rp_find(stats, e, want) < 0 {
+            if (e == only || only < 0 && epx.accepts(stats[off_xt()..off_xt() + epx.xt_size()], i, window[tstart..tstart + tlen])) && rp_find(stats, e, want) < 0 {
                 needed = needed + 1;
             }
             i = i + 1;
@@ -887,7 +958,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         i = 0;
         while i < stats[c_endpoints()] {
             let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
-            if only < 0 || e == only {
+            if e == only || only < 0 && epx.accepts(stats[off_xt()..off_xt() + epx.xt_size()], i, window[tstart..tstart + tlen]) {
                 if note_outcome(done, stats, state.replay(), e, want, 0, 0) == 0 {
                     return server.failure(heap, out, 503, "the replay could not be stored", keep);
                 }
@@ -906,7 +977,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         i = 0;
         while i < stats[c_endpoints()] {
             let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
-            if only < 0 || e == only {
+            if e == only || only < 0 && epx.accepts(stats[off_xt()..off_xt() + epx.xt_size()], i, window[tstart..tstart + tlen]) {
                 rp_put(stats, e, want, offset);
                 w = json.put_int(heap, w, endpoints.ident_of(stats[off_table()..off_table() + endpoints.table_size()], i));
             }
@@ -998,7 +1069,10 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 //     mg       368   the change that waits for the database (`manage.ls`)
 //     offs     63488 per slot, 1024 each: where in the events log each event of that endpoint's window starts, by `id % window`
 //     cells    ...   `state.cells(62)`: final / attempts / next attempt, per slot and `id % window`
-//     ...      the flight flags, the replays, the history ring, and last of all the counters of `ops.ls`
+//     ...      the flight flags, the replays, the history ring, the counters of `ops.ls` (`ops`), and last:
+//     xt       164920  per table entry: its subscription, custom headers and previous secret (`epx.ls`)
+//     xg       4616  the subscription and headers a change waits to apply (`epx.ls`)
+//     ex       136   counters and a setting of the extras, and the type of the event being accepted (`ex_*` below)
 
 // A bit per slot: set while the endpoint that has the slot was paused by the circuit breaker (`docs/design.md` section 31). The slot's
 // `c_disabled` bit is set as well, so everything that skips a disabled endpoint skips this one; this bit says why.
@@ -1282,8 +1356,36 @@ fn off_ops() -> [] int {
     return off_hq() + history.size();
 }
 
-fn dv_size() -> [] int {
+// The extras of the endpoints (`epx.ls`, `docs/design.md` section 35): a row for each entry of the table, and the change that waits.
+fn off_xt() -> [] int {
     return off_ops() + ops.size();
+}
+
+fn off_xg() -> [] int {
+    return off_xt() + epx.xt_size();
+}
+
+fn off_ex() -> [] int {
+    return off_xg() + epx.xg_size();
+}
+
+// How many (endpoint, event) pairs a subscription has passed over since the start.
+fn ex_filtered() -> [] int {
+    return 0;
+}
+
+// `rotation-grace-ms`: how long a previous secret is kept when a change asks for the default.
+fn ex_grace() -> [] int {
+    return 1;
+}
+
+// The type of the event being accepted, a byte to an integer: room for `filter.max_type()` after the counters.
+fn ex_type() -> [] int {
+    return 8;
+}
+
+fn dv_size() -> [] int {
+    return off_ex() + 8 + filter.max_type();
 }
 
 // A replay attempt's id for the attempt machinery: the event's id plus this, so `finish_attempt` can tell it from a window's.
@@ -1751,34 +1853,6 @@ fn seek_slots[&l, &w, &d](lg: &!l log.Log, window: &!w [byte], dv: &!d [int]) ->
     return 0;
 }
 
-// `POST /hook` with the event as the body and the three Standard Webhooks headers. `webhook-id` is `evt_<id>`, the same for
-// every attempt at the event, so a receiver can drop a repeat.
-fn request_for[&h, &b, &k](heap: &!h Heap, id: int, body: &b [byte], key: &k [byte], seconds: int) -> [heap] buffer.Buffer {
-    region a {
-        let msg_id = alloc_slice[a](24, byte_of(0));
-        msg_id[0] = byte_of('e');
-        msg_id[1] = byte_of('v');
-        msg_id[2] = byte_of('t');
-        msg_id[3] = byte_of('_');
-        let id_len = 4 + sign.nat_text(id, msg_id[4..24]);
-        let stamp = alloc_slice[a](24, byte_of(0));
-        let stamp_len = sign.nat_text(seconds, stamp);
-        let sig = alloc_slice[a](48, byte_of(0));
-        sign.signature(heap, key, msg_id[0..id_len], stamp[0..stamp_len], body, sig);
-        var q = buffer.append(heap, buffer.empty(heap, len(body) + 384), "POST /hook HTTP/1.1\r\nHost: receiver\r\nContent-Type: application/json\r\nwebhook-id: ");
-        q = buffer.append(heap, q, msg_id[0..id_len]);
-        q = buffer.append(heap, q, "\r\nwebhook-timestamp: ");
-        q = buffer.append(heap, q, stamp[0..stamp_len]);
-        q = buffer.append(heap, q, "\r\nwebhook-signature: ");
-        q = buffer.append(heap, q, sig[0..47]);
-        q = buffer.append(heap, q, "\r\nContent-Length: ");
-        q = buffer.push_nat(heap, q, len(body));
-        q = buffer.append(heap, q, "\r\nConnection: close\r\n\r\n");
-        q = buffer.append(heap, q, body);
-        return q;
-    }
-}
-
 // The circuit breaker (`docs/design.md` section 31). An attempt of endpoint `e` that was recorded ended in a delivery or not. A delivery ends the
 // endpoint's run of failures. A failure (anything but a `2xx`; a `410` is the endpoint saying it is gone and disables it on its own) either
 // begins a run, which is written to the log with its time so that a restart does not forget when it began, or, if one is under way and has
@@ -1998,7 +2072,7 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
         }
     }
     let p = record.pair_at(window, record.first_pair(0));
-    let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
+    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock));
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
@@ -2039,7 +2113,7 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
         return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
     let p = record.pair_at(window, record.first_pair(0));
-    let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
+    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock));
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
@@ -2054,6 +2128,26 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
         return (table, 0);
     }
     return (table, finish_replay(done, dv, clock, e, id, code, 0));
+}
+
+// The most events one turn of `start_attempts` passes over for endpoints that do not subscribe to them, in all: they cost a read each and no attempt, and
+// a backlog of them must not hold the loop (ingest, the other endpoints) for as long as it is long.
+fn most_skips() -> [] int {
+    return 4096;
+}
+
+// Is the event `id`, which `scan_next` has just left in `window`, one that endpoint `e` (table index `i`) does not subscribe to? An endpoint with no
+// subscription wants everything and the record is not looked at; an event the endpoint has a trace of (final, or an attempt made: a restart finding
+// it under a subscription that has changed since) is not passed over. The type is read from the record's `typ` pair: no JSON is parsed.
+fn unwanted[&w, &d](window: &w [byte], dv: &d [int], i: int, e: int, id: int) -> [] bool {
+    if epx.types_len(dv[off_xt()..off_xt() + epx.xt_size()], i) == 0 {
+        return false;
+    }
+    if state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) || state.attempts(dv[off_cells()..off_flight()], e, id) > 0 {
+        return false;
+    }
+    let t = filter.type_in(window);
+    return !epx.accepts(dv[off_xt()..off_xt() + epx.xt_size()], i, window[t.0..t.0 + t.1]);
 }
 
 // The next event of the events log that endpoint `e` has not looked at, which must be `id` (`docs/design.md` section 31): read it where the
@@ -2108,6 +2202,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     }
     var budget = state.starts_allowed(held, attempt.slots(), most_starts());
     var written = 0;
+    var skips = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
     var step = 0;
@@ -2117,7 +2212,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
         let now = clock_unix_ms(clock);
         var id = dv[off_cur() + e] + 1;
         var going = true;
-        while going && budget > 0 && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
+        while going && budget > 0 && skips < most_skips() && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
             var loaded = false;
             if id > dv[scan_id(e)] {
                 if scan_next(lg, window, dv, e, id) == 1 {
@@ -2127,7 +2222,13 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
                 }
             }
             if going {
-                if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
+                if loaded && unwanted(window, dv, i, e, id) {
+                    // The endpoint's subscription does not want this event (section 35): it is final here at once, with no attempt and no record;
+                    // the cursor moves over it as over a delivered one, and a restart decides it again from the log.
+                    state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, state.delivered(), id, 0, 0);
+                    dv[off_ex() + ex_filtered()] = dv[off_ex() + ex_filtered()] + 1;
+                    skips = skips + 1;
+                } else if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
                     budget = budget - 1;
                     let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, loaded, token0);
                     table = grown;
@@ -2225,10 +2326,12 @@ fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, s
         let event = json.finish(w);
         borrow event as &er in {
             let text = buffer.bytes(er);
-            if len(invalid_event(heap, text)) > 0 {
+            let tbuf = alloc_slice[a](filter.max_type() + 8, 0);
+            let (why, tlen) = invalid_event(heap, text, tbuf);
+            if len(why) > 0 {
                 outcome = 1;
             } else {
-                let stored = store_event(scratch, text, key, true, crc.of(text), 0 - 1, lg, ix, arena, now);
+                let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, ix, arena, now);
                 if stored.0 == 0 {
                     outcome = 0;
                 } else if stored.0 == log.too_long() {
@@ -2962,7 +3065,7 @@ fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [by
     borrow mut text as &!tw in {
         let got = read_endpoints_file(fs, dir, contents(tw));
         if got >= 0 {
-            result = endpoints.parse(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob, open);
+            result = endpoints.parse_x(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob, open, dv[off_xt()..off_xt() + epx.xt_size()]);
         }
     }
     unbox_slice(heap, text);
@@ -2982,9 +3085,22 @@ fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], a
         if r.0 != 0 {
             return 16;
         }
-        if record.fields_of(window, 0) >= 3 {
+        // The pairs are found by name: the body, then its type if it has one (`typ`, section 35), then for a keyed event `key` and `t`. A log from
+        // before the type existed has records of one pair or of three, and reads as it always did.
+        var after = 0;
+        var left = record.fields_of(window, 0) - 1;
+        if left >= 1 {
+            let ev0 = record.pair_at(window, record.first_pair(0));
+            after = ev0.4;
+            let ty = record.pair_at(window, after);
+            if ty.1 == 3 && window[ty.0] == byte_of('t') && window[ty.0 + 1] == byte_of('y') && window[ty.0 + 2] == byte_of('p') {
+                after = ty.4;
+                left = left - 1;
+            }
+        }
+        if left >= 2 {
             let ev = record.pair_at(window, record.first_pair(0));
-            let k = record.pair_at(window, ev.4);
+            let k = record.pair_at(window, after);
             let t = record.pair_at(window, k.4);
             if k.1 != 3 || window[k.0] != byte_of('k') || t.1 != 1 || window[t.0] != byte_of('t') || t.3 != 8 {
                 return 16;
@@ -3026,7 +3142,7 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
     // The endpoints: the database's, as `roster.fetch` wrote them, or `endpoints.conf`.
     var n = 0;
     if from_db {
-        n = endpoints.parse(etext, dv[off_table()..off_table() + endpoints.table_size()], blob, open);
+        n = endpoints.parse_x(etext, dv[off_table()..off_table() + endpoints.table_size()], blob, open, dv[off_xt()..off_xt() + epx.xt_size()]);
     } else {
         n = load_endpoints(heap, fs, dir, dv, blob, open);
     }
@@ -3215,11 +3331,19 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return queries.delete_endpoint_start(heap, dv[off_mg() + manage.mg_target()]);
     }
-    if dv[off_mg() + manage.mg_kind()] != 1 {
-        return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret);
-    }
-    if dv[off_mg() + manage.mg_fields()] & 12 != 0 {
-        return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret);
+    let xg = dv[off_xg()..off_xg() + epx.xg_size()];
+    region a {
+        let types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
+        let spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
+        let tn = epx.pending_types_into(xg, types);
+        let sn = epx.pending_spec_into(xg, spec);
+        if dv[off_mg() + manage.mg_kind()] != 1 {
+            return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn]);
+        }
+        if dv[off_mg() + manage.mg_fields()] & ~3 != 0 {
+            let mask = epx.pending_mask(xg);
+            return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0);
+        }
     }
     return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
 }
@@ -3317,6 +3441,7 @@ fn finish_delete[&h, &b, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [b
         }
         r = r + 1;
     }
+    epx.drop_row(dv[off_xt()..off_xt() + epx.xt_size()], dv[c_endpoints()], i);
     dv[c_endpoints()] = endpoints.remove(dv[off_table()..off_table() + endpoints.table_size()], blob, dv[c_endpoints()], i);
     if idle {
         retire_slot(dv, e);
@@ -3375,6 +3500,15 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
         let key = alloc_slice[a](96, byte_of(0));
         manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
         manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_secret(), sl, secret);
+        // The key in force until this change: while a rotation overlaps it signs beside the new one (copied now, `replace` may move the blob).
+        let prev = alloc_slice[a](96, byte_of(0));
+        let was = endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i);
+        let prev_len = len(was);
+        var pk = 0;
+        while pk < prev_len && pk < 96 {
+            prev[pk] = was[pk];
+            pk = pk + 1;
+        }
         var klen = 0;
         if fields & 12 != 0 {
             klen = sign.secret_key(secret[0..sl], key);
@@ -3397,6 +3531,34 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
             }
         }
         if !failed {
+            // The subscription, the headers and the previous secret (`epx.ls`): the database has them, now the delivery does.
+            let mask = epx.pending_mask(dv[off_xg()..off_xg() + epx.xg_size()]);
+            let until = epx.pending_keep_until(dv[off_xg()..off_xg() + epx.xg_size()]);
+            let ex_types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
+            let ex_spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
+            if mask & epx.m_types() != 0 {
+                epx.set_types(dv[off_xt()..off_xt() + epx.xt_size()], i, ex_types[0..epx.pending_types_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_types)]);
+            }
+            if mask & epx.m_headers() != 0 {
+                epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], i, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
+            }
+            var overlap = 0;
+            if fields & 12 != 0 {
+                // A new secret: the one it replaces stays only if asked to.
+                if mask & epx.m_keep() != 0 && until > 0 {
+                    epx.set_old(dv[off_xt()..off_xt() + epx.xt_size()], i, prev[0..prev_len], until);
+                    overlap = until;
+                } else {
+                    epx.set_old(dv[off_xt()..off_xt() + epx.xt_size()], i, prev[0..0], 0);
+                }
+            } else if mask & epx.m_keep() != 0 {
+                if until > 0 && epx.old_len(dv[off_xt()..off_xt() + epx.xt_size()], i) > 0 {
+                    epx.set_old_until(dv[off_xt()..off_xt() + epx.xt_size()], i, until);
+                    overlap = until;
+                } else {
+                    epx.set_old(dv[off_xt()..off_xt() + epx.xt_size()], i, prev[0..0], 0);
+                }
+            }
             var wr = json.writer(heap, 256);
             wr = json.begin_object(heap, wr);
             wr = json.put_key(heap, wr, "id");
@@ -3408,6 +3570,10 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
             if fields & 12 != 0 {
                 wr = json.put_key(heap, wr, "secret");
                 wr = json.put_string(heap, wr, secret[0..sl]);
+            }
+            if overlap > 0 {
+                wr = json.put_key(heap, wr, "secret_old_until");
+                wr = json.put_int(heap, wr, overlap);
             }
             wr = json.end_object(heap, wr);
             let body = json.finish(wr);
@@ -3451,6 +3617,8 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         if klen < 0 {
             return server.failure(heap, out, 503, "the secret cannot be used", keep);
         }
+        let ex_types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
+        let ex_spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
         // An endpoint of this id that the log remembers is a different endpoint (an id is never given twice): its slot is freed.
         var k = 0;
         while k < state.max_endpoints() {
@@ -3482,6 +3650,10 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         if grown < 0 {
             return server.failure(heap, out, 503, "the endpoint could not be added", keep);
         }
+        // Its subscription and headers (`epx.ls`), in the row of the entry just added.
+        epx.clear_row(dv[off_xt()..off_xt() + epx.xt_size()], count);
+        epx.set_types(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_types[0..epx.pending_types_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_types)]);
+        epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
         dv[c_endpoints()] = grown;
         var wr = json.writer(heap, 256);
         wr = json.begin_object(heap, wr);
@@ -3903,6 +4075,7 @@ fn main(world: World) -> [] int {
                                                                                     if config.production(cfg) {
                                                                                         contents(dvw)[c_production()] = 1;
                                                                                     }
+                                                                                    contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
                                                                                     // The database for the history, if one was named: connect and log in here, before the loop, and go on
                                                                                     // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
                                                                                     var hpool = pool.empty(h, 1, 1, 4096, 4096);

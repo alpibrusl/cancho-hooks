@@ -5,7 +5,7 @@ the service's own CPU time from /proc.
     gcc -O2 -o scripts/bench/loadgen scripts/bench/loadgen.c && gcc -O2 -o scripts/bench/sink scripts/bench/sink.c
     python3 scripts/bench/run.py [scenario ...]          # HOOKS_BIN=path/to/hooks to name the binary
 
-Scenarios: ingest64 (50,000 events, 64 keep-alive connections, no endpoint), ingest1 (20,000 events, one connection: one flush each),
+Scenarios (ten_wanted and ten_unwanted need the version with event types): ingest64 (50,000 events, 64 keep-alive connections, no endpoint), ingest1 (20,000 events, one connection: one flush each),
 one (1 endpoint, 20,000 events, 64 connections), ten (10 endpoints, 5,000 events: 50,000 deliveries). The sink answers every POST
 with 204 and closes. The retry schedule is 100 ms so that a failed attempt does not hide in the wall time. Not a benchmark of
 anyone else's service: a measurement of this one, on whatever machine runs it, and the machine is part of the result.
@@ -19,13 +19,13 @@ def cpu(pid):
     f=open(f"/proc/{pid}/stat").read().rsplit(")",1)[1].split(); return (int(f[11])+int(f[12]))/os.sysconf("SC_CLK_TCK")
 def stats(port):
     return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/stats",timeout=5).read())
-def run(endpoints, events, conns, label, body=200):
+def run(endpoints, events, conns, label, body=200, types=None):
     d=tempfile.mkdtemp(prefix="bench-")
     sink_port=free_port()
     sink=subprocess.Popen([f"{HERE}/sink",str(sink_port)],stderr=subprocess.PIPE)
     secret="whsec_"+base64.b64encode(os.urandom(24)).decode()
     with open(f"{d}/endpoints.conf","w") as f:
-        for i in range(endpoints): f.write(f"{i} 127.0.0.1 {sink_port} {secret}\n")
+        for i in range(endpoints): f.write(f"{i} 127.0.0.1 {sink_port} {secret}" + (f" types={types}" if types else "") + "\n")
     port=free_port()
     p=subprocess.Popen([BIN,"--port",str(port),"--dir",d,"--allow-private-hosts","1","--schedule","100,100,100"],stderr=subprocess.PIPE,stdout=subprocess.DEVNULL)
     assert p.stderr.readline().strip()==b"listening"
@@ -33,13 +33,18 @@ def run(endpoints, events, conns, label, body=200):
     out=subprocess.run([f"{HERE}/loadgen",str(port),str(conns),str(events),str(body)],capture_output=True,text=True,timeout=300)
     t_ingest=time.time()-t0; c_ingest=cpu(p.pid)-c0
     want=events*endpoints; t_del=None
+    if types and types != "bench":
+        want=0   # nothing is wanted: the endpoints pass over every event (design section 35)
     if endpoints:
         end=time.time()+120
         while time.time()<end:
             s=stats(port)
-            if s["delivered"]>=want: t_del=time.time()-t0; break
+            if types and types != "bench":
+                if s.get("filtered",0)>=events*endpoints: t_del=time.time()-t0; break
+            elif s["delivered"]>=want: t_del=time.time()-t0; break
             time.sleep(0.05)
         s=stats(port)
+        if types and types != "bench": want=events*endpoints
     c_all=cpu(p.pid)-c0
     print(f"{label}: ingest: {out.stdout.strip()}")
     print(f"   hooks CPU for ingest {c_ingest:.2f}s ({c_ingest/events*1e6:.0f} us/event)", end="")
@@ -52,6 +57,10 @@ SCENARIOS={
     "ingest1": lambda: run(0, 20000, 1, "ingest only, 1 conn"),
     "one": lambda: run(1, 20000, 64, "1 endpoint"),
     "ten": lambda: run(10, 5000, 64, "10 endpoints"),
+    # design section 35: ten endpoints with a list. "wanted" lists the event's type (every delivery as in "ten", plus the check of the list);
+    # "unwanted" lists another (50,000 passes-over and no delivery: the time and CPU are per (endpoint, event) pair, not per delivery).
+    "ten_wanted": lambda: run(10, 5000, 64, "10 endpoints, each with a list that wants the type", types="bench"),
+    "ten_unwanted": lambda: run(10, 5000, 64, "10 endpoints, each with a list that does not want the type", types="other.*"),
 }
 if __name__=="__main__":
     for name in (sys.argv[1:] or SCENARIOS):

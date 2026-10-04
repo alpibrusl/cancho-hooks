@@ -41,12 +41,12 @@ std = true
 
 [[test]]
 name = "endpoints"
-sources = ["tests/endpoints_test.ls", "src/endpoints.ls", "src/destination.ls", "src/sign.ls", "src/state.ls"]
+sources = ["tests/endpoints_test.ls", "src/endpoints.ls", "src/destination.ls", "src/sign.ls", "src/state.ls", "src/epx.ls", "src/filter.ls", "src/hdrs.ls"]
 std = true
 
 [[test]]
 name = "destination"
-sources = ["tests/destination_test.ls", "src/destination.ls", "src/endpoints.ls", "src/sign.ls", "src/state.ls"]
+sources = ["tests/destination_test.ls", "src/destination.ls", "src/endpoints.ls", "src/sign.ls", "src/state.ls", "src/epx.ls", "src/filter.ls", "src/hdrs.ls"]
 std = true
 
 [[test]]
@@ -62,6 +62,21 @@ std = true
 [[test]]
 name = "authz"
 sources = ["tests/authz_test.ls", "src/authz.ls", "src/perm.ls", "src/manage.ls", "src/destination.ls"]
+std = true
+
+[[test]]
+name = "filter"
+sources = ["tests/filter_test.ls", "src/filter.ls"]
+std = true
+
+[[test]]
+name = "hdrs"
+sources = ["tests/hdrs_test.ls", "src/hdrs.ls"]
+std = true
+
+[[test]]
+name = "epx"
+sources = ["tests/epx_test.ls", "src/epx.ls", "src/filter.ls", "src/hdrs.ls"]
 std = true
 
 [[test]]

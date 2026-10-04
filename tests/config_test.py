@@ -37,7 +37,7 @@ def check(name, ok, detail=""):
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
             "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
-            "stop-deadline-ms": 5000, "repair-logs": 0}
+            "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000}
     base.update(kw)
     return base
 
@@ -171,6 +171,18 @@ def stage3():
     _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nstop-deadline-ms = 0\n")
     shutil.rmtree(w)
     check("3. stop-deadline-ms 0 (do not wait) is a setting, from a file too", cfg == settings(**{"stop-deadline-ms": 0}), str(cfg))
+    _, _, cfg, w = serve(["--rotation-grace-ms", "3600000"], None, {})
+    shutil.rmtree(w)
+    check("3. rotation-grace-ms is a setting, read back", cfg == settings(**{"rotation-grace-ms": 3600000}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nrotation-grace-ms = 2592000000\n")
+    shutil.rmtree(w)
+    check("3. rotation-grace-ms 30 days (the most) from a file, read back", cfg == settings(**{"rotation-grace-ms": 2592000000}), str(cfg))
+    # the settings of the operating, credentials and per-endpoint work sit in one table of integers: every one given at once must come back as given
+    _, _, cfg, w = serve(["--config", "@/hooks.conf", "--stop-deadline-ms", "1500", "--ingest-token", "ingest-token-1", "--rotation-grace-ms", "7200000",
+                          "--repair-logs", "1", "--cron-seconds", "1", "--breaker-days", "3"], "port = @PORT\ndir = @DIR\nadmin-token = admin-token-1\nrotation-grace-ms = 1000\n", {})
+    shutil.rmtree(w)
+    check("3. every side's settings given together come back as given (the flag over the file)",
+          cfg == settings(**{"stop-deadline-ms": 1500, "repair-logs": 1, "rotation-grace-ms": 7200000, "cron-seconds": 1, "breaker-days": 3}), str(cfg))
     code, line, _, w = serve(["--allow-private-hosts", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
     shutil.rmtree(w)
     check("3. a private host in the file with the default is refused before the service listens (status 13)", code == 13 and line != "listening", str((code, line)))
@@ -215,6 +227,9 @@ def stage4():
     refused("stop-deadline-ms that is not a number", ["--port", "@PORT", "--dir", "@", "--stop-deadline-ms", "soon"], expect=["`--stop-deadline-ms` has a value"])
     refused("stop-deadline-ms over an hour", ["--port", "@PORT", "--dir", "@", "--stop-deadline-ms", "3600001"], expect=["`--stop-deadline-ms` has a value"])
     refused("repair-logs that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--repair-logs", "yes"], expect=["`--repair-logs` has a value"])
+    refused("rotation-grace-ms that is 0", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "0"], expect=["`--rotation-grace-ms` has a value"])
+    refused("rotation-grace-ms over 30 days", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "2592000001"], expect=["`--rotation-grace-ms` has a value"])
+    refused("rotation-grace-ms that is not a number", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "a day"], expect=["`--rotation-grace-ms` has a value"])
     refused("breaker-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--breaker-days", "soon"], expect=["`--breaker-days` has a value"])
     refused("breaker-days over 100 years", ["--port", "@PORT", "--dir", "@", "--breaker-days=36501"], expect=["`--breaker-days=36501` has a value"])
     refused("ingest-token that is too short", ["--port", "@PORT", "--dir", "@", "--ingest-token", "short"], expect=["`--ingest-token` has a value"])

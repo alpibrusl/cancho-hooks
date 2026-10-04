@@ -19,7 +19,7 @@ import pg;
 //     [5] port   [6] host length   [7] secret length   [8] 1 if the service has to make the secret
 //     [9 .. 265) the host   [265 .. 361) the secret, `whsec_` and base64
 //     [361] what it is: 0 a new endpoint, 1 a change (`PATCH`, section 25.3)   [362] the id of the endpoint a change is for
-//     [363] the members a change names: 1 host, 2 port, 4 secret, 8 rotate (a secret made by the service)
+//     [363] the members a change names: 1 host, 2 port, 4 secret, 8 rotate (a secret made by the service), 16 one of the members of `epx.ls`
 
 pub fn token_size() -> [] int {
     return 256;
@@ -167,7 +167,7 @@ pub fn why(code: int) -> [] &static [byte] {
         return "a new endpoint starts from now: \"from\" may only be \"now\"";
     }
     if code == 7 {
-        return "a change needs at least one of \"host\", \"port\", \"secret\" and \"rotate\"";
+        return "a change needs at least one of \"host\", \"port\", \"secret\", \"rotate\", \"types\", \"headers\", \"keep_old_ms\" and \"keep_old\"";
     }
     if code == 8 {
         return "\"rotate\" must be true, and cannot be given with a \"secret\"";
@@ -341,6 +341,12 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
                     }
                 }
             }
+            if code == 0 {
+                // The members of `epx.ls` (the subscription, the headers, how long the previous secret stays valid): judged there, named here.
+                if json.get(body, t, 0, "types") >= 0 || json.get(body, t, 0, "headers") >= 0 || json.get(body, t, 0, "keep_old_ms") >= 0 || json.get(body, t, 0, "keep_old") >= 0 {
+                    fields = fields + 16;
+                }
+            }
             if code == 0 && fields == 0 {
                 code = 7;
             }
@@ -365,7 +371,7 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
     mg[mg_secret_len()] = secret_len;
     mg[mg_kind()] = 1;
     mg[mg_fields()] = fields;
-    if fields >= 8 {
+    if fields & 8 != 0 {
         mg[mg_make()] = 1;
     } else {
         mg[mg_make()] = 0;

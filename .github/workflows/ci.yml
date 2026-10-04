@@ -112,6 +112,18 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/delete_test.py build/hooks
 
+      - name: Event types per endpoint (the matching rules against a model, 3,000 events nobody wants, a dead endpoint, kill -9, a log from before the type, replay)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/filter_test.py build/hooks
+
+      - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks
+
+      - name: Custom headers (on the wire, never in a read, every forbidden name, CRLF injection, the limits, the largest event)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/headers_test.py build/hooks
+
       - name: Ten endpoints beside 64 connections (a start beyond them is not a failure)
         working-directory: hooks
         run: python3 tests/saturation_test.py build/hooks

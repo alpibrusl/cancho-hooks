@@ -27,6 +27,7 @@ import std.bytes;
 //     cron-seconds `1`: a schedule's expression has a leading seconds field (six fields; a test mode)   default 0 (section 32)
 //     stop-deadline-ms  how long attempts on the wire may take to finish after SIGTERM or SIGINT   default 5000 (section 34.4)
 //     repair-logs  `1`: cut a log that has damage in the middle at the damage instead of refusing to start; the cut is reported   default 0 (section 34.5)
+//     rotation-grace-ms  how long the previous secret is still signed with after `PATCH ... {"keep_old": true}` (1 to 2592000000)   default 86400000, a day (section 35)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -38,14 +39,14 @@ import std.bytes;
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
 //     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
 //     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)   cfg[17] stop-deadline-ms (5000 until set)   cfg[18] repair-logs (0 or 1)
-//     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)
+//     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)   cfg[22] rotation-grace-ms (86400000 until set)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
 //     token (256), at `token_at()`, `ingest_token_at()` and `read_token_at()`
 
 pub fn size() -> [] int {
-    return 22;
+    return 23;
 }
 
 pub fn blob_size() -> [] int {
@@ -188,6 +189,11 @@ pub fn repair_logs[&c](cfg: &c [int]) -> [] bool {
     return cfg[18] == 1;
 }
 
+// How long a previous secret stays valid after a rotation that asks for the default (`docs/design.md` section 35), in ms.
+pub fn rotation_grace_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[22];
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -200,6 +206,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[14] = 5;
     cfg[15] = 1;
     cfg[17] = 5000;
+    cfg[22] = 86400000;
     return 0;
 }
 
@@ -348,6 +355,14 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[14] = n;
+        }
+    } else if bytes.equal(key, "rotation-grace-ms") {
+        // At most 30 days, and at least a millisecond: 0 would be "no overlap", which is not asking for one.
+        let n = number(value);
+        if n < 1 || n > 2592000000 {
+            why = why_value();
+        } else {
+            cfg[22] = n;
         }
     } else if bytes.equal(key, "pg-host") {
         if len(value) < 1 || len(value) > 253 {

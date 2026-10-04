@@ -170,13 +170,34 @@ pub fn endpoints_all_secret[&m](m: &m [byte], row: int) -> [] (int, int) {
     return pg.value(m, row, 3);
 }
 
+pub fn endpoints_all_types[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 4);
+}
+
+pub fn endpoints_all_headers[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 5);
+}
+
+pub fn endpoints_all_secret_old[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 6);
+}
+
+pub fn endpoints_all_secret_old_until[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
+    return pg.int_text(m, from, to);
+}
+
 // add_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
-pub fn add_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap] buffer.Buffer {
+pub fn add_endpoint_start[&h, &a2, &a4, &a5, &a6, &a7](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], types: &a5 [byte], headers: &a6 [byte], secret_old: &a7 [byte], secret_old_until: int) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
     ps = pg.param(heap, ps, secret);
+    ps = pg.param(heap, ps, types);
+    ps = pg.param(heap, ps, headers);
+    ps = pg.param(heap, ps, secret_old);
+    ps = pg.param_int(heap, ps, secret_old_until);
     var request = buffer.empty(heap, 1);
     borrow ps as &pr in {
         buffer.drop(heap, request);
@@ -187,12 +208,16 @@ pub fn add_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [byte
 }
 
 // add_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
-pub fn add_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+pub fn add_endpoint[&h, &c, &a2, &a4, &a5, &a6, &a7](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], types: &a5 [byte], headers: &a6 [byte], secret_old: &a7 [byte], secret_old_until: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
     ps = pg.param(heap, ps, secret);
+    ps = pg.param(heap, ps, types);
+    ps = pg.param(heap, ps, headers);
+    ps = pg.param(heap, ps, secret_old);
+    ps = pg.param_int(heap, ps, secret_old_until);
     var reply = buffer.empty(heap, 1);
     var status = 0;
     borrow ps as &pr in {
@@ -206,11 +231,13 @@ pub fn add_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, h
 }
 
 // create_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
-pub fn create_endpoint_start[&h, &a1, &a3](heap: &!h Heap, host: &a1 [byte], port: int, secret: &a3 [byte]) -> [heap] buffer.Buffer {
+pub fn create_endpoint_start[&h, &a1, &a3, &a4, &a5](heap: &!h Heap, host: &a1 [byte], port: int, secret: &a3 [byte], types: &a4 [byte], headers: &a5 [byte]) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
     ps = pg.param(heap, ps, secret);
+    ps = pg.param(heap, ps, types);
+    ps = pg.param(heap, ps, headers);
     var request = buffer.empty(heap, 1);
     borrow ps as &pr in {
         buffer.drop(heap, request);
@@ -221,11 +248,13 @@ pub fn create_endpoint_start[&h, &a1, &a3](heap: &!h Heap, host: &a1 [byte], por
 }
 
 // create_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
-pub fn create_endpoint[&h, &c, &a1, &a3](heap: &!h Heap, conn: &!c Conn, host: &a1 [byte], port: int, secret: &a3 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+pub fn create_endpoint[&h, &c, &a1, &a3, &a4, &a5](heap: &!h Heap, conn: &!c Conn, host: &a1 [byte], port: int, secret: &a3 [byte], types: &a4 [byte], headers: &a5 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var ps = pg.params(heap);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
     ps = pg.param(heap, ps, secret);
+    ps = pg.param(heap, ps, types);
+    ps = pg.param(heap, ps, headers);
     var reply = buffer.empty(heap, 1);
     var status = 0;
     borrow ps as &pr in {
@@ -244,12 +273,31 @@ pub fn create_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
 }
 
 // patch_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
-pub fn patch_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap] buffer.Buffer {
+pub fn patch_endpoint_start[&h, &a2, &a4, &a5, &a6](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_until: int, keep_until_given: bool) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
-    ps = pg.param(heap, ps, secret);
+    if secret_given {
+        ps = pg.param(heap, ps, secret);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if types_given {
+        ps = pg.param(heap, ps, types);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if headers_given {
+        ps = pg.param(heap, ps, headers);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if keep_until_given {
+        ps = pg.param_int(heap, ps, keep_until);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
     var request = buffer.empty(heap, 1);
     borrow ps as &pr in {
         buffer.drop(heap, request);
@@ -260,12 +308,31 @@ pub fn patch_endpoint_start[&h, &a2, &a4](heap: &!h Heap, id: int, host: &a2 [by
 }
 
 // patch_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
-pub fn patch_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+pub fn patch_endpoint[&h, &c, &a2, &a4, &a5, &a6](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_until: int, keep_until_given: bool) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
     ps = pg.param_int(heap, ps, port);
-    ps = pg.param(heap, ps, secret);
+    if secret_given {
+        ps = pg.param(heap, ps, secret);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if types_given {
+        ps = pg.param(heap, ps, types);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if headers_given {
+        ps = pg.param(heap, ps, headers);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if keep_until_given {
+        ps = pg.param_int(heap, ps, keep_until);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
     var reply = buffer.empty(heap, 1);
     var status = 0;
     borrow ps as &pr in {
@@ -816,16 +883,16 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
     reply = r1;
     status = s1;
-    let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret from endpoints order by id");
+    let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until from endpoints order by id");
     reply = r2;
     status = s2;
-    let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing");
+    let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until) values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing");
     reply = r3;
     status = s3;
-    let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id");
+    let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text returning id");
     reply = r4;
     status = s4;
-    let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret = $4::text where id = $1::int returning id");
+    let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers) where id = $1::int returning id");
     reply = r5;
     status = s5;
     let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
