@@ -64,6 +64,16 @@ name = "config"
 sources = ["tests/config_test.ls", "src/config.ls"]
 std = true
 
+[[test]]
+name = "reason"
+sources = ["tests/reason_test.ls", "src/reason.ls"]
+std = true
+
+[[test]]
+name = "ops"
+sources = ["tests/ops_test.ls", "src/ops.ls", "src/metrics.ls", "src/reason.ls"]
+std = true
+
 [dependencies.pg]
 git = "https://github.com/alpibrusl/lexsys-pg"
 rev = "61357a422c92471882541c15ae8a53cd57aabd83"

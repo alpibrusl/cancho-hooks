@@ -6,8 +6,10 @@
 
 -- One row per delivery attempt that ended. `replay` is 1 for an attempt made for a replay. `outcome` is 1 delivered,
 -- 2 failed (it will be tried again), 3 dead (it will not). `status` is the receiver's HTTP status, or a negative reason
--- (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). `at_ms` is when it ended (Unix ms).
--- The key is the attempt's own identity, so a repeat is harmless.
+-- (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). `reason` says why an attempt failed, finer than that: the numbers of
+-- `src/reason.ls` (0 none, 1 connect refused, 2 connect timeout, 3 other connect error, 4 send timeout, 5 send error, 6 no response before the
+-- deadline, 7 reset, 8 closed early, 9 bad response, 10 to 12 status 3xx 4xx 5xx, 13 gone, 14 other status, 15 busy, 16 too large).
+-- `at_ms` is when it ended (Unix ms). The key is the attempt's own identity, so a repeat is harmless.
 create table if not exists attempts (
     endpoint bigint not null,
     event bigint not null,
@@ -25,6 +27,10 @@ create index if not exists attempts_event on attempts (event);
 
 -- A table made before endpoint ids could be above 32767 has the column as a smallint: widen it (a no-op on a new one).
 alter table attempts alter column endpoint type bigint;
+
+-- A table made before the reason of a failure was recorded (docs/design.md section 34.3) has no such column: add it. The rows already there
+-- get 0 ("none"), which for a failed attempt means "not recorded". Run this file BEFORE starting a binary that has the column in its queries.
+alter table attempts add column if not exists reason smallint not null default 0;
 
 -- The endpoints the service delivers to, when it is given a database (docs/design.md section 24, C3c). `id` is the endpoint's
 -- identity (what the API and the history call it), so it is written, never counted, and never reused: at most six digits; `secret` is the Standard

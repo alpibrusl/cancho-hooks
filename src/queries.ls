@@ -12,7 +12,7 @@ import std.buffer;
 import pg;
 
 // add_attempt_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
-pub fn add_attempt_start[&h](heap: &!h Heap, endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int) -> [heap] buffer.Buffer {
+pub fn add_attempt_start[&h](heap: &!h Heap, endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int, reason: int) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, endpoint);
     ps = pg.param_int(heap, ps, event);
@@ -22,6 +22,7 @@ pub fn add_attempt_start[&h](heap: &!h Heap, endpoint: int, event: int, replay: 
     ps = pg.param_int(heap, ps, status);
     ps = pg.param_int(heap, ps, at_ms);
     ps = pg.param_int(heap, ps, latency_ms);
+    ps = pg.param_int(heap, ps, reason);
     var request = buffer.empty(heap, 1);
     borrow ps as &pr in {
         buffer.drop(heap, request);
@@ -32,7 +33,7 @@ pub fn add_attempt_start[&h](heap: &!h Heap, endpoint: int, event: int, replay: 
 }
 
 // add_attempt: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
-pub fn add_attempt[&h, &c](heap: &!h Heap, conn: &!c Conn, endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+pub fn add_attempt[&h, &c](heap: &!h Heap, conn: &!c Conn, endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int, reason: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, endpoint);
     ps = pg.param_int(heap, ps, event);
@@ -42,6 +43,7 @@ pub fn add_attempt[&h, &c](heap: &!h Heap, conn: &!c Conn, endpoint: int, event:
     ps = pg.param_int(heap, ps, status);
     ps = pg.param_int(heap, ps, at_ms);
     ps = pg.param_int(heap, ps, latency_ms);
+    ps = pg.param_int(heap, ps, reason);
     var reply = buffer.empty(heap, 1);
     var status = 0;
     borrow ps as &pr in {
@@ -115,6 +117,11 @@ pub fn attempts_of_at_ms[&m](m: &m [byte], row: int) -> [] int {
 
 pub fn attempts_of_latency_ms[&m](m: &m [byte], row: int) -> [] int {
     let (from, to) = pg.value(m, row, 6);
+    return pg.int_text(m, from, to);
+}
+
+pub fn attempts_of_reason[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
     return pg.int_text(m, from, to);
 }
 
@@ -803,10 +810,10 @@ pub fn delete_schedule_id[&m](m: &m [byte], row: int) -> [] int {
 pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var reply = buffer.empty(heap, 1);
     var status = 0;
-    let (r0, s0) = pg.prepare_after(heap, conn, reply, status, "add_attempt", "insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms) values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing");
+    let (r0, s0) = pg.prepare_after(heap, conn, reply, status, "add_attempt", "insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing");
     reply = r0;
     status = s0;
-    let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms from attempts where event = $1 order by endpoint, replay, attempt limit 200");
+    let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
     reply = r1;
     status = s1;
     let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret from endpoints order by id");

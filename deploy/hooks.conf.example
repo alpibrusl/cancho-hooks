@@ -31,3 +31,13 @@ dir = /var/lib/hooks
 # --- Where deliveries may go. 0 (the default): an endpoint's host must be a public IPv4 literal. Set 1 only for a receiver on a
 # --- private network, knowing that then anyone with the admin token can aim the service at that network.
 #allow-private-hosts = 0
+
+# --- Stopping. On SIGTERM or SIGINT the service stops taking requests and starting attempts and lets the attempts on the wire finish, for at
+# --- most this many ms (0 to 3,600,000), then flushes and exits 0. Keep systemd's TimeoutStopSec (deploy/hooks.service) above it.
+#stop-deadline-ms = 5000
+
+# --- A log with damage in the middle (not a torn tail) stops the start with status 19, saying where and how much. 1 cuts it at the first bad
+# --- byte instead, after copying the cut bytes to <log>.cut-<offset>. Give it once on the command line (`--repair-logs 1`), after reading the
+# --- refusal, and not here: here it would cut without being asked on every start. (A delivery.seg ahead of its events.seg, status 18, is never
+# --- repaired: restore a matching pair.)
+#repair-logs = 0

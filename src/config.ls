@@ -22,6 +22,8 @@ import std.bytes;
 //     breaker-days  pause an endpoint whose every attempt has failed for this many days; 0 turns it off   default 5 (section 31)
 //     cron-catchup `1`: a schedule whose fires were missed while the service was stopped fires once for them; `0`: it skips them   default 1 (section 32)
 //     cron-seconds `1`: a schedule's expression has a leading seconds field (six fields; a test mode)   default 0 (section 32)
+//     stop-deadline-ms  how long attempts on the wire may take to finish after SIGTERM or SIGINT   default 5000 (section 34.4)
+//     repair-logs  `1`: cut a log that has damage in the middle at the damage instead of refusing to start; the cut is reported   default 0 (section 34.5)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -32,13 +34,13 @@ import std.bytes;
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
 //     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
-//     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)
+//     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)   cfg[17] stop-deadline-ms (5000 until set)   cfg[18] repair-logs (0 or 1)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it
 
 pub fn size() -> [] int {
-    return 17;
+    return 19;
 }
 
 pub fn blob_size() -> [] int {
@@ -150,6 +152,16 @@ pub fn cron_seconds[&c](cfg: &c [int]) -> [] int {
     return cfg[16];
 }
 
+// How long the attempts on the wire may take to finish after the service is asked to stop, in ms (`docs/design.md` section 34.4).
+pub fn stop_deadline_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[17];
+}
+
+// 1: a log with damage in the middle is cut at the damage, and the cut reported, instead of the start being refused (section 34.5).
+pub fn repair_logs[&c](cfg: &c [int]) -> [] bool {
+    return cfg[18] == 1;
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -161,6 +173,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[6] = 5432;
     cfg[14] = 5;
     cfg[15] = 1;
+    cfg[17] = 5000;
     return 0;
 }
 
@@ -302,6 +315,22 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[16] = 1;
         } else if bytes.equal(value, "0") {
             cfg[16] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "stop-deadline-ms") {
+        // At most an hour: the deadline is added to a monotonic reading in ms.
+        let n = number(value);
+        if n < 0 || n > 3600000 {
+            why = why_value();
+        } else {
+            cfg[17] = n;
+        }
+    } else if bytes.equal(key, "repair-logs") {
+        if bytes.equal(value, "1") {
+            cfg[18] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[18] = 0;
         } else {
             why = why_value();
         }
