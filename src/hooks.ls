@@ -58,6 +58,7 @@ import epx;
 import filter;
 import wire;
 import hdrs;
+import dbup;
 
 fn max_len() -> [] int {
     return 65536;
@@ -355,9 +356,9 @@ fn refuse_event[&h, &m, &s](heap: &!h Heap, out: buffer.Buffer, stats: &!s [int]
 }
 
 // Why the service is not ready (`ops.not_ready`), 0 if it is: the logs are not broken, the data directory took the last probe, a database that was named
-// has a live connection, and the service has not been asked to stop.
+// has a live connection and its endpoints have been read from it (section 37), and the service has not been asked to stop.
 fn readiness[&d, &l, &g](dv: &d [int], lg: &l evlog.Ev, done: &g log.Log) -> [] int {
-    return ops.not_ready(ops_of(dv), evlog.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.live(dv[off_hq()..off_hq() + history.size()]));
+    return ops.not_ready(ops_of(dv), evlog.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.serving(dv[off_hq()..off_hq() + history.size()]));
 }
 
 // `GET /readyz`: 200 `{"ready":true}`, or 503 `{"ready":false,"check":...,"reason":...}`. It reads three flags and the last probe; it waits for nothing.
@@ -432,6 +433,13 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
     g[metrics.g_history_written()] = history.written(hq);
     g[metrics.g_history_failed()] = history.failed(hq);
     g[metrics.g_history_dropped()] = history.dropped(hq);
+    g[metrics.g_db_connecting()] = history.connecting(hq);
+    g[metrics.g_db_reconnects()] = history.reconnects(hq);
+    g[metrics.g_db_failures()] = history.failures(hq);
+    g[metrics.g_db_losses()] = history.losses(hq);
+    if history.endpoints_known(hq) {
+        g[metrics.g_endpoints_loaded()] = 1;
+    }
     g[metrics.g_cron_fired()] = sched.fired(sg);
     g[metrics.g_cron_errors()] = sched.errors(sg);
     g[metrics.g_cron_skipped()] = sched.skipped(sg);
@@ -528,6 +536,11 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     if ops.stopping(ops_of(stats)) && !bytes.equal(http.method(request, table), "GET") {
         // Asked to stop (`docs/design.md` section 34.4): nothing new is taken, and the connection is closed after the answer.
         return server.failure(heap, out, 503, ops.stopping_message(), false);
+    }
+    if (id >= 6 && id <= 9 || id >= 11 && id <= 14) && !history.endpoints_known(stats[off_hq()..off_hq() + history.size()]) {
+        // The endpoints are read from the table once the database is there (section 37.2); until then the service does not know who they are, and neither
+        // lists, changes, replays nor enables them (an event is still taken: it waits in the log for them).
+        return server.failure(heap, out, 503, "the endpoints are not loaded yet: the database has not answered since the service started", keep);
     }
     if id == 40 {
         // GET /readyz (section 34.1): open, like /healthz (`authz.scope_of`).
@@ -657,6 +670,16 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.failed(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_dropped");
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "endpoints_loaded");
+        w = json.put_bool(heap, w, history.endpoints_known(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "database_reconnects");
+        w = json.put_int(heap, w, history.reconnects(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "database_failures");
+        w = json.put_int(heap, w, history.failures(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "database_losses");
+        w = json.put_int(heap, w, history.losses(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "history_queue");
+        w = json.put_int(heap, w, history.pending(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "cron_fired");
         w = json.put_int(heap, w, sched.fired(sg));
         w = json.put_key(heap, w, "cron_errors");
@@ -743,6 +766,16 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, stats[rt_at() + r_delivery_limit()]);
         w = json.put_key(heap, w, "idem-keys");
         w = json.put_int(heap, w, idem.capacity(ix));
+        w = json.put_key(heap, w, "pg-backoff-min-ms");
+        w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 0));
+        w = json.put_key(heap, w, "pg-backoff-max-ms");
+        w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 1));
+        w = json.put_key(heap, w, "pg-attempt-ms");
+        w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 2));
+        w = json.put_key(heap, w, "pg-request-ms");
+        w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 3));
+        w = json.put_key(heap, w, "pg-start-wait-ms");
+        w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 4));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -2483,11 +2516,32 @@ fn signal_token() -> [] int {
     return attempt.slots() + 16;
 }
 
+// Why the service ends because the endpoints could not be read from the database after the start (section 37.2), on stderr: `status` is 20 and `detail` a reason
+// of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log.
+fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int {
+    if status == 13 {
+        say(out, "hooks: the endpoints table: row ");
+        ops.say_number(out, detail);
+        say(out, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
+        return 0;
+    }
+    if status == 20 {
+        say(out, "hooks: the database's endpoints cannot be read: ");
+        say(out, dbup.message(detail));
+        say(out, "\n");
+        return 0;
+    }
+    say(out, "hooks: the delivery log does not agree with the endpoints of the table (status ");
+    ops.say_number(out, status);
+    say(out, ")\n");
+    return 0;
+}
+
 // Serve until killed. Each turn: `wait`, then every request that is ready. An accepted event is appended and its request
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
+fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
     // The outcomes log is owned here, by value: a snapshot replaces it (`compact.ls`), and a resource can only be replaced by its owner.
     var done = done0;
     match poller_new() {
@@ -2537,8 +2591,24 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, r
             }
             ops.begin(ops_of_mut(dv), clock_unix_ms(clock), evlog.synced(lg), done_synced);
             var running = true;
+            // What `run` answers (0, or the status the service ends with when the endpoints cannot be read from the database: section 37.2), when the
+            // service began to wait for the database, and how many of its connections were live when last looked at (a change is said on stderr).
+            var code = 0;
+            let began_ms = clock_ms(clock);
+            var seen_live = 0;
             while running {
-                srv = server.wait(heap, srv, clock, listener, 50);
+                // The longest the wait may be: 50 ms, or less when the pool has something to do sooner (a backoff that ends, a login with a key to
+                // derive, an attempt or a request that runs out of time). The poller wakes the loop for the rest of what the pool waits for.
+                var nap = 50;
+                if history.enabled(dv[off_hq()..off_hq() + history.size()]) {
+                    borrow pl as &qr in {
+                        let due = pool.next_wake(qr, clock_ms(clock));
+                        if due >= 0 && due < nap {
+                            nap = due;
+                        }
+                    }
+                }
+                srv = server.wait(heap, srv, clock, listener, nap);
                 if !ops.stopping(ops_of(dv)) {
                     let (kept, caught) = ops.look(held);
                     held = kept;
@@ -2854,10 +2924,44 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, r
                                     j = j + 1;
                                 }
                             }
+                        }
+                        // The pool keeps itself full (section 37.1): the logins move on, what ran out of time is given up, and a connection that is due is dialed
+                        // (without waiting) and handed over. It takes the pool by value, so it is between the borrows.
+                        pl = pool.revive(heap, pl, net, dbhost, dbport, server.poller(sw), clock_ms(clock));
+                        borrow mut pl as &!qw in {
                             // every request the pool has an answer for: an insert is counted, a request for the API is answered
                             var tag = pool.next_done(qw);
                             while tag >= 0 {
-                                if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
+                                if tag == dbup.load_tag() {
+                                    // the answer to the read of the endpoints table (section 37.2)
+                                    if pool.status(qw) == 8 {
+                                        // the answer does not fit the pool's input slab (128 KiB): a table far over the 32 KiB of text the service reads
+                                        say_unreadable(io, 20, 6);
+                                        code = 20;
+                                        running = false;
+                                    } else if pool.status(qw) != 0 {
+                                        // the connection went with the request on it: it is asked again when one is live
+                                        history.set_load_state(dv[off_hq()..off_hq() + history.size()], 0);
+                                    } else {
+                                        var loaded = 0;
+                                        var detail = 0;
+                                        borrow mut done as &!dgw in {
+                                            let (st, dt) = load_late(heap, lg, dgw, window, dv, blob, pool.reply(qw));
+                                            loaded = st;
+                                            detail = dt;
+                                        }
+                                        if loaded == 0 {
+                                            history.set_load_state(dv[off_hq()..off_hq() + history.size()], 1);
+                                            say(io, "hooks: endpoints loaded: ");
+                                            ops.say_number(io, detail);
+                                            say(io, "\n");
+                                        } else {
+                                            say_unreadable(io, loaded, detail);
+                                            code = loaded;
+                                            running = false;
+                                        }
+                                    }
+                                } else if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
                                     // the database has answered the insert of a new endpoint
                                     var created = buffer.empty(heap, 0);
                                     borrow mut done as &!dgw in {
@@ -2878,7 +2982,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, r
                                     // the database has answered a request about schedules: the held connection gets the answer
                                     let slots = sched.find_slot(sg, tag);
                                     if slots >= 0 {
-                                        let reply = sched.answer(heap, sched.slot_kind(sg, slots), sched.slot_target(sg, slots), pool.reply(qw), pool.status(qw), sched.slot_keep(sg, slots), clock_unix_ms(clock) / 1000, sg[sched.seconds_at()] == 1);
+                                        let reply = schedule_answer(heap, sched.slot_kind(sg, slots), sched.slot_target(sg, slots), pool.reply(qw), pool.status(qw), sched.slot_keep(sg, slots), clock_unix_ms(clock) / 1000, sg[sched.seconds_at()] == 1);
                                         borrow reply as &rb in {
                                             server.answer(sw, sched.slot_ticket(sg, slots), buffer.bytes(rb));
                                         }
@@ -2964,8 +3068,39 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, r
                                 sched.slot_free(sg, stale);
                                 stale = sched.overdue(sg, now_ms, stale);
                             }
-                            // the schedules (`docs/design.md` section 32): ask the database what is due, if it is time
-                            if !ops.stopping(ops_of(dv)) {
+                            if pool.live(qw) != seen_live {
+                                seen_live = pool.live(qw);
+                                say(io, "hooks: the database: ");
+                                ops.say_number(io, seen_live);
+                                say(io, " of 2 connections live\n");
+                            }
+                            // The endpoints are read from the table once, as soon as a connection is live (section 37.2); until they have been, nothing is
+                            // delivered, and the service ends with status 20 if the database cannot give them (`dbup.verdict`).
+                            if history.load_state(dv[off_hq()..off_hq() + history.size()]) == 0 && pool.live(qw) > 0 {
+                                let ask = queries.endpoints_all_start(heap);
+                                var asked_it = 0 - 1;
+                                borrow ask as &ab in {
+                                    asked_it = pool.submit(qw, dbup.load_tag(), buffer.bytes(ab));
+                                }
+                                buffer.drop(heap, ask);
+                                if asked_it == 0 {
+                                    history.set_load_state(dv[off_hq()..off_hq() + history.size()], 2);
+                                }
+                            }
+                            if history.load_state(dv[off_hq()..off_hq() + history.size()]) != 1 && running {
+                                region ra {
+                                    let state5 = alloc_slice[ra](5, byte_of(0));
+                                    let known = pool.sqlstate(qw, state5);
+                                    let why = dbup.verdict(pool.last_failure(qw), state5[0..known], now_ms - began_ms, history.start_wait_ms(dv[off_hq()..off_hq() + history.size()]));
+                                    if why != 0 {
+                                        say_unreadable(io, 20, why);
+                                        code = 20;
+                                        running = false;
+                                    }
+                                }
+                            }
+                            // the schedules (`docs/design.md` section 32): ask the database what is due, if it is time (and a connection is live to ask it on)
+                            if !ops.stopping(ops_of(dv)) && pool.live(qw) > 0 {
                                 tick_start(heap, qw, sg, clock_unix_ms(clock), now_ms);
                             }
                             history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
@@ -3040,7 +3175,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, r
             unbox_slice(heap, ids);
             unbox_slice(heap, keeps);
             log.close(done);
-            return 0;
+            return code;
         }
         Polling::Failed(e) => {
             ops.release_claim(ops.Held::Live(claim));
@@ -3143,6 +3278,13 @@ fn prepare[&h, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, dir: &d [
     // The slot map and the sequence number are read whether or not there are endpoints now: an endpoint can be created later (`POST
     // /endpoints`), and it needs to know which slots the log has given and where its records go.
     scan_slots(done, window, dv);
+    return settle_endpoints(lg, done, window, dv, n);
+}
+
+// What the table of `n` endpoints means for the state: each takes the slot the log gave it, the outcomes of earlier runs are replayed, the ones the log
+// did not know are placed, and each endpoint's place in the events log is found. At the start for an endpoints file, and for the table when the database was
+// there; later, once, for a table that was read after the start (`load_late`, `docs/design.md` section 37.2). Answers 0, or the status for the service to end with.
+fn settle_endpoints[&g, &l, &w, &d](lg: &!g evlog.Ev, done: &!l log.Log, window: &!w [byte], dv: &!d [int], n: int) -> [file_read, file_write, fs_read("")] int {
     if n > 0 {
         match_slots(dv);
         if replay(done, window, dv) > 0 {
@@ -3159,6 +3301,35 @@ fn prepare[&h, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, dir: &d [
         seek_slots(lg, window, dv);
     }
     return 0;
+}
+
+// The first read of the endpoints table, when the database came up after the start (`docs/design.md` section 37.2): `rep` is the reply to `endpoints_all`. The
+// text is judged by the rule that judges a line of `endpoints.conf` (`endpoints.parse_x`), and what follows is `prepare`'s own (`settle_endpoints`); until it
+// has happened nothing was delivered, so the state is the one a start with no endpoints left. Answers the status the service ends with and a detail: 0 and
+// the number of endpoints; 13 and the number of the bad row; 15 or 17 (the log); 20 and a reason of `dbup`.
+fn load_late[&h, &g, &l, &w, &d, &b, &m](heap: &!h Heap, lg: &!g evlog.Ev, done: &!l log.Log, window: &!w [byte], dv: &!d [int], blob: &!b [byte], rep: &m [byte]) -> [heap, file_read, file_write, fs_read("")] (int, int) {
+    let text = box_slice(heap, endpoints.text_limit(), byte_of(0));
+    var status = 0;
+    var detail = 0;
+    borrow mut text as &!tw in {
+        let got = roster.text_of(rep, contents(tw));
+        if got < 0 {
+            status = 20;
+            detail = dbup.reason_of_text(got);
+        } else {
+            let n = endpoints.parse_x(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob, dv[c_private()] == 1, dv[off_xt()..off_xt() + epx.xt_size()]);
+            if n < 0 {
+                status = 13;
+                detail = 0 - n;
+            } else {
+                dv[c_endpoints()] = n;
+                status = settle_endpoints(lg, done, window, dv, n);
+                detail = n;
+            }
+        }
+    }
+    unbox_slice(heap, text);
+    return (status, detail);
 }
 
 // The settings file named by `--config`, read into `cfg` and `blob` (`src/config.ls`). Answers 0, -1 if it cannot be read, -2 if
@@ -3340,7 +3511,26 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
     return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
 }
 
+// The answer to a change that was sent to the database on a connection that was then lost (`pool.lost`): the outcome is **unknown**, which is not the same as
+// "the database is not there" (a `503`, nothing was sent) or "the database refused" (a `503`, nothing was changed). The row may have been stored. Nothing in memory
+// was changed; the next start (or a restart) reads the table, and a client that wants to know before then asks for the endpoint or the schedule (section 37.4).
+fn lost_answer[&h](heap: &!h Heap, keep: bool) -> [heap] buffer.Buffer {
+    return server.failure(heap, buffer.empty(heap, 256), 504, "the connection to the database was lost while the change was being stored; the change may have been stored", keep);
+}
+
+// The answer to a request about schedules (`sched.answer`), except that a change (create, patch, delete) whose connection was lost has an unknown outcome.
+fn schedule_answer[&h, &m](heap: &!h Heap, kind: int, target: int, rep: &m [byte], status: int, keep: bool, now: int, seconds: bool) -> [heap] buffer.Buffer {
+    if pool.lost(status) && sched.writes(kind) {
+        return lost_answer(heap, keep);
+    }
+    return sched.answer(heap, kind, target, rep, status, keep, now, seconds);
+}
+
 fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+    if pool.lost(status) {
+        // The connection went with the change on it (section 37.4): nothing in memory changes, and the row may or may not be in the table.
+        return lost_answer(heap, keep);
+    }
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return finish_delete(heap, dv, blob, done, rep, status, keep);
     }
@@ -3803,6 +3993,12 @@ fn main(world: World) -> [] int {
             }
             bad = code;
         }
+        if bad == 0 && config.pg_status(cfg) != 0 {
+            borrow mut io as &!i in {
+                say(i, "hooks: pg-backoff-max-ms is below pg-backoff-min-ms (the wait after a failed connection starts at the one and doubles up to the other)\n");
+            }
+            bad = 1;
+        }
         if bad == 0 {
             port = config.port_of(cfg);
             if port < 1 && !config.import_endpoints(cfg) || config.dir_len(cfg) == 0 {
@@ -3915,49 +4111,9 @@ fn main(world: World) -> [] int {
             }
         }
         if go && config.pg_host_len(cfg) > 0 {
-            var got = 0 - 1;
-            borrow mut heap as &!h0 in {
-                borrow net as &nn0 in {
-                    borrow fs as &fs0 in {
-                        got = roster.fetch(h0, nn0, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], fs0, etext);
-                    }
-                }
-            }
-            if got < 0 {
-                go = false;
-                status = 20;
-                borrow mut io as &!i in {
-                    say(i, "hooks: the database's endpoints cannot be read: ");
-                    if got == 0 - 1 {
-                        say(i, "cannot connect\n");
-                    } else if got == 0 - 2 {
-                        say(i, "cannot log in\n");
-                    } else if got == 0 - 3 {
-                        say(i, "the query failed (are the tables there? apply sql/schema.sql: endpoints, attempts and schedules)\n");
-                    } else if got == 0 - 4 {
-                        say(i, "a row has an empty field or a byte that is not printable\n");
-                    } else {
-                        say(i, "the table is too large (the service reads at most 32 KiB of it)\n");
-                    }
-                }
-            } else {
-                etext_n = got;
-                from_db = true;
-                var count = 0;
-                borrow mut heap as &!h0 in {
-                    count = parse_check(h0, etext[0..etext_n], config.allow_private_hosts(cfg));
-                }
-                if count < 0 {
-                    go = false;
-                    status = 13;
-                    borrow mut io as &!i in {
-                        let nb = alloc_slice[a](12, byte_of(0));
-                        say(i, "hooks: the endpoints table: row ");
-                        say(i, nb[0..digits_of(0 - count, nb)]);
-                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
-                    }
-                }
-            }
+            // The endpoints are the table's (section 24.1), and the table is read when the database is there, **after** the start (section 37.2): the service
+            // listens and takes events meanwhile, delivers nothing, and ends with status 20 if the database cannot give them. The file is not a fallback.
+            from_db = true;
         }
         // `endpoints.conf` is judged here as well, so that a refusal says which line (`prepare` reads it again and answers only 13).
         if go && !from_db && dir_len > 0 {
@@ -4089,6 +4245,10 @@ fn main(world: World) -> [] int {
                                                     if status != 0 {
                                                         log.close(dl);
                                                     } else if config.compact_now(cfg) {
+                                                        if config.pg_host_len(cfg) > 0 {
+                                                            // The endpoints of a database are not read in this mode (`compact_once` refuses).
+                                                            history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
+                                                        }
                                                         rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
                                                         borrow mut io as &!iw0 in {
                                                             status = compact_once(h, lw, dl, contents(dvw), contents(ixw), contents(arw), buffer.room(wb), now0, iw0);
@@ -4115,22 +4275,17 @@ fn main(world: World) -> [] int {
                                                                             contents(dvw)[c_production()] = 1;
                                                                         }
                                                                         contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
-                                                                        // The database for the history, if one was named: connect and log in here, before the loop, and go on
-                                                                        // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
+                                                                        // The database, if one was named (section 37): the pool is told how to log in and how to come back, and the loop makes its
+                                                                        // connections in the background, without waiting; nothing is dialed here. The history, the endpoints, the schedules and the management
+                                                                        // routes all use it (`history.ls`, `dbup.ls`).
                                                                         var hpool = pool.empty(h, 1, 1, 4096, 4096);
+                                                                        history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
                                                                         if config.pg_host_len(cfg) > 0 {
-                                                                            let (opened, lanes) = history.open(h, nn, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], 2, evlog.lend(lw));
                                                                             pool.close(h, hpool);
-                                                                            hpool = opened;
-                                                                            history.enable(contents(dvw)[off_hq()..off_hq() + history.size()], lanes);
-                                                                            if lanes < 2 {
-                                                                                borrow mut io as &!i in {
-                                                                                    let nb = alloc_slice[a](12, byte_of(0));
-                                                                                    say(i, "hooks: the database: ");
-                                                                                    say(i, nb[0..digits_of(lanes, nb)]);
-                                                                                    say(i, " of 2 connections opened; history is written over those\n");
-                                                                                }
-                                                                            }
+                                                                            let fresh = pool.empty(h, 2, 64, 131072, 131072);
+                                                                            let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
+                                                                            hpool = made;
+                                                                            history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
                                                                         }
                                                                         borrow mut io as &!i in {
                                                                             io.error_all(i, "listening\n");
@@ -4148,7 +4303,7 @@ fn main(world: World) -> [] int {
                                                                                         borrow stop as &sr in {
                                                                                             match signals_watch(sr) {
                                                                                                 Watching::Ok(claim) => {
-                                                                                                    status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg));
+                                                                                                    status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg));
                                                                                                 }
                                                                                                 Watching::Failed(e) => {
                                                                                                     say(iw, "hooks: SIGINT and SIGTERM cannot be claimed (errno ");

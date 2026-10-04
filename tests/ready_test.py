@@ -6,8 +6,8 @@
   1. ready: 200 {"ready":true}, no credential; /healthz is unchanged; POST /readyz is a 405
   2. the database. A proxy sits between the service and PostgreSQL. Cut it (the database goes away: every connection is closed and new ones are
      refused): /readyz is 503 with check "database" and a reason, /metrics says ready 0 and no connection, /healthz is still 200, and delivery is
-     unaffected (an event posted now is stored and delivered). The proxy comes back: the service does NOT reopen a lost connection (docs/runbook.md: the history pool is never
-     reopened; it needs a blocking login, which would stop the loop), so it stays 503 until it is restarted, and after a restart it is 200 again.
+     unaffected (an event posted now is stored and delivered). The proxy comes back: the service reconnects by itself (docs/design.md section 37), so /readyz is 200
+     again with no restart, the history rows that waited are written, and /metrics says it reconnected.
   3. the log directory (a 256 KiB tmpfs, when this host lets the test mount one):
        a. the disk fills: the next event is refused with a 503 and the events log is broken (a failed write is never retried); /readyz is 503 with check "events_log"; /healthz stays
           200 (this is the case the plan names: "it answers 200 with the disk full"); a restart after space is freed finds every acknowledged event and is ready again
@@ -68,23 +68,26 @@ def stage2():
     ok = L.wait_for(lambda: readyz(svc)[0] == 503, 15)
     st, body = readyz(svc)
     check("2. the database goes away: /readyz becomes 503, check \"database\", with a reason", ok and body.get("check") == "database" and body.get("ready") is False and
-          "no connection to it is live" in body.get("reason", ""), str((st, body)))
+          "no live connection to it" in body.get("reason", ""), str((st, body)))
     m = svc.metrics()
     check("2. ... /metrics: ready 0, no history connection", m.value("hooks_ready") == 0 and m.value("hooks_history_connections") == 0)
     check("2. ... /healthz is still 200", svc.get("/healthz")[0] == 200)
     status, data = svc.post_event(1)
     check("2. ... and delivery is unaffected: an event is stored and delivered", status == 202 and L.wait_for(lambda: peer.distinct() == {1}, 10), str((status, data)))
     time.sleep(0.2)
-    check("2. ... the history rows are dropped and counted, not queued for ever", svc.metrics().value("hooks_history_rows_total", result="dropped") >= 1)
+    check("2. ... the history rows wait in the queue (bounded: 256), they are not lost yet", svc.metrics().value("hooks_history_queue") >= 1)
     proxy.mode = "pass"
-    time.sleep(2.5)
-    st, body = readyz(svc)
-    print(f"INFO 2. the database is back; the running service says {st} (a lost connection is never reopened: a restart is what reconnects)", flush=True)
+    check("2. the database is back: /readyz is 200 again, with no restart", L.wait_for(lambda: readyz(svc) == (200, {"ready": True}), 15), str(readyz(svc)))
+    m = svc.metrics()
+    check("2. ... /metrics: two connections again, and it counts what happened (losses, reconnects, failed attempts)",
+          L.wait_for(lambda: svc.metrics().value("hooks_history_connections") == 2, 5) and m.value("hooks_database_connection_losses_total") >= 1
+          and m.value("hooks_database_connect_failures_total") >= 1, str(m.value("hooks_database_reconnects_total")))
+    check("2. ... and the row that waited is written", L.wait_for(lambda: svc.metrics().value("hooks_history_rows_total", result="written") >= 1 and svc.metrics().value("hooks_history_queue") == 0, 10))
     code = svc.stop()
     check("2. SIGTERM with the database gone: exit status 0", code == 0, str(code))
     svc2 = L.Service(BIN, d, args)
     svc2.start()
-    check("2. after a restart, with the database back: 200 again", L.wait_for(lambda: readyz(svc2) == (200, {"ready": True}), 10))
+    check("2. and after a restart too: 200", L.wait_for(lambda: readyz(svc2) == (200, {"ready": True}), 10))
     svc2.stop()
     shutil.rmtree(d)
     proxy.close()

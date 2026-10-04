@@ -1,8 +1,8 @@
 #!/bin/bash
 # The container's health check: `GET /readyz` (docs/design.md section 34.1): 200 when the logs are open and writable, the database (if one is named)
-# has a live connection and the service has not been asked to stop. It is the right question for a container because every way it can be 503 is one that
-# a restart fixes (a broken log is only cleared by a restart; a lost database connection is never reopened) or is a stop in progress. Whether the receivers
-# are answering is not asked: a dead receiver is not the service's fault and restarting it does not help (/metrics says it).
+# has a live connection and its endpoints are read, and the service has not been asked to stop. A broken log is only cleared by a restart. A database that is
+# away is not: the service reconnects by itself (design section 37) and this is 200 again when it has, so do not let an orchestrator restart on it; use it to
+# route traffic. Whether the receivers are answering is not asked: a dead receiver is not the service's fault and restarting it does not help (/metrics says it).
 # `GET /healthz` (the process is up and its loop turns, reading and writing nothing) is the other probe, for a supervisor that must not restart on a full disk.
 #
 # The port is `port` in the settings file (HOOKS_CONFIG, default /etc/hooks/hooks.conf); HOOKS_HEALTH_PORT overrides it, for a

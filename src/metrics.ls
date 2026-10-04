@@ -19,7 +19,7 @@ import reason;
 // ---- the cells of `g`
 
 pub fn g_size() -> [] int {
-    return 40;
+    return 44;
 }
 
 pub fn g_uptime_ms() -> [] int {
@@ -149,6 +149,28 @@ pub fn g_synced_events() -> [] int {
 
 pub fn g_synced_delivery() -> [] int {
     return 36;
+}
+
+// The pool's counters (`docs/design.md` section 37): connections being made, connections made again after a loss, attempts to connect that failed,
+// connections lost with a request on them; and whether the endpoints have been read from the table.
+pub fn g_db_connecting() -> [] int {
+    return 37;
+}
+
+pub fn g_db_reconnects() -> [] int {
+    return 38;
+}
+
+pub fn g_db_failures() -> [] int {
+    return 39;
+}
+
+pub fn g_db_losses() -> [] int {
+    return 40;
+}
+
+pub fn g_endpoints_loaded() -> [] int {
+    return 41;
 }
 
 // ---- the cells of an endpoint's row
@@ -334,10 +356,20 @@ pub fn render[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int,
     b = plain(heap, b, "hooks_history_connections", g[g_history_live()]);
     b = head(heap, b, "hooks_history_queue", "gauge", "Rows of the history waiting for the database.");
     b = plain(heap, b, "hooks_history_queue", g[g_history_queue()]);
-    b = head(heap, b, "hooks_history_rows_total", "counter", "Rows of the history by result: written, failed (the database refused or lost them), dropped (the queue was full or no connection was live).");
+    b = head(heap, b, "hooks_history_rows_total", "counter", "Rows of the history by result: written, failed (the database refused them, or the connection was lost with them on it), dropped (the queue was full).");
     b = labelled(heap, b, "hooks_history_rows_total", "result", "written", g[g_history_written()]);
     b = labelled(heap, b, "hooks_history_rows_total", "result", "failed", g[g_history_failed()]);
     b = labelled(heap, b, "hooks_history_rows_total", "result", "dropped", g[g_history_dropped()]);
+    b = head(heap, b, "hooks_database_connecting", "gauge", "Database connections being made now (dialed or logging in), of 2.");
+    b = plain(heap, b, "hooks_database_connecting", g[g_db_connecting()]);
+    b = head(heap, b, "hooks_database_reconnects_total", "counter", "Database connections made again after one that was live was lost.");
+    b = plain(heap, b, "hooks_database_reconnects_total", g[g_db_reconnects()]);
+    b = head(heap, b, "hooks_database_connect_failures_total", "counter", "Attempts to make a database connection that failed (refused, no answer, a login or a statement refused).");
+    b = plain(heap, b, "hooks_database_connect_failures_total", g[g_db_failures()]);
+    b = head(heap, b, "hooks_database_connection_losses_total", "counter", "Live database connections lost: closed by the server, broken, or given up after pg-request-ms.");
+    b = plain(heap, b, "hooks_database_connection_losses_total", g[g_db_losses()]);
+    b = head(heap, b, "hooks_endpoints_loaded", "gauge", "1 once the endpoints have been read (from the table, if a database was named; always 1 otherwise).");
+    b = plain(heap, b, "hooks_endpoints_loaded", g[g_endpoints_loaded()]);
 
     b = head(heap, b, "hooks_cron_fires_total", "counter", "Scheduled events made.");
     b = plain(heap, b, "hooks_cron_fires_total", g[g_cron_fired()]);

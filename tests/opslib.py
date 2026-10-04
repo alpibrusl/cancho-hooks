@@ -20,6 +20,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 
 PG = os.environ.get("HOOKS_PG", "127.0.0.1:5432:postgres:hooks").split(":")
 PG_HOST, PG_PORT, PG_USER, PG_DB = PG[0], PG[1], PG[2], PG[3]
@@ -97,7 +98,7 @@ class Service:
         self.lock = threading.Lock()
         self.reader = None
 
-    def start(self, timeout=15.0):
+    def start(self, timeout=15.0, loaded=True):
         env = dict(os.environ, **self.extra_env)
         if self.power_loss and os.path.exists(SHIM):
             env["LD_PRELOAD"] = SHIM
@@ -109,6 +110,9 @@ class Service:
         self.reader = threading.Thread(target=self._read, args=(self.proc,), daemon=True)
         self.reader.start()
         wait_for(lambda: "listening" in self.lines or self.proc.poll() is not None, timeout)
+        if loaded and "listening" in self.lines and any(a == "--pg-host" for a in self.args):
+            # the socket is open; the endpoints are read from the table a moment later (docs/design.md section 37)
+            wait_for(lambda: self.has_line("endpoints loaded") or self.proc.poll() is not None, timeout)
         return "listening" in self.lines
 
     def _read(self, proc):

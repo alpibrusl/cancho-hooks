@@ -534,6 +534,12 @@ fn put_schedule[&h, &m](heap: &!h Heap, w0: json.Writer, rep: &m [byte], row: in
     return json.end_object(heap, w);
 }
 
+// Does a request of this `kind` change something (create 1, patch 4, delete 5), as against read it (list 2, one 3)? A change whose connection was lost
+// has an unknown outcome (`docs/design.md` section 37.4).
+pub fn writes(kind: int) -> [] bool {
+    return kind == 1 || kind == 4 || kind == 5;
+}
+
 // The whole HTTP answer to the database's reply `rep` (`status` is the pool's: 0 if it has the reply) for a request of this `kind` and `target`.
 pub fn answer[&h, &m](heap: &!h Heap, kind: int, target: int, rep: &m [byte], status: int, keep: bool, now: int, seconds: bool) -> [heap] buffer.Buffer {
     let out = buffer.empty(heap, 512);

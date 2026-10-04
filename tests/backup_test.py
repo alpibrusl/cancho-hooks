@@ -61,6 +61,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 128
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
@@ -181,7 +182,7 @@ class Svc(chaos.Service):
             self.starts += 1
             line = self.proc.stderr.readline().decode().strip()
             threading.Thread(target=self.proc.wait, daemon=True).start()   # reap: `kill -0` must see a stopped process as gone
-            if line != "listening":
+            if line != "listening" or pgwait.after_listening(self.proc, [], self.args):
                 raise RuntimeError("the service did not start: " + line)
 
     def kill(self):

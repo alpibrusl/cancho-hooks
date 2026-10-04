@@ -19,16 +19,37 @@ def cpu(pid):
     f=open(f"/proc/{pid}/stat").read().rsplit(")",1)[1].split(); return (int(f[11])+int(f[12]))/os.sysconf("SC_CLK_TCK")
 def stats(port):
     return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/stats",timeout=5).read())
-def run(endpoints, events, conns, label, body=200, types=None):
+def pg_args():
+    """HOOKS_PG=host:port:user:database (and HOOKS_PG_PASSWORD): the flags, and the endpoints table emptied for the scenario to fill."""
+    h,pt,u,db=os.environ["HOOKS_PG"].split(":")
+    a=["--pg-host",h,"--pg-port",pt,"--pg-user",u,"--pg-database",db]
+    env=dict(os.environ,PGPASSWORD=os.environ.get("HOOKS_PG_PASSWORD",""))
+    if os.environ.get("HOOKS_PG_PASSWORD"): a+=["--pg-password",os.environ["HOOKS_PG_PASSWORD"]]
+    def psql(sql): subprocess.run(["psql","-q","-h",h,"-p",pt,"-U",u,"-d",db,"-c",sql],check=True,env=env,capture_output=True)
+    return a,psql
+def run(endpoints, events, conns, label, body=200, types=None, pg=False):
     d=tempfile.mkdtemp(prefix="bench-")
     sink_port=free_port()
     sink=subprocess.Popen([f"{HERE}/sink",str(sink_port)],stderr=subprocess.PIPE)
     secret="whsec_"+base64.b64encode(os.urandom(24)).decode()
+    extra=[]
     with open(f"{d}/endpoints.conf","w") as f:
         for i in range(endpoints): f.write(f"{i} 127.0.0.1 {sink_port} {secret}" + (f" types={types}" if types else "") + "\n")
+    if pg:
+        # the endpoints are the table's, and every attempt that ends is a row of the history (design section 24)
+        extra,psql=pg_args()
+        psql("truncate endpoints, attempts")
+        for i in range(endpoints): psql(f"insert into endpoints (id, host, port, secret) values ({i}, '127.0.0.1', {sink_port}, '{secret}')")
     port=free_port()
-    p=subprocess.Popen([BIN,"--port",str(port),"--dir",d,"--allow-private-hosts","1","--schedule","100,100,100"],stderr=subprocess.PIPE,stdout=subprocess.DEVNULL)
+    p=subprocess.Popen([BIN,"--port",str(port),"--dir",d,"--allow-private-hosts","1","--schedule","100,100,100",*extra],stderr=subprocess.PIPE,stdout=subprocess.DEVNULL)
     assert p.stderr.readline().strip()==b"listening"
+    if pg:
+        # the start does not wait for the database (design section 37): wait for /readyz, as the old start did by not listening until then
+        end=time.time()+30
+        while time.time()<end:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/readyz",timeout=2); break
+            except Exception: time.sleep(0.05)
     c0=cpu(p.pid); t0=time.time()
     out=subprocess.run([f"{HERE}/loadgen",str(port),str(conns),str(events),str(body)],capture_output=True,text=True,timeout=300)
     t_ingest=time.time()-t0; c_ingest=cpu(p.pid)-c0
@@ -59,6 +80,8 @@ SCENARIOS={
     "ten": lambda: run(10, 5000, 64, "10 endpoints"),
     # design section 35: ten endpoints with a list. "wanted" lists the event's type (every delivery as in "ten", plus the check of the list);
     # "unwanted" lists another (50,000 passes-over and no delivery: the time and CPU are per (endpoint, event) pair, not per delivery).
+    "ten_pg": lambda: run(10, 5000, 64, "10 endpoints from the table, every attempt a row of the history", pg=True),
+    "ingest64_pg": lambda: run(0, 50000, 64, "ingest only, 64 conns, a database named (the pool idle)", pg=True),
     "ten_wanted": lambda: run(10, 5000, 64, "10 endpoints, each with a list that wants the type", types="bench"),
     "ten_unwanted": lambda: run(10, 5000, 64, "10 endpoints, each with a list that does not want the type", types="other.*"),
 }

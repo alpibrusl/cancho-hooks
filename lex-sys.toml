@@ -95,16 +95,21 @@ sources = ["tests/reason_test.ls", "src/reason.ls"]
 std = true
 
 [[test]]
+name = "dbup"
+sources = ["tests/dbup_test.ls", "src/dbup.ls"]
+std = true
+
+[[test]]
 name = "ops"
 sources = ["tests/ops_test.ls", "src/ops.ls", "src/metrics.ls", "src/reason.ls"]
 std = true
 
 [dependencies.pg]
 git = "https://github.com/alpibrusl/lexsys-pg"
-rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
 path = ".lex-sys-vcs"
 
 [dependencies.pool]
 git = "https://github.com/alpibrusl/lexsys-pg"
-rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
 path = ".lex-sys-vcs-pool"

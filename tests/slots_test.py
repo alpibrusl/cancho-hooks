@@ -37,6 +37,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 128
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
@@ -127,8 +128,9 @@ def start(d, extra=(), schedule="100"):
         lines.append(line)
         if line in ("listening", ""):
             break
+    gone = line == "listening" and pgwait.after_listening(proc, lines, extra)
     svc = type("Svc", (), {})()
-    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening"
+    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening" or gone
     return svc
 
 

@@ -18,6 +18,13 @@ dir = /var/lib/hooks
 #pg-user = hooks
 #pg-database = hooks
 #pg-password = change-me
+# The service does not wait for the database: it listens at once, takes events, and reads the endpoints when the database answers (and delivers nothing before).
+# It remakes a lost connection by itself. These are the defaults (docs/design.md section 37); give pg-host an address, not a name (a name is resolved in the loop).
+#pg-backoff-min-ms = 100        # the wait after a failed attempt to connect starts here ...
+#pg-backoff-max-ms = 5000       # ... and doubles up to this
+#pg-attempt-ms = 5000           # the longest one attempt (dial, login, prepare) may take
+#pg-request-ms = 10000          # a request with no answer byte for this long loses its connection (0: never)
+#pg-start-wait-ms = 30000       # without having read the endpoints for this long the service ends with status 20 (0: waits for ever)
 
 # --- Tokens (docs/design.md section 33). Three scopes, each a bearer token of 8 to 255 visible characters:
 # ---   admin    everything that changes configuration or state: POST, PATCH and DELETE /endpoints, enable, replay, the schedules.

@@ -50,6 +50,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 256
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
@@ -165,8 +166,9 @@ def start(d, extra=None, schedule="100", deadline="5000"):
         lines.append(line)
         if line in ("listening", ""):
             break
+    gone = line == "listening" and pgwait.after_listening(proc, lines, flags)
     svc = Svc()
-    svc.port, svc.proc, svc.lines, svc.exited, svc.dir = port, proc, lines, line != "listening", d
+    svc.port, svc.proc, svc.lines, svc.exited, svc.dir = port, proc, lines, line != "listening" or gone, d
     return svc
 
 

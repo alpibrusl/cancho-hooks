@@ -557,3 +557,60 @@ fn test_retention_settings_defaults_and_edges() -> [] int {
     }
     return 0;
 }
+
+// The settings of the database's connections (`docs/design.md` section 37): each has a default, a range, and is read from a file; a refusal
+// changes nothing; and the longest wait may not be below the first (`pg_status`, which is judged once every setting is in).
+fn test_pg_connection_settings_default_and_limits() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.pg_backoff_min_ms(cfg), 100);
+        test.assert_eq(config.pg_backoff_max_ms(cfg), 5000);
+        test.assert_eq(config.pg_attempt_ms(cfg), 5000);
+        test.assert_eq(config.pg_request_ms(cfg), 10000);
+        test.assert_eq(config.pg_start_wait_ms(cfg), 30000);
+        test.assert_eq(config.pg_status(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-min-ms", "1"), 0);
+        test.assert_eq(config.pg_backoff_min_ms(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-min-ms", "600000"), 0);
+        test.assert(config.set(cfg, blob, "pg-backoff-min-ms", "0") != 0);
+        test.assert(config.set(cfg, blob, "pg-backoff-min-ms", "600001") != 0);
+        test.assert_eq(config.pg_backoff_min_ms(cfg), 600000);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-max-ms", "3600000"), 0);
+        test.assert(config.set(cfg, blob, "pg-backoff-max-ms", "0") != 0);
+        test.assert(config.set(cfg, blob, "pg-backoff-max-ms", "3600001") != 0);
+        test.assert(config.set(cfg, blob, "pg-backoff-max-ms", "soon") != 0);
+        test.assert_eq(config.pg_backoff_max_ms(cfg), 3600000);
+        test.assert_eq(config.set(cfg, blob, "pg-attempt-ms", "250"), 0);
+        test.assert(config.set(cfg, blob, "pg-attempt-ms", "0") != 0);
+        test.assert(config.set(cfg, blob, "pg-attempt-ms", "600001") != 0);
+        test.assert_eq(config.pg_attempt_ms(cfg), 250);
+        test.assert_eq(config.set(cfg, blob, "pg-request-ms", "0"), 0);
+        test.assert_eq(config.pg_request_ms(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-request-ms", "3600000"), 0);
+        test.assert(config.set(cfg, blob, "pg-request-ms", "3600001") != 0);
+        test.assert(config.set(cfg, blob, "pg-request-ms", "-1") != 0);
+        test.assert(config.set(cfg, blob, "pg-request-ms", "") != 0);
+        test.assert_eq(config.pg_request_ms(cfg), 3600000);
+        test.assert_eq(config.set(cfg, blob, "pg-start-wait-ms", "0"), 0);
+        test.assert_eq(config.pg_start_wait_ms(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-start-wait-ms", "86400000"), 0);
+        test.assert(config.set(cfg, blob, "pg-start-wait-ms", "86400001") != 0);
+        test.assert(config.set(cfg, blob, "pg-start-wait-ms", "a while") != 0);
+        test.assert_eq(config.pg_start_wait_ms(cfg), 86400000);
+        test.assert_eq(config.parse_file("pg-backoff-min-ms = 20\npg-backoff-max-ms = 800\npg-attempt-ms = 1500\npg-request-ms = 4000\npg-start-wait-ms = 9000\n", cfg, blob), 0);
+        test.assert_eq(config.pg_backoff_min_ms(cfg), 20);
+        test.assert_eq(config.pg_backoff_max_ms(cfg), 800);
+        test.assert_eq(config.pg_attempt_ms(cfg), 1500);
+        test.assert_eq(config.pg_request_ms(cfg), 4000);
+        test.assert_eq(config.pg_start_wait_ms(cfg), 9000);
+        test.assert_eq(config.pg_status(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-max-ms", "19"), 0);
+        test.assert_eq(config.pg_status(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-max-ms", "20"), 0);
+        test.assert_eq(config.pg_status(cfg), 0);
+    }
+    return 0;
+}
+

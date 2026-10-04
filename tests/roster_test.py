@@ -16,9 +16,9 @@ The database must exist; the test applies sql/schema.sql and empties `endpoints`
   5. (also: an empty host, and a table too large for the 32 KiB the service reads it into)
   5. a row the service cannot use is a refusal to start with the row's number (an id of seven digits, a repeated id cannot be: it
      is the key; a secret that is not base64), and a row with an unprintable byte is refused as such
-  6. a table that is not there, a database that is not there, a wrong password: status 20 and what failed
+  6. a table that is not there, a database that is not there (after pg-start-wait-ms), a wrong password: status 20 and what failed
   7. without --pg-host the file is read as before
-  8. a database that accepts and never answers: the start waits (it has nothing to deliver to), and a kill ends it
+  8. a database that accepts and never answers: the service listens at once, is not ready, delivers nothing, and ends with status 20 after pg-start-wait-ms
 """
 import base64
 import hashlib
@@ -33,10 +33,12 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 from pgproxy import PgProxy  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
@@ -119,8 +121,9 @@ def start(datadir, extra):
         lines.append(line)
         if line in ("listening", ""):
             break
+    gone = line == "listening" and pgwait.after_listening(proc, lines, extra)
     svc = type("Svc", (), {})()
-    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening"
+    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening" or gone
     return svc
 
 
@@ -305,8 +308,10 @@ def main():
         psql("drop view endpoints")
         psql("alter table endpoints_away rename to endpoints")
     psql("truncate endpoints")
-    svc = start(d, pg_flags(port=dead))
-    check("6. no database: status 20, cannot connect", svc.exited and svc.proc.wait() == 20 and any("cannot connect" in l for l in svc.lines), str(svc.lines))
+    t0 = time.time()
+    svc = start(d, pg_flags(port=dead) + ["--pg-start-wait-ms", "1500"])
+    check("6. no database: it listens at once, and after pg-start-wait-ms the status is 20, cannot connect",
+          svc.exited and svc.lines[0] == "listening" and svc.proc.wait() == 20 and any("cannot connect" in l for l in svc.lines) and 1.4 <= time.time() - t0 <= 10, str((svc.lines, time.time() - t0)))
     stop(svc)
     if PG_PASSWORD:
         svc = start(d, pg_flags(password=PG_PASSWORD + "-wrong"))
@@ -324,14 +329,33 @@ def main():
     check("7. ... delivered", wait_for(lambda: len(rf.seen) == 1, 5), str(rf.seen))
     stop(svc)
 
-    # 8. a database that accepts and never answers
+    # 8. a database that accepts and never answers: the start does not wait (section 37). The service listens, takes events, says it is not ready and does not
+    # know its endpoints (so it delivers nothing and the routes about them answer 503), and ends with status 20 when pg-start-wait-ms is over
     proxy = PgProxy(PG_HOST, PG_PORT)
     proxy.mode = "hold"
-    proc = subprocess.Popen([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", *pg_flags(port=proxy.port)], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
-    time.sleep(2)
-    check("8. while the database is silent the start waits (it does not start without its endpoints)", proc.poll() is None)
-    proc.kill()
-    proc.wait()
+    port8 = chaos.free_port()
+    t0 = time.time()
+    proc = subprocess.Popen([BIN, "--port", str(port8), "--dir", d, "--allow-private-hosts", "1", "--pg-start-wait-ms", "4000", "--pg-attempt-ms", "1000", *pg_flags(port=proxy.port)],
+                            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    first = proc.stderr.readline().decode().strip()
+    check("8. a silent database: `listening` at once (the start does not wait for it)", first == "listening" and time.time() - t0 < 1.5, f"{first!r} {time.time() - t0:.2f}")
+    got = {}
+    for path in ("/readyz", "/endpoints"):
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port8}{path}", timeout=5)
+            got[path] = 200
+        except urllib.error.HTTPError as e:
+            got[path] = (e.code, e.read())
+    check("8. ... /readyz is 503 (database) and /endpoints is 503 (not loaded yet)", got["/readyz"][0] == 503 and b"database" in got["/readyz"][1] and got["/endpoints"][0] == 503 and b"not loaded" in got["/endpoints"][1], str(got))
+    r = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port8}/events", data=b'{"type":"t"}', method="POST"), timeout=5)
+    check("8. ... and an event is taken (stored, 202): it waits in the log for the endpoints", r.status == 202 and json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port8}/stats", timeout=5).read())["endpoints_loaded"] is False)
+    code = None
+    try:
+        code = proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    rest = proc.stderr.read().decode()
+    check("8. ... and when pg-start-wait-ms (4 s) is over it ends with status 20: the database did not answer in time", code == 20 and "did not answer in time" in rest and 3.5 <= time.time() - t0 <= 12, f"{code} {rest!r} {time.time() - t0:.1f}")
     proxy.close()
 
     shutil.rmtree(d, ignore_errors=True)

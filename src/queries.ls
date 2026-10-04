@@ -3,7 +3,7 @@
 // Each query is a function that runs it (`<name>`: the whole reply and a status, 0 for ok), one that only
 // encodes the request for `pg.pool.submit` (`<name>_start`), and one accessor per result column
 // (`<name>_<column>`, read from a row as `pg.first_row`/`pg.next_row` give it; `_is_null` where the
-// column can be NULL). Call `prepare_all` once after login, before the first query.
+// column can be NULL). Call `prepare_all` once after login, before the first query (or give `prepare_script` to `pg.pool.reconnect`).
 edition 5;
 
 module queries;
@@ -923,4 +923,27 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     reply = r14;
     status = s14;
     return (reply, status);
+}
+
+// The same statements as the bytes to send after a login (Parse and Sync for each, in order) and how many there are,
+// for a pool that logs in by itself: `pg.pool.reconnect` takes them, and prepares them again on every connection
+// it makes.
+pub fn prepare_script[&h](heap: &!h Heap) -> [heap] (buffer.Buffer, int) {
+    var script = buffer.empty(heap, 256);
+    script = pg.parse_append(heap, script, "add_attempt", "insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing");
+    script = pg.parse_append(heap, script, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
+    script = pg.parse_append(heap, script, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until from endpoints order by id");
+    script = pg.parse_append(heap, script, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until) values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing");
+    script = pg.parse_append(heap, script, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text returning id");
+    script = pg.parse_append(heap, script, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers) where id = $1::int returning id");
+    script = pg.parse_append(heap, script, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
+    script = pg.parse_append(heap, script, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
+    script = pg.parse_append(heap, script, "schedules_due", "select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32");
+    script = pg.parse_append(heap, script, "advance_schedule", "update schedules set last_fired = case when $4::bigint > 0 then $4::bigint else last_fired end, next_fire = $5::bigint where id = $1::bigint and base = $2::bigint and next_fire = $3::bigint");
+    script = pg.parse_append(heap, script, "create_schedule", "insert into schedules (expr, event_type, body, enabled, created_at, base) select $1::text, $2::text, $3::text, $4::boolean, $5::bigint, $5::bigint where (select count(*) from schedules) < 64 returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    script = pg.parse_append(heap, script, "schedule_by_id", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules where id = $1::bigint");
+    script = pg.parse_append(heap, script, "schedules_all", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64");
+    script = pg.parse_append(heap, script, "patch_schedule", "update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    script = pg.parse_append(heap, script, "delete_schedule", "delete from schedules where id = $1::bigint returning id");
+    return (script, 15);
 }
