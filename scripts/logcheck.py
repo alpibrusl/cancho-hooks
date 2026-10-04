@@ -11,7 +11,7 @@ being CRC-32C over everything after `len`. The reader is the one `tests/chaos.py
 What is checked, and why each one matters to a restore:
 
   * events.seg: every record's CRC, ids dense from 1 (the service numbers events 1, 2, 3 ... and `GET /events/:id` relies on it).
-  * delivery.seg: every record is a well-formed outcome of a known kind (1 to 11).
+  * delivery.seg: every record is a well-formed outcome of a known kind (1 to 13).
   * **delivery.seg must not refer to an event that events.seg does not hold.** A service started on such a pair acknowledges
     new events under ids it already believes delivered, and never delivers them (measured: docs/runbook.md, "Backup"). The
     service has no guard against it, so this check is the guard.
@@ -27,7 +27,7 @@ import struct
 import sys
 
 MAX_RECORD = 65536          # a record's `len` is at most the service's max_len + 4 (65,536 bounds a torn tail)
-OUTCOME_KINDS = range(1, 12)
+OUTCOME_KINDS = range(1, 14)         # 12 and 13 (a failure streak began, the circuit breaker paused an endpoint) are about an endpoint: `event` is not an event id
 EVENT_KINDS = (1, 2, 3, 6, 7, 8, 9)   # delivered, failed, dead, replay, replay failed / delivered / dead: `event` is an event id
 CREATED = 10                          # `attempts` is the endpoint's starting cursor: an event id (or 0)
 
