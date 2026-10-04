@@ -157,3 +157,52 @@ pub fn host_of[&n, &b](table: &n [int], blob: &b [byte], i: int) -> [] &b [byte]
 pub fn key_of[&n, &b](table: &n [int], blob: &b [byte], i: int) -> [] &b [byte] {
     return blob[table[i * stride() + 4]..table[i * stride() + 4] + table[i * stride() + 5]];
 }
+
+// How much of `blob` the first `count` endpoints use: the end of the last host or key.
+pub fn blob_used[&n](table: &n [int], count: int) -> [] int {
+    var used = 0;
+    var i = 0;
+    while i < count {
+        let host_end = table[i * stride() + 2] + table[i * stride() + 3];
+        let key_end = table[i * stride() + 4] + table[i * stride() + 5];
+        if host_end > used {
+            used = host_end;
+        }
+        if key_end > used {
+            used = key_end;
+        }
+        i = i + 1;
+    }
+    return used;
+}
+
+// Add an endpoint after the first `count`: its slot, id, port, host and the key its secret decodes to. Answers the new count, or -1 if the
+// table or the blob is full (nothing is changed then).
+pub fn append[&n, &b, &h, &k](table: &!n [int], blob: &!b [byte], count: int, slot: int, ident: int, port: int, host: &h [byte], key: &k [byte]) -> [] int {
+    if count >= state.max_endpoints() {
+        return 0 - 1;
+    }
+    let at = blob_used(table, count);
+    if at + len(host) + len(key) > len(blob) {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < len(host) {
+        blob[at + i] = host[i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < len(key) {
+        blob[at + len(host) + i] = key[i];
+        i = i + 1;
+    }
+    let base = count * stride();
+    table[base] = slot;
+    table[base + 1] = port;
+    table[base + 2] = at;
+    table[base + 3] = len(host);
+    table[base + 4] = at + len(host);
+    table[base + 5] = len(key);
+    table[base + 6] = ident;
+    return count + 1;
+}
