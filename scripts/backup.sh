@@ -58,7 +58,7 @@ while [ $# -gt 0 ]; do
     *) echo "backup: unknown argument: $1" >&2; usage ;;
   esac
 done
-[ -n "$dir" ] && [ -n "$out" ] || usage
+if [ -z "$dir" ] || [ -z "$out" ]; then usage; fi
 case $mode in stopped|online) ;; *) echo "backup: --mode is stopped or online" >&2; usage ;; esac
 if [ "$mode" = online ] && { [ -n "$stop_cmd" ] || [ -n "$start_cmd" ]; }; then
   die 2 "--stop-cmd and --start-cmd belong to --mode stopped"

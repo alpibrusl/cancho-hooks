@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
     *) echo "restore: unknown argument: $1" >&2; usage ;;
   esac
 done
-[ -n "$backup" ] && [ -n "$dir" ] || usage
+if [ -z "$backup" ] || [ -z "$dir" ]; then usage; fi
 [ -d "$backup" ] || die 2 "$backup is not a directory"
 backup=$(cd "$backup" && pwd)
 command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py)"
@@ -54,7 +54,7 @@ command -v sha256sum >/dev/null || die 2 "sha256sum is needed"
 if [ -n "$pg_db" ]; then command -v pg_restore >/dev/null || die 2 "pg_restore is needed for --pg-database"; fi
 
 # 1. The backup itself.
-[ -f "$backup/MANIFEST" ] && [ -f "$backup/SHA256SUMS" ] || die 4 "$backup has no MANIFEST or SHA256SUMS: not a backup of this script"
+if [ ! -f "$backup/MANIFEST" ] || [ ! -f "$backup/SHA256SUMS" ]; then die 4 "$backup has no MANIFEST or SHA256SUMS: not a backup of this script"; fi
 grep -qx 'format=lexsys-hooks-backup/1' "$backup/MANIFEST" || die 4 "unknown backup format ($(grep '^format=' "$backup/MANIFEST" || echo none)): this script reads lexsys-hooks-backup/1"
 (cd "$backup" && sha256sum --quiet -c SHA256SUMS) || die 4 "a checksum does not match: the backup is damaged"
 for f in events.seg delivery.seg; do
