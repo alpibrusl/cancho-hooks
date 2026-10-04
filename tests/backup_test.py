@@ -250,6 +250,11 @@ def stage_a():
     print("== A. stopped, with PostgreSQL", flush=True)
     apply_schema()
     psql("truncate endpoints, attempts")
+    psql("truncate schedules restart identity")
+    # Two schedules, disabled so that they add no events to the counts below: the rows (and the identity sequence behind `id`) are
+    # state worth restoring.
+    psql("insert into schedules (expr, event_type, body, enabled, created_at, base, last_fired, next_fire) values "
+         "('0 3 * * *', 'nightly', '{\"a\":1}', false, 1000, 1000, 0, 0), ('*/5 * * * *', 'tick', '{}', false, 2000, 2000, 4242, 4500)")
     r0, r1 = Receiver(), Receiver()
     s0, s1 = secret(), secret()
     psql(f"insert into endpoints values (0, '127.0.0.1', {r0.port}, '{s0}'), (1, '127.0.0.1', {r1.port}, '{s1}')")
@@ -299,12 +304,14 @@ def stage_a():
           fin[0] == set(range(1, 151)) and fin[1] == set(range(1, 51)), f"{len(fin[0])} {len(fin[1])}")
     attempts_before = int(psql("select count(*) from attempts")[0][0])
     endpoints_before = psql("select id, host, port, secret from endpoints order by id")
+    schedules_before = psql("select id, expr, event_type, body, enabled, created_at, base, last_fired, next_fire from schedules order by id")
+    check("2. there are schedules to restore", len(schedules_before) == 2, str(schedules_before))
     check("2. the history has rows to restore", attempts_before >= 200, str(attempts_before))
     svc_stats_before = None  # the service is stopped; its numbers are in the logs
 
     # 3. total loss
     shutil.rmtree(data)
-    psql("drop table attempts, endpoints")
+    psql("drop table attempts, endpoints, schedules")
     psql("drop sequence endpoint_ids")
     os.makedirs(data)
     out = run([RESTORE, "--backup", bk, "--dir", data, *pg_flags()])
@@ -313,6 +320,12 @@ def stage_a():
           all(open(os.path.join(data, n), "rb").read() == open(os.path.join(bk, n), "rb").read() for n in ("events.seg", "delivery.seg")))
     check("3. the endpoints table is back, row for row (secrets included)",
           psql("select id, host, port, secret from endpoints order by id", check_ok=False) == endpoints_before)
+    check("3. the schedules table is back, row for row, with where each one is",
+          psql("select id, expr, event_type, body, enabled, created_at, base, last_fired, next_fire from schedules order by id", check_ok=False) == schedules_before)
+    new_id = psql("with i as (insert into schedules (expr, event_type, created_at, base, enabled) values ('0 0 1 1 *', 'x', 3000, 3000, false) "
+                  "returning id) select id from i", check_ok=False)
+    check("3. the identity of schedules continues (the next id is not one already given)", new_id == [("3",)], str(new_id))
+    psql("delete from schedules where id = 3", check_ok=False)
     check("3. the attempts table is back with every row", psql("select count(*) from attempts", check_ok=False) == [(str(attempts_before),)])
     seq_after = psql("select last_value, is_called from endpoint_ids", check_ok=False)       # [] if the sequence is not there
     check("3. the sequence endpoint_ids has its value: the next id is not one already given", seq_after == seq_before, str(seq_after))

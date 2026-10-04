@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
 
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
-            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5}
+            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "cron-catchup": 1, "cron-seconds": 0}
     base.update(kw)
     return base
 
@@ -161,6 +161,9 @@ def stage3():
     _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nbreaker-days = 9\n")
     shutil.rmtree(w)
     check("3. breaker-days 9 from a file, read back", cfg == settings(**{"breaker-days": 9}), str(cfg))
+    _, _, cfg, w = serve(["--cron-catchup", "0", "--cron-seconds", "1"], None, {})
+    shutil.rmtree(w)
+    check("3. cron-catchup 0 and cron-seconds 1 are settings, read back", cfg == settings(**{"cron-catchup": 0, "cron-seconds": 1}), str(cfg))
     code, line, _, w = serve(["--allow-private-hosts", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
     shutil.rmtree(w)
     check("3. a private host in the file with the default is refused before the service listens (status 13)", code == 13 and line != "listening", str((code, line)))
@@ -199,6 +202,8 @@ def stage4():
             expect=["line 1", "key = value"])
     refused("a file of 16 KiB or more", ["--config", "@/hooks.conf"], {"hooks.conf": "# " + "x" * 16384 + "\n"},
             expect=["16 KiB"])
+    refused("cron-catchup that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--cron-catchup", "2"], expect=["`--cron-catchup` has a value"])
+    refused("cron-seconds that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--cron-seconds", "yes"], expect=["`--cron-seconds` has a value"])
     refused("allow-private-hosts that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--allow-private-hosts", "yes"], expect=["`--allow-private-hosts` has a value"])
     refused("breaker-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--breaker-days", "soon"], expect=["`--breaker-days` has a value"])
     refused("breaker-days over 100 years", ["--port", "@PORT", "--dir", "@", "--breaker-days=36501"], expect=["`--breaker-days=36501` has a value"])

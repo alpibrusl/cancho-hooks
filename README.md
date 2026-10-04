@@ -12,7 +12,7 @@ the program can do.
 
 ## Status
 
-**Working:** durable ingest (`202` only after the flush that covers the event; requests that arrive together share one flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). That used to hold only until the unreachable endpoint was 1,024 events behind, when every endpoint stopped with it (measured: beside a dead endpoint a healthy one stopped at event 1,024 of 3,000, `docs/design.md` section 29). **Each endpoint now reads the events log from its own cursor and is bounded only by its own window** (same probe: 3,000 of 3,000; section 31), and a **circuit breaker** pauses an endpoint whose every attempt has failed for 5 days (`breaker-days`, 0 turns it off): its events wait in the log until `POST /endpoints/:id/enable`. A client may send an `Idempotency-Key` ([section 17](docs/design.md)); an event can be replayed to one endpoint or all (section 23); a `410 Gone` disables an endpoint (section 22); with PostgreSQL the endpoints are a table, every ended attempt is a row, and an endpoint can be created, changed and deleted without a restart (`POST`, `PATCH`, `DELETE /endpoints`) behind an admin token (sections 24 and 25). **Not built:** filtering by event type, two signatures during a secret rotation, jitter in the retry schedule, TLS (`https`) endpoints.
+**Working:** durable ingest (`202` only after the flush that covers the event; requests that arrive together share one flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). That used to hold only until the unreachable endpoint was 1,024 events behind, when every endpoint stopped with it (measured: beside a dead endpoint a healthy one stopped at event 1,024 of 3,000, `docs/design.md` section 29). **Each endpoint now reads the events log from its own cursor and is bounded only by its own window** (same probe: 3,000 of 3,000; section 31), and a **circuit breaker** pauses an endpoint whose every attempt has failed for 5 days (`breaker-days`, 0 turns it off): its events wait in the log until `POST /endpoints/:id/enable`. A client may send an `Idempotency-Key` ([section 17](docs/design.md)); an event can be replayed to one endpoint or all (section 23); a `410 Gone` disables an endpoint (section 22); with PostgreSQL the endpoints are a table, every ended attempt is a row, and an endpoint can be created, changed and deleted without a restart (`POST`, `PATCH`, `DELETE /endpoints`) behind an admin token (sections 24 and 25). **Cron:** with PostgreSQL a schedule (`POST /schedules`: a five-field cron expression, an event type and a body; UTC) appends an ordinary event at each scheduled second, exactly once even if the service is killed in the middle of a fire, and fires once for the time it was stopped (section 32). **Not built:** filtering by event type, two signatures during a secret rotation, jitter in the retry schedule, TLS (`https`) endpoints.
 
 ## Requirements
 
@@ -69,6 +69,33 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
 
 The import is one transaction, leaves a row whose id is already there as it is, and refuses a file with a bad line without importing any
 of it. The `endpoints` table holds the secrets in a form the service can sign with: give it the permissions of a secret.
+
+## Cron: scheduled events
+
+With a database and an `admin-token`, `POST /schedules` makes the service append an event on a schedule (`docs/design.md` section 32):
+
+```sh
+psql hooks -f sql/schema.sql    # adds the `schedules` table; the service refuses to start on a database without it
+curl -X POST localhost:8080/schedules -H "Authorization: Bearer $TOKEN" \
+     -d '{"expr": "30 4 1,15 * 5", "type": "report.due", "body": {"report": "weekly"}}'
+# 201 {"id":1,"expr":"30 4 1,15 * 5","type":"report.due","body":{"report":"weekly"},"enabled":true,"created_at":...,"last_fired":null,
+#      "next_fire":1791...,"next_fire_at":"2026-10-15T04:30:00Z"}
+```
+
+* **The expression** has five fields, `minute hour day-of-month month day-of-week`, each a list of `*`, `a`, `a-b`, `*/n` and `a-b/n` (numbers only; no
+  names, no `@daily`), **in UTC**. Sunday is `0` or `7`. As in Vixie cron, if both the day of month and the day of week are restricted a day
+  matches when *either* does (`0 0 1 * 1` is the 1st and every Monday), and if one begins with `*` both must (`0 0 * * 1`: Mondays). An expression that cannot
+  parse, or that never fires (`0 0 31 2 *`), is a `400` with the reason.
+* **A fire is an ordinary event**, `{"type": <type>, "schedule": <id>, "scheduled_at": <Unix second>, "body": <body>}`, appended through the same code as
+  `POST /events` with the idempotency key `cron:<id>:<scheduled second>`, so it is stored, delivered, signed, retried and replayed like any other. The key is
+  what makes a fire happen **once**: the event is flushed *before* the database is told, and a restart that finds the database one behind finds the key
+  and appends nothing.
+* **After a stop**, a schedule fires **once** for the time it missed (not once per missed minute), for the last scheduled second more than 10 seconds old; the
+  ones within 10 seconds of the restart fire each on its own. With `cron-catchup 0` the missed ones are skipped.
+* **The routes** need the admin token, the reads too (`403` without a token configured, `401` without the right one, `503` without a database): `POST /schedules`,
+  `GET /schedules` (the list, with each `next_fire`), `GET /schedules/:id`, `PATCH /schedules/:id` (any of `expr`, `type`, `body`, `enabled`; a changed expression
+  or an enabled schedule counts from now), `DELETE /schedules/:id`. At most 64 schedules; a body is JSON of at most 1,024 bytes.
+* **One service per database.** The schedules are rows, and a second service reading the same table would fire them too, into its own log.
 
 ## A prebuilt binary
 
@@ -145,6 +172,8 @@ ignored; at most 62 endpoints, each with an id of up to six digits, written and 
 | `admin-token` | (none) | the bearer token that lets a request create, change or delete endpoints, 8 to 255 visible characters; without it `POST`, `PATCH` and `DELETE /endpoints` are a `403`. Anyone who has it can choose where the service sends requests, within what `allow-private-hosts` allows (by default public addresses only), so keep it secret and put it in the settings file, not on the command line |
 | `breaker-days` | `5` | pause an endpoint whose every attempt has failed for this many days (0 to 36,500; `0` is off). It is disabled as a `410` disables it, and `GET /endpoints` says `"paused":true`; its events wait in the log and are sent when a person enables it. Counted from the first failed attempt after a delivery, checked when an attempt fails (design.md section 31) |
 | `import-endpoints` | `0` | `1`: copy `endpoints.conf` into the database and exit (needs `pg-host`; no `port` needed) |
+| `cron-catchup` | `1` | `1`: a schedule that missed fires while the service was stopped fires once for them; `0`: it skips them (design.md section 32) |
+| `cron-seconds` | `0` | `1`: a schedule's expression has a leading *seconds* field (six fields). A test mode, so that a test sees a fire in seconds instead of a minute; do not switch it with schedules in the table (a row of the other kind does not parse and is parked) |
 
 ```sh
 build/hooks --port 8080 --dir /tmp/hooks-data --schedule 100,200,400,800   # four retries, then a dead letter after the fifth attempt
@@ -181,7 +210,7 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 |---|---|
 | `POST /events` | a JSON object with a string `"type"`, and optionally an `Idempotency-Key` (1 to 255 visible ASCII characters); answers `202 {"id":N}` after the flush, `422` for a body that is not one or a key already used for a different event, `400` for a bad or doubled key, `413` for an event too large (over 65,499 bytes, less 28 and the key's length with a key), `507` for a new key when 65,536 are held, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
-| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys","replays","draining","paused","breaker_trips","history_live","history_written","history_failed","history_dropped"}` (`paused`: endpoints the breaker has paused now; `breaker_trips`: pauses since the start) |
+| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys","replays","draining","paused","breaker_trips","history_live","history_written","history_failed","history_dropped","cron_fired","cron_errors","cron_skipped"}` (`paused`: endpoints the breaker has paused now; `breaker_trips`: pauses since the start) |
 | `POST /events/:id/replay` | send the event again to every endpoint; `/replay/:endpoint` for one. `202 {"event","endpoints"}`, `404` for an unknown event or endpoint, `507` if 32 replays already wait. Same `webhook-id`, same schedule (design.md section 23) |
 | `GET /events/:id/attempts` | the attempts of an event from the database, as `[{"endpoint","replay","attempt","outcome","status","at","latency_ms"}]`; `503` if no database is named or it cannot answer, `504` after five seconds |
 | `GET /endpoints` | each endpoint's `{"id","port","cursor","disabled","paused","failing_since"}`: `paused` is true when the circuit breaker is why it is disabled, `failing_since` is the Unix time in ms at which its current run of failed attempts began (0 if none). Not the host, not the secret |
@@ -190,7 +219,13 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `PATCH /endpoints/:id` | change an endpoint (needs a database and an `admin-token`): any of `"host"`, `"port"`, `"secret"` (`whsec_` and base64) and `"rotate": true` (the service makes a new secret; not with `"secret"`). `200 {"id","host","port"}`, and `"secret"` when the change brought or made one: **it is in this answer and in no other**. The next attempt uses the new address and secret, a retry of an event first tried under the old secret included; an attempt already on the wire finishes against the old address. There is one signature, so a receiver that has not been given the new secret refuses until it has (two at once is not built). `404` for an unknown id or a row that is gone, `409` while another change waits, `400` with a reason for a body that is not a change (the same host rule as `POST`), `503` if the database refuses (nothing changes) |
 | `DELETE /endpoints/:id` | remove an endpoint (needs a database and an `admin-token`): the row is deleted first, and only when the database says commit does the service change. `200 {"id","deleted":true,"draining":bool}`. **No new attempt starts** for the endpoint from then on, and it is out of `GET /endpoints` at once; an attempt already on the wire finishes and is recorded (log and history, under the endpoint's id) as for any endpoint, and its slot cannot be reused until it has (`"draining":true`, `/stats` says how many); replays waiting for it are dropped; its rows in the history are kept; its id is never given again. A row that was already gone is removed from the service all the same (`200`, with `"row":"was already gone"`). `404` for an unknown id, `400` for one that is not a number, `403`/`401` as for `POST`, `409` while another change waits, or while all 62 slots are taken (one of them draining), `503` if the database refuses (nothing changes), `504` after five seconds (the row may still go: the next start reconciles) |
 | `POST /endpoints/:id/enable` | enable an endpoint a `410` or the circuit breaker disabled (it also ends the run of failures); `200` whether or not it was, `404` for an unknown id |
-| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms","allow-private-hosts","breaker-days"}` (not the endpoints, not their secrets) |
+| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms","allow-private-hosts","breaker-days","cron-catchup","cron-seconds"}` (not the endpoints, not their secrets) |
+| `POST /schedules` | create a schedule (needs a database and an `admin-token`): `{"expr","type"}` and optionally `"body"` (any JSON, at most 1,024 bytes, default `{}`) and `"enabled"` (default true). `201` with the schedule: `{"id","expr","type","body","enabled","created_at","last_fired","next_fire","next_fire_at"}`. A schedule counts from now: it does not fire for the time before it existed. `400` with the reason for a bad request, `409` at 64 schedules |
+| `GET /schedules`<br>`GET /schedules/:id` | the schedules, or one, as above; `next_fire` (Unix seconds) and `next_fire_at` (UTC text) are the next scheduled second after now, `null` if disabled. Admin token needed for these too (a body is a payload). `404` for an unknown id |
+| `PATCH /schedules/:id` | any of `"expr"`, `"type"`, `"body"`, `"enabled"`. A changed expression, or `"enabled": true` on a disabled schedule, counts from now (no fires for the time between). `200` with the schedule, `404`, `400` |
+| `DELETE /schedules/:id` | `200 {"id","deleted":true}`, `404` |
+| `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
+| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms","allow-private-hosts","cron-catchup","cron-seconds"}` (not the endpoints, not their secrets) |
 | `GET /healthz` | `{"ok":true}` |
 
 A delivery is `POST /hook` to the endpoint, with the event as the body and three headers: `webhook-id` (`evt_<id>`, the same on
@@ -208,7 +243,8 @@ request held; after the turn one `flush` covers every append and the held reques
 ## Tests
 
 ```sh
-$LEX_SYS test                                      # the unit-test sets of lex-sys.toml (state, endpoints, destination, idem, config)
+$LEX_SYS test                                      # the unit-test sets of lex-sys.toml (state, endpoints, destination, idem, cron, config)
+python3 tests/cron_test.py build/cron_probe 500      # cron expressions against an independent implementation (calendar, steps, day-of-month and day-of-week, leap days)
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/history_test.py build/hooks   # the history in PostgreSQL (needs one: see the file)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/roster_test.py build/hooks    # the endpoints in PostgreSQL: import, read at start, every refusal
@@ -231,6 +267,7 @@ python3 tests/chaos.py build/hooks 2000 8 50       # kill -9 as a power cut: no 
 python3 tests/delivery.py build/hooks 300 4 150    # three endpoints, signed, retried and dead-lettered, with the service killed
 FULL=1 python3 tests/idempotency_test.py build/hooks   # idempotency keys: the contract, restarts, chaos, a broken log, a full index
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/backup_test.py build/hooks    # backup and restore: total loss, kill -9 under online backups, every refusal (docs/runbook.md section 4)
+FULL=1 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/schedules_test.py build/hooks   # schedules: the token, every refusal, a fire is an ordinary event, missed fires, kill -9 between the event and the database, a real minute (needs a database of its own: it empties `schedules`)
 ```
 
 The crash tests emulate a power cut with a small `LD_PRELOAD` shim (`tests/fsync_shim.c`): a plain `kill -9` cannot show a
@@ -241,7 +278,7 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 - [`docs/runbook.md`](docs/runbook.md): running it: start and stop, the settings, what every log line and `/stats` field means, backup and restore (and whether the online variant is safe), upgrading, what to do when it goes wrong, the known limits. Parts that depend on work that is not built are marked planned.
 - [`docs/production.md`](docs/production.md): what "production" means here, the plan to get there, and the status of each item.
 - [`docs/design.md`](docs/design.md): what this is for, which store owns which fact, the delivery semantics, the test scenario
-  fixed before the build, the gaps predicted, and sections 13 to 25 on what building each step showed. (Its first sections are the plan; where a later section says otherwise, the later one is what was built.)
+  fixed before the build, the gaps predicted, and sections 13 to 25 on what building each step showed, and section 32 on cron. (Its first sections are the plan; where a later section says otherwise, the later one is what was built.)
 
 ## Layout
 
@@ -255,6 +292,8 @@ src/config.ls      the settings, from a file and from flags
 src/history.ls     the attempts that ended, written to PostgreSQL, and the connections to it
 src/roster.ls      the endpoints table: read at start, and `--import-endpoints`
 src/manage.ls      `POST`, `PATCH` and `DELETE /endpoints`: who may call them, what a request may say, a secret for the endpoint
+src/cron.ls        cron expressions: parse, and the next and last fire (pure, no clock)
+src/sched.ls       `/schedules`: the requests, what a due row means, and the state the tick keeps
 src/queries.ls     the SQL of `sql/queries.sql` as functions (generated by `pgen`)
 src/view.ls        what the database says, as an HTTP answer
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
@@ -269,7 +308,7 @@ docs/design.md     the design and what building it found
 
 ## Limitations
 
-One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, or from the `endpoints` table (read at start, and added to with `POST /endpoints`); an endpoint the log has not seen (a row added by hand, a new line in the file) starts at the slowest cursor of the others, 0 if there are none, and one created with `POST /endpoints` starts from now; they can be changed with `PATCH /endpoints/:id` (host, port, secret) and removed with `DELETE /endpoints/:id` (an attempt of it that is on the wire finishes first, and until it has the endpoint's slot cannot be given to a new one: with 62 endpoints that is a `409` for up to the attempt's deadline); a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. By default only public IPv4 addresses are allowed as destinations (no names, no ports limited, no per-host allow-list: `docs/design.md` section 26). At most 62 endpoints. An endpoint is served at most 1,024 events past its own cursor (its window): an endpoint that is far behind waits there, the events beyond it wait in the log, and none of that holds up another endpoint (design.md section 31); left alone a dead endpoint dead-letters its events at the speed of its retry schedule, or is paused by the circuit breaker after `breaker-days` days of failures and waits for a person to enable it (no automatic resume). An event of 65,500 bytes or more is refused (`413`; 65,499 is the largest, and less with an `Idempotency-Key`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
+One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, or from the `endpoints` table (read at start, and added to with `POST /endpoints`); an endpoint the log has not seen (a row added by hand, a new line in the file) starts at the slowest cursor of the others, 0 if there are none, and one created with `POST /endpoints` starts from now; they can be changed with `PATCH /endpoints/:id` (host, port, secret) and removed with `DELETE /endpoints/:id` (an attempt of it that is on the wire finishes first, and until it has the endpoint's slot cannot be given to a new one: with 62 endpoints that is a `409` for up to the attempt's deadline); a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. By default only public IPv4 addresses are allowed as destinations (no names, no ports limited, no per-host allow-list: `docs/design.md` section 26). At most 62 endpoints. An endpoint is served at most 1,024 events past its own cursor (its window): an endpoint that is far behind waits there, the events beyond it wait in the log, and none of that holds up another endpoint (design.md section 31); left alone a dead endpoint dead-letters its events at the speed of its retry schedule, or is paused by the circuit breaker after `breaker-days` days of failures and waits for a person to enable it (no automatic resume). An event of 65,500 bytes or more is refused (`413`; 65,499 is the largest, and less with an `Idempotency-Key`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start, **and every fire of a schedule uses one**: a schedule of every minute uses them all in 45 days, after which fires are refused (counted in `cron_errors`) rather than made without their key. Schedules: UTC only, at most 64, one service per database, and a jump of the machine's clock is a stop or a restart as far as they can tell. Not for production.
 
 ## Contributing
 

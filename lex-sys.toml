@@ -27,6 +27,12 @@ name = "sign_probe"
 sources = ["tests/sign_probe.ls", "src/sign.ls"]
 std = true
 
+# The probe that tests cron expressions against an independent implementation (tests/cron_test.py).
+[[bin]]
+name = "cron_probe"
+sources = ["tests/cron_probe.ls", "src/cron.ls"]
+std = true
+
 # The unit tests (`lex-sys test`): each set is run against the installed libraries.
 [[test]]
 name = "state"
@@ -46,6 +52,11 @@ std = true
 [[test]]
 name = "idem"
 sources = ["tests/idem_test.ls", "src/idem.ls"]
+std = true
+
+[[test]]
+name = "cron"
+sources = ["tests/cron_test.ls", "src/cron.ls"]
 std = true
 
 [[test]]

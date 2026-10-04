@@ -358,6 +358,445 @@ pub fn delete_endpoint_setval_is_null[&m](m: &m [byte], row: int) -> [] bool {
     return from < 0;
 }
 
+// schedules_due_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn schedules_due_start[&h](heap: &!h Heap, now: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, now);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "schedules_due", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// schedules_due: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn schedules_due[&h, &c](heap: &!h Heap, conn: &!c Conn, now: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, now);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "schedules_due", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn schedules_due_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedules_due_expr[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn schedules_due_event_type[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 2);
+}
+
+pub fn schedules_due_body[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+pub fn schedules_due_base[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 4);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedules_due_next_fire[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 5);
+    return pg.int_text(m, from, to);
+}
+
+// advance_schedule_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn advance_schedule_start[&h](heap: &!h Heap, id: int, was_base: int, was_next: int, fired: int, next: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param_int(heap, ps, was_base);
+    ps = pg.param_int(heap, ps, was_next);
+    ps = pg.param_int(heap, ps, fired);
+    ps = pg.param_int(heap, ps, next);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "advance_schedule", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// advance_schedule: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn advance_schedule[&h, &c](heap: &!h Heap, conn: &!c Conn, id: int, was_base: int, was_next: int, fired: int, next: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    ps = pg.param_int(heap, ps, was_base);
+    ps = pg.param_int(heap, ps, was_next);
+    ps = pg.param_int(heap, ps, fired);
+    ps = pg.param_int(heap, ps, next);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "advance_schedule", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+// create_schedule_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn create_schedule_start[&h, &a1, &a2, &a3](heap: &!h Heap, expr: &a1 [byte], event_type: &a2 [byte], body: &a3 [byte], enabled: bool, now: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param(heap, ps, expr);
+    ps = pg.param(heap, ps, event_type);
+    ps = pg.param(heap, ps, body);
+    ps = pg.param_bool(heap, ps, enabled);
+    ps = pg.param_int(heap, ps, now);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "create_schedule", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// create_schedule: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn create_schedule[&h, &c, &a1, &a2, &a3](heap: &!h Heap, conn: &!c Conn, expr: &a1 [byte], event_type: &a2 [byte], body: &a3 [byte], enabled: bool, now: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param(heap, ps, expr);
+    ps = pg.param(heap, ps, event_type);
+    ps = pg.param(heap, ps, body);
+    ps = pg.param_bool(heap, ps, enabled);
+    ps = pg.param_int(heap, ps, now);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "create_schedule", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn create_schedule_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn create_schedule_expr[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn create_schedule_event_type[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 2);
+}
+
+pub fn create_schedule_body[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+pub fn create_schedule_enabled[&m](m: &m [byte], row: int) -> [] bool {
+    let (from, to) = pg.value(m, row, 4);
+    return pg.bool_text(m, from, to);
+}
+
+pub fn create_schedule_created_at[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 5);
+    return pg.int_text(m, from, to);
+}
+
+pub fn create_schedule_last_fired[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 6);
+    return pg.int_text(m, from, to);
+}
+
+pub fn create_schedule_next_fire[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
+    return pg.int_text(m, from, to);
+}
+
+// schedule_by_id_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn schedule_by_id_start[&h](heap: &!h Heap, id: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "schedule_by_id", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// schedule_by_id: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn schedule_by_id[&h, &c](heap: &!h Heap, conn: &!c Conn, id: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "schedule_by_id", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn schedule_by_id_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedule_by_id_expr[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn schedule_by_id_event_type[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 2);
+}
+
+pub fn schedule_by_id_body[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+pub fn schedule_by_id_enabled[&m](m: &m [byte], row: int) -> [] bool {
+    let (from, to) = pg.value(m, row, 4);
+    return pg.bool_text(m, from, to);
+}
+
+pub fn schedule_by_id_created_at[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 5);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedule_by_id_last_fired[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 6);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedule_by_id_next_fire[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
+    return pg.int_text(m, from, to);
+}
+
+// schedules_all_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn schedules_all_start[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "schedules_all", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// schedules_all: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn schedules_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "schedules_all", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn schedules_all_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedules_all_expr[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn schedules_all_event_type[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 2);
+}
+
+pub fn schedules_all_body[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+pub fn schedules_all_enabled[&m](m: &m [byte], row: int) -> [] bool {
+    let (from, to) = pg.value(m, row, 4);
+    return pg.bool_text(m, from, to);
+}
+
+pub fn schedules_all_created_at[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 5);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedules_all_last_fired[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 6);
+    return pg.int_text(m, from, to);
+}
+
+pub fn schedules_all_next_fire[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
+    return pg.int_text(m, from, to);
+}
+
+// patch_schedule_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn patch_schedule_start[&h, &a2, &a3, &a4](heap: &!h Heap, id: int, expr: &a2 [byte], expr_given: bool, event_type: &a3 [byte], event_type_given: bool, body: &a4 [byte], body_given: bool, enabled: bool, enabled_given: bool, now: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    if expr_given {
+        ps = pg.param(heap, ps, expr);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if event_type_given {
+        ps = pg.param(heap, ps, event_type);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if body_given {
+        ps = pg.param(heap, ps, body);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if enabled_given {
+        ps = pg.param_bool(heap, ps, enabled);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    ps = pg.param_int(heap, ps, now);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "patch_schedule", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// patch_schedule: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn patch_schedule[&h, &c, &a2, &a3, &a4](heap: &!h Heap, conn: &!c Conn, id: int, expr: &a2 [byte], expr_given: bool, event_type: &a3 [byte], event_type_given: bool, body: &a4 [byte], body_given: bool, enabled: bool, enabled_given: bool, now: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    if expr_given {
+        ps = pg.param(heap, ps, expr);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if event_type_given {
+        ps = pg.param(heap, ps, event_type);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if body_given {
+        ps = pg.param(heap, ps, body);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    if enabled_given {
+        ps = pg.param_bool(heap, ps, enabled);
+    } else {
+        ps = pg.param_null(heap, ps);
+    }
+    ps = pg.param_int(heap, ps, now);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "patch_schedule", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn patch_schedule_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn patch_schedule_expr[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 1);
+}
+
+pub fn patch_schedule_event_type[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 2);
+}
+
+pub fn patch_schedule_body[&m](m: &m [byte], row: int) -> [] (int, int) {
+    return pg.value(m, row, 3);
+}
+
+pub fn patch_schedule_enabled[&m](m: &m [byte], row: int) -> [] bool {
+    let (from, to) = pg.value(m, row, 4);
+    return pg.bool_text(m, from, to);
+}
+
+pub fn patch_schedule_created_at[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 5);
+    return pg.int_text(m, from, to);
+}
+
+pub fn patch_schedule_last_fired[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 6);
+    return pg.int_text(m, from, to);
+}
+
+pub fn patch_schedule_next_fire[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 7);
+    return pg.int_text(m, from, to);
+}
+
+// delete_schedule_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn delete_schedule_start[&h](heap: &!h Heap, id: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "delete_schedule", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// delete_schedule: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn delete_schedule[&h, &c](heap: &!h Heap, conn: &!c Conn, id: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "delete_schedule", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn delete_schedule_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
 // Parse every query above on this connection, once, after login: PostgreSQL then parses and plans each
 // one once instead of on every call. Answers the reply of the first refusal (`pg.failure` says what the
 // server objected to) or an empty one, and a status; the queries are not to be run unless both are clean.
@@ -388,5 +827,26 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r7, s7) = pg.prepare_after(heap, conn, reply, status, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
     reply = r7;
     status = s7;
+    let (r8, s8) = pg.prepare_after(heap, conn, reply, status, "schedules_due", "select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32");
+    reply = r8;
+    status = s8;
+    let (r9, s9) = pg.prepare_after(heap, conn, reply, status, "advance_schedule", "update schedules set last_fired = case when $4::bigint > 0 then $4::bigint else last_fired end, next_fire = $5::bigint where id = $1::bigint and base = $2::bigint and next_fire = $3::bigint");
+    reply = r9;
+    status = s9;
+    let (r10, s10) = pg.prepare_after(heap, conn, reply, status, "create_schedule", "insert into schedules (expr, event_type, body, enabled, created_at, base) select $1::text, $2::text, $3::text, $4::boolean, $5::bigint, $5::bigint where (select count(*) from schedules) < 64 returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    reply = r10;
+    status = s10;
+    let (r11, s11) = pg.prepare_after(heap, conn, reply, status, "schedule_by_id", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules where id = $1::bigint");
+    reply = r11;
+    status = s11;
+    let (r12, s12) = pg.prepare_after(heap, conn, reply, status, "schedules_all", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64");
+    reply = r12;
+    status = s12;
+    let (r13, s13) = pg.prepare_after(heap, conn, reply, status, "patch_schedule", "update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    reply = r13;
+    status = s13;
+    let (r14, s14) = pg.prepare_after(heap, conn, reply, status, "delete_schedule", "delete from schedules where id = $1::bigint returning id");
+    reply = r14;
+    status = s14;
     return (reply, status);
 }

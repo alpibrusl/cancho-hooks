@@ -87,7 +87,7 @@ Settings come from the defaults, then `--config <file>`, then the flags in the o
 
 **Secrets.** The settings file holds `admin-token` and `pg-password`; `endpoints.conf` and the `endpoints` table hold every endpoint's signing secret **in the clear** (the service must sign with it). Give the file `root:hooks 0640`, the database role only what it needs, and treat a backup as a secret (section 4). **(planned: 0.3)** scoped tokens for ingest and read, a `production = 1` profile that refuses an unsafe configuration, and a statement on secrets at rest. Today `POST /events`, `GET /events/:id`, `GET /endpoints` and `POST /endpoints/:id/enable` need no credential at all: **bind the port to a trusted network or put an authenticating proxy in front**.
 
-**PostgreSQL.** `psql -f sql/schema.sql` creates `attempts`, `endpoints` and the sequence `endpoint_ids`; it is idempotent and **must be re-run before starting a newer binary**, because every connection prepares every statement and a missing table or sequence is a refusal (status 20, "the query failed"). The image carries the file: `docker run --rm --entrypoint cat lexsys-hooks /usr/share/hooks/schema.sql | psql ...`.
+**PostgreSQL.** `psql -f sql/schema.sql` creates `attempts`, `endpoints`, `schedules` and the sequence `endpoint_ids`; it is idempotent and **must be re-run before starting a newer binary**, because every connection prepares every statement and a missing table or sequence is a refusal (status 20, "the query failed"). The image carries the file: `docker run --rm --entrypoint cat lexsys-hooks /usr/share/hooks/schema.sql | psql ...`.
 
 ## 3. Reading the service
 
@@ -145,6 +145,7 @@ All counters are **since this start** (they are zero after every restart; the hi
 | `delivery.seg` | `dir` | **yes**: what was delivered, retried, dead. Lose it and every event is delivered again |
 | `endpoints.conf` | `dir` | only if no database is named |
 | `endpoints` table and the sequence `endpoint_ids` | PostgreSQL | **yes** with a database: the endpoints and their secrets, and the ids never to be given twice |
+| `schedules` table | PostgreSQL | **yes** with a database: the cron expressions, and where each stands (`last_fired`, `next_fire`). The dump is taken before the logs, so a restored table is never ahead of the restored events log: a fire the table forgot is found by its idempotency key in the log and not made twice |
 | `attempts` table | PostgreSQL | no: best-effort history. `--skip-attempts` leaves it out |
 | the settings file | `/etc/hooks/` | yes, from your configuration management; it is not in the data directory |
 

@@ -25,3 +25,24 @@ update endpoints set host = $2::text, port = $3::int where id = $1::int returnin
 
 -- name: delete_endpoint id
 with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone
+
+-- name: schedules_due now
+select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32
+
+-- name: advance_schedule id was_base was_next fired next
+update schedules set last_fired = case when $4::bigint > 0 then $4::bigint else last_fired end, next_fire = $5::bigint where id = $1::bigint and base = $2::bigint and next_fire = $3::bigint
+
+-- name: create_schedule expr event_type body enabled now
+insert into schedules (expr, event_type, body, enabled, created_at, base) select $1::text, $2::text, $3::text, $4::boolean, $5::bigint, $5::bigint where (select count(*) from schedules) < 64 returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire
+
+-- name: schedule_by_id id
+select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules where id = $1::bigint
+
+-- name: schedules_all
+select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64
+
+-- name: patch_schedule id expr? event_type? body? enabled? now
+update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire
+
+-- name: delete_schedule id
+delete from schedules where id = $1::bigint returning id

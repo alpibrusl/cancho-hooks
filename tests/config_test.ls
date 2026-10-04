@@ -248,6 +248,33 @@ fn test_import_endpoints_is_zero_or_one() -> [] int {
     return 0;
 }
 
+fn test_the_cron_settings_are_zero_or_one_and_catch_up_is_on_by_default() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.cron_catchup(cfg), 1);
+        test.assert_eq(config.cron_seconds(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "cron-catchup", "0"), 0);
+        test.assert_eq(config.cron_catchup(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "cron-catchup", "2"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "cron-catchup", "on"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "cron-catchup", ""), config.why_value());
+        test.assert_eq(config.cron_catchup(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "cron-catchup", "1"), 0);
+        test.assert_eq(config.cron_catchup(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "cron-seconds", "1"), 0);
+        test.assert_eq(config.cron_seconds(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "cron-seconds", "yes"), config.why_value());
+        test.assert_eq(config.cron_seconds(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "cron-seconds", "0"), 0);
+        test.assert_eq(config.cron_seconds(cfg), 0);
+        // a setting of the other kind is not a cron one
+        test.assert_eq(config.set(cfg, blob, "cron", "1"), config.why_key());
+    }
+    return 0;
+}
+
 fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
     region a {
         let cfg = alloc_slice[a](config.size(), 0);

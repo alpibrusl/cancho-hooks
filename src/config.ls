@@ -20,6 +20,8 @@ import std.bytes;
 //     allow-private-hosts  `1`: endpoints may be names and non-public addresses (section 26)   default 0
 //     admin-token  the bearer token that lets a request change endpoints       default none: management is off (section 25.2)
 //     breaker-days  pause an endpoint whose every attempt has failed for this many days; 0 turns it off   default 5 (section 31)
+//     cron-catchup `1`: a schedule whose fires were missed while the service was stopped fires once for them; `0`: it skips them   default 1 (section 32)
+//     cron-seconds `1`: a schedule's expression has a leading seconds field (six fields; a test mode)   default 0 (section 32)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -30,12 +32,13 @@ import std.bytes;
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
 //     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
+//     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it
 
 pub fn size() -> [] int {
-    return 15;
+    return 17;
 }
 
 pub fn blob_size() -> [] int {
@@ -139,6 +142,14 @@ pub fn breaker_days[&c](cfg: &c [int]) -> [] int {
     return cfg[14];
 }
 
+pub fn cron_catchup[&c](cfg: &c [int]) -> [] int {
+    return cfg[15];
+}
+
+pub fn cron_seconds[&c](cfg: &c [int]) -> [] int {
+    return cfg[16];
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -149,6 +160,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[2] = 86400000;
     cfg[6] = 5432;
     cfg[14] = 5;
+    cfg[15] = 1;
     return 0;
 }
 
@@ -274,6 +286,22 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[13] = 1;
         } else if bytes.equal(value, "0") {
             cfg[13] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "cron-catchup") {
+        if bytes.equal(value, "1") {
+            cfg[15] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[15] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "cron-seconds") {
+        if bytes.equal(value, "1") {
+            cfg[16] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[16] = 0;
         } else {
             why = why_value();
         }
