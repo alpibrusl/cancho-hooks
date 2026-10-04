@@ -213,7 +213,7 @@ footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; fl
       </article>
       <article class="card">
         <h3>PostgreSQL, optionally</h3>
-        <p>With <code>--pg-host</code>, endpoints are the rows of an <code>endpoints</code> table and every ended attempt is a row of <code>attempts</code>, read back at <code>GET /events/:id/attempts</code>.</p>
+        <p>With <code>--pg-host</code>, endpoints are the rows of an <code>endpoints</code> table and every ended attempt is a row of <code>attempts</code>, read back at <code>GET /events/:id/attempts</code>. With an <code>admin-token</code> an endpoint can be created while the service runs.</p>
       </article>
       <article class="card">
         <h3>Small authority</h3>
@@ -308,6 +308,8 @@ footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; fl
         <tr><td>A bad endpoint costs the others little</td><td><code>tests/isolation_test.py</code>, 80 events at about 20 a second beside two healthy endpoints. Ingest median: 2.3 ms with a silent endpoint, 2.3 ms with one that answers after 300 ms, 2.4 ms with one whose accept queue is full. Healthy endpoints&rsquo; delivery p99: 2, 5 and 3 ms. The gate is a 50 ms median.</td><td>&sect;16</td></tr>
         <tr><td>Idempotency survives crashes</td><td><code>tests/idempotency_test.py</code>: twenty simultaneous requests with one key make one event; 600 keyed events retried under kills leave exactly one record per key; 65,536 keys are rebuilt at start in 0.24 s.</td><td>&sect;17</td></tr>
         <tr><td>Three endpoints, poisoned events</td><td><code>tests/delivery.py</code>: 300 events, 101 kills, every request verified with the reference library; 18 poisoned events dead-lettered and none delivered.</td><td>&sect;15, &sect;16</td></tr>
+        <tr><td>Endpoints can be created while it runs</td><td><code>tests/manage_test.py</code> against a real PostgreSQL: who may call it (no token configured, a missing, wrong, shorter, longer or doubled token), what a request may say (18 refusals), the secret returned once and in no read, a new endpoint starting from now and signed with the secret it was given (the test receiver verifies the signature itself), a refused insert changing nothing, two requests at once, a database slower than five seconds, 62 endpoints. 25 mutants of the code were all caught.</td><td>&sect;25.2</td></tr>
+        <tr><td>A retry is not lost after 1,008 events</td><td><code>tests/layout_test.py</code>: 2,300 events, two of which fail once. A bug in the layout of the delivery state (found while planning the endpoint work, and fixed) made a retry of some events read the wrong place in the log; the test fails on the code before the fix.</td><td>&sect;25</td></tr>
         <tr><td>The history tolerates a bad database</td><td><code>tests/history_test.py</code> against a real PostgreSQL: with the database silent or cut mid-run, delivery goes on and the lost rows are counted.</td><td>&sect;24</td></tr>
       </tbody>
     </table>
@@ -370,6 +372,8 @@ Webhook("whsec_...").verify(body, {"webhook-id": "evt_1", "webhook-timestamp": "
         <tr><td><code>deadline-ms</code></td><td><code>2000</code></td><td>How long one delivery attempt may take</td></tr>
         <tr><td><code>window-ms</code></td><td><code>86400000</code></td><td>How long an idempotency key is remembered</td></tr>
         <tr><td><code>pg-host</code> and friends</td><td>none</td><td>A PostgreSQL for the endpoints and the attempt history</td></tr>
+        <tr><td><code>admin-token</code></td><td>none</td><td>The bearer token that lets a request create endpoints, 8 to 255 visible characters. Without it <code>POST /endpoints</code> is a <code>403</code>. Whoever has it can make the service send requests to any host it can reach: put it in the settings file, not on the command line.</td></tr>
+        <tr><td><code>import-endpoints</code></td><td><code>0</code></td><td><code>1</code>: copy <code>endpoints.conf</code> into the database and exit</td></tr>
       </tbody>
     </table>
     </div>
@@ -384,7 +388,7 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
 
   <section id="api" aria-labelledby="h-api">
     <h2 id="h-api">HTTP API today</h2>
-    <p class="prose muted">These are the routes the service registers now. There is no authentication on any of them.</p>
+    <p class="prose muted">These are the routes the service registers now. Only <code>POST /endpoints</code> is behind a token; none of the others is authenticated.</p>
     <div class="scroll" tabindex="0" role="region" aria-label="API routes table">
     <table class="stack">
       <thead><tr><th scope="col">Route</th><th scope="col">What it does</th></tr></thead>
@@ -394,6 +398,8 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
         <tr><td><code>POST /events/:id/replay</code><br><code>POST /events/:id/replay/:endpoint</code></td><td>Send the event again to every endpoint, or to one. <code>202</code> with the event and endpoints; <code>404</code> for an unknown event or endpoint; <code>507</code> if 32 replays already wait. Same <code>webhook-id</code>, same schedule.</td></tr>
         <tr><td><code>GET /events/:id/attempts</code></td><td>The attempts of an event, from the database: endpoint, replay, attempt, outcome, status, time, latency. <code>503</code> if no database is named or it cannot answer, <code>504</code> after five seconds.</td></tr>
         <tr><td><code>GET /endpoints</code></td><td>Each endpoint&rsquo;s id, port, cursor and whether it is disabled. Not the host, not the secret.</td></tr>
+        <tr><td><code>GET /endpoints/:id</code></td><td>One endpoint, as the list shows it. <code>404</code> for an unknown id, <code>400</code> for one that is not a number.</td></tr>
+        <tr><td><code>POST /endpoints</code></td><td>Create an endpoint: <code>{"host","port"}</code> and optionally <code>"secret"</code> (<code>whsec_</code> and base64; the service makes one if it is left out). Needs a database and an <code>admin-token</code> and <code>Authorization: Bearer &lt;token&gt;</code>. <code>201</code> with the id, host, port and <strong>the secret, in this answer and no other</strong>; the endpoint gets events from now on, not the log&rsquo;s past. <code>403</code> if the service has no token, <code>401</code> without the right one, <code>400</code> with a reason, <code>409</code> if another change is waiting or 62 exist, <code>503</code> if no database is named or it refused, <code>504</code> after five seconds.</td></tr>
         <tr><td><code>POST /endpoints/:id/enable</code></td><td>Enable an endpoint a <code>410</code> disabled. <code>200</code> whether or not it was disabled; <code>404</code> for an unknown id.</td></tr>
         <tr><td><code>GET /stats</code></td><td>Counters: endpoints, attempts, delivered, failed, dead, keys, replays, and four for the history.</td></tr>
         <tr><td><code>GET /config</code></td><td>The settings in force, not the endpoints or their secrets.</td></tr>
@@ -410,9 +416,10 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
       <h2 id="h-limits">What it is not (yet)</h2>
       <p class="prose">The README says &ldquo;Not for production&rdquo;. The limits below are from the README and the design document.</p>
       <ul class="prose">
-        <li><strong>No authentication.</strong> Every route can be called by anyone who can reach the port, including <code>POST /events</code> and <code>POST /endpoints/:id/enable</code>. A bearer token for the coming management routes is a design (&sect;25), not code.</li>
+        <li><strong>Almost no authentication.</strong> <code>POST /endpoints</code> needs the admin token, and the token is the only barrier: an endpoint is an address the service will <code>POST</code> to, so whoever holds it can make the service send requests to any host it can reach (no allow-list of destinations yet). Every other route, including <code>POST /events</code> and <code>POST /endpoints/:id/enable</code>, can be called by anyone who can reach the port.</li>
         <li><strong>No TLS.</strong> Delivery is a plain-HTTP <code>POST /hook</code> to a host and port; <code>https</code> endpoints are not supported.</li>
-        <li><strong>Endpoints are managed by file or table, not by API.</strong> They come from <code>endpoints.conf</code>, or from the <code>endpoints</code> table, read once at start. A change needs a restart. <code>POST /endpoints</code>, <code>PATCH</code> and <code>DELETE</code> are designed in &sect;25 and not built; only the slot and id groundwork exists.</li>
+        <li><strong>Endpoints can be created while it runs, not changed or removed.</strong> They come from <code>endpoints.conf</code>, or from the <code>endpoints</code> table read at start, and <code>POST /endpoints</code> adds one. Changing or removing one needs a restart; <code>PATCH</code> and <code>DELETE</code> are designed in &sect;25 and not built. There is no backfill: a created endpoint starts from now.</li>
+        <li><strong>A row added by hand to a long log can stall the others.</strong> A row inserted into the table (or a line added to <code>endpoints.conf</code>) starts at the beginning of the log; if its receiver is down, endpoints that are far ahead are sent nothing new until it catches up (measured: 0 of the next 10 events; &sect;25.2). Creating the endpoint with <code>POST /endpoints</code> does not do this.</li>
         <li><strong>No filtering by event type.</strong> Every event goes to every endpoint. Secrets are stored in the clear in the file or table.</li>
         <li><strong>One process, one thread, one core.</strong> Up to 64 attempts are in flight, 8 per endpoint, and at most 62 endpoints. An endpoint more than 1,024 events behind is not served until it catches up.</li>
         <li><strong>Use IP addresses.</strong> A host name is resolved by a blocking call that stalls the loop for as long as the resolver takes.</li>
