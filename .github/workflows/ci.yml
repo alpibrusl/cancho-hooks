@@ -84,6 +84,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/layout_test.py build/hooks
 
+      - name: Endpoint ids and slots (the log says which endpoint has which slot)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/slots_test.py build/hooks
+
       - name: Replay an event to one endpoint or all
         working-directory: hooks
         run: python3 tests/replay_test.py build/hooks

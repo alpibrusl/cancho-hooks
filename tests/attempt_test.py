@@ -87,7 +87,8 @@ def receiver(mode, got):
 def outcomes(path):
     data = open(path, "rb").read() if os.path.exists(path) else b""
     records, _ = chaos.read_log(data)
-    return [struct.unpack("<5q", dict(pairs)[b"o"]) for _, pairs in records]
+    # The slot records (kinds 10 and 11, written when the endpoints are first seen) are not attempts.
+    return [o for o in (struct.unpack("<5q", dict(pairs)[b"o"]) for _, pairs in records) if o[0] not in (10, 11)]
 
 
 def run(mode):
