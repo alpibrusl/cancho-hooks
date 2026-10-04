@@ -236,6 +236,13 @@ fn test_import_endpoints_is_zero_or_one() -> [] int {
         test.assert(config.import_endpoints(cfg));
         test.assert_eq(config.set(cfg, blob, "import-endpoints", "0"), 0);
         test.assert(!config.import_endpoints(cfg));
+        test.assert(!config.allow_private_hosts(cfg));
+        test.assert_eq(config.set(cfg, blob, "allow-private-hosts", "1"), 0);
+        test.assert(config.allow_private_hosts(cfg));
+        test.assert_eq(config.set(cfg, blob, "allow-private-hosts", "yes"), config.why_value());
+        test.assert(config.allow_private_hosts(cfg));
+        test.assert_eq(config.set(cfg, blob, "allow-private-hosts", "0"), 0);
+        test.assert(!config.allow_private_hosts(cfg));
     }
     return 0;
 }

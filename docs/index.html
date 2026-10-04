@@ -335,7 +335,7 @@ mkdir -p /tmp/hooks-data
 echo "0 127.0.0.1 9000 whsec_$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(24)).decode())')" \
   &gt; /tmp/hooks-data/endpoints.conf
 
-build/hooks --port 8080 --dir /tmp/hooks-data &amp;
+build/hooks --port 8080 --dir /tmp/hooks-data --allow-private-hosts 1 &amp;   # the receiver is on 127.0.0.1
 curl -XPOST -d '{"type":"user.created","id":7}' localhost:8080/events      # {"id":1}, after the flush</code></pre>
     <p class="prose">With nothing listening on port 9000 the event is stored and retried (5 s, 5 min, ...). To watch a delivery arrive, run a receiver first. This one prints the three headers and the body of every delivery and answers <code>204</code>:</p>
 <pre tabindex="0"><code>import http.server
@@ -372,7 +372,7 @@ Webhook("whsec_...").verify(body, {"webhook-id": "evt_1", "webhook-timestamp": "
         <tr><td><code>deadline-ms</code></td><td><code>2000</code></td><td>How long one delivery attempt may take</td></tr>
         <tr><td><code>window-ms</code></td><td><code>86400000</code></td><td>How long an idempotency key is remembered</td></tr>
         <tr><td><code>pg-host</code> and friends</td><td>none</td><td>A PostgreSQL for the endpoints and the attempt history</td></tr>
-        <tr><td><code>admin-token</code></td><td>none</td><td>The bearer token that lets a request create endpoints, 8 to 255 visible characters. Without it <code>POST /endpoints</code> is a <code>403</code>. Whoever has it can make the service send requests to any host it can reach: put it in the settings file, not on the command line.</td></tr>
+        <tr><td><code>admin-token</code></td><td>none</td><td>The bearer token that lets a request create endpoints, 8 to 255 visible characters. Without it <code>POST /endpoints</code> is a <code>403</code>. Whoever has it can choose where the service sends requests, within what <code>allow-private-hosts</code> allows (public addresses only, by default): put it in the settings file, not on the command line.</td></tr>
         <tr><td><code>import-endpoints</code></td><td><code>0</code></td><td><code>1</code>: copy <code>endpoints.conf</code> into the database and exit</td></tr>
       </tbody>
     </table>
@@ -416,7 +416,7 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
       <h2 id="h-limits">What it is not (yet)</h2>
       <p class="prose">The README says &ldquo;Not for production&rdquo;. The limits below are from the README and the design document.</p>
       <ul class="prose">
-        <li><strong>Almost no authentication.</strong> <code>POST /endpoints</code> needs the admin token, and the token is the only barrier: an endpoint is an address the service will <code>POST</code> to, so whoever holds it can make the service send requests to any host it can reach (no allow-list of destinations yet). Every other route, including <code>POST /events</code> and <code>POST /endpoints/:id/enable</code>, can be called by anyone who can reach the port.</li>
+        <li><strong>Almost no authentication.</strong> <code>POST /endpoints</code> needs the admin token, and the token is the only barrier: an endpoint is an address the service will <code>POST</code> to, so whoever holds it can choose where the service sends requests. By default the host must be a public IPv4 address, which keeps loopback, private, link-local (the cloud metadata address) and reserved ranges out of reach (&sect;26); there is no allow-list of particular hosts yet. Every other route, including <code>POST /events</code> and <code>POST /endpoints/:id/enable</code>, can be called by anyone who can reach the port.</li>
         <li><strong>No TLS.</strong> Delivery is a plain-HTTP <code>POST /hook</code> to a host and port; <code>https</code> endpoints are not supported.</li>
         <li><strong>Endpoints can be created while it runs, not changed or removed.</strong> They come from <code>endpoints.conf</code>, or from the <code>endpoints</code> table read at start, and <code>POST /endpoints</code> adds one. Changing or removing one needs a restart; <code>PATCH</code> and <code>DELETE</code> are designed in &sect;25 and not built. There is no backfill: a created endpoint starts from now.</li>
         <li><strong>A row added by hand starts behind, not at the start.</strong> A row inserted into the table (or a line added to <code>endpoints.conf</code>) starts at the cursor of the slowest endpoint the log knows, so it cannot stall the others (it used to start at 0, and a receiver that was down held every endpoint to a window of 1,024 events; &sect;25.3). It is sent that endpoint's backlog; <code>POST /endpoints</code> starts from now.</li>
@@ -427,7 +427,7 @@ psql hooks -c "select * from attempts where event = 41 order by endpoint, attemp
         <li><strong>The history is best effort.</strong> It can have holes. A lost database connection is not reopened until the service restarts, and the start waits while the database is silent.</li>
         <li><strong>Bounded by design.</strong> Events over about 64 KiB are refused (<code>413</code>). At most 65,536 idempotency keys, and the index does not shrink. <code>delivery.seg</code> and the events log are never compacted. There is no list of dead letters and no way to cancel a waiting replay.</li>
         <li><strong>No jitter</strong> in the retry schedule, and no secret rotation with two signatures.</li>
-        <li><strong>Wide authority where it must be.</strong> The data directory is a run-time argument and deliveries may go to any host, so the authority report is not narrowed to a path or a host. No CI step pins the report today (it is planned in &sect;6).</li>
+        <li><strong>Wide authority where it must be.</strong> The data directory is a run-time argument and deliveries may go to any public address, so the authority report is not narrowed to a path or a host. No CI step pins the report today (it is planned in &sect;6).</li>
         <li><strong>Binaries.</strong> Only the CI artifact, for Linux x86-64. Darwin is not verified.</li>
       </ul>
     </div>

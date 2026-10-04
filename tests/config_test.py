@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
 
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
-            "deadline-ms": 2000, "window-ms": 86400000}
+            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0}
     base.update(kw)
     return base
 
@@ -140,12 +140,21 @@ def stage2():
 
 
 def stage3():
-    _, _, cfg, w = serve([], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    _, _, cfg, w = serve([], None, {"endpoints.conf": f"0 8.8.8.8 9 {SECRET}\n"})
     body = json.dumps(cfg)
     shutil.rmtree(w)
     check("3. nothing else set: the defaults", cfg == settings(), str(cfg))
     check("3. the endpoints file is not a setting: its secret and host are not in /config",
-          SECRET not in body and "127.0.0.1" not in body, body)
+          SECRET not in body and "8.8.8.8" not in body, body)
+    _, _, cfg, w = serve(["--allow-private-hosts", "1"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    shutil.rmtree(w)
+    check("3. allow-private-hosts 1 is a setting, read back", cfg == settings(**{"allow-private-hosts": 1}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nallow-private-hosts = 1\n")
+    shutil.rmtree(w)
+    check("3. ... from a file too", cfg == settings(**{"allow-private-hosts": 1}), str(cfg))
+    code, line, _, w = serve(["--allow-private-hosts", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    shutil.rmtree(w)
+    check("3. a private host in the file with the default is refused before the service listens (status 13)", code == 13 and line != "listening", str((code, line)))
 
 
 def refused(name, args, files=None, expect=(), absent=()):
@@ -181,6 +190,7 @@ def stage4():
             expect=["line 1", "key = value"])
     refused("a file of 16 KiB or more", ["--config", "@/hooks.conf"], {"hooks.conf": "# " + "x" * 16384 + "\n"},
             expect=["16 KiB"])
+    refused("allow-private-hosts that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--allow-private-hosts", "yes"], expect=["`--allow-private-hosts` has a value"])
     refused("a bad flag after a good file", ["--config", "@/hooks.conf", "--port", "0"],
             {"hooks.conf": "dir = /tmp\nport = 5\n"}, expect=["`--port` has a value"])
 

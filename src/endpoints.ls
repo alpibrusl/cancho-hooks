@@ -2,6 +2,7 @@ edition 5;
 
 module endpoints;
 
+import destination;
 import sign;
 import state;
 
@@ -72,9 +73,9 @@ pub fn number[&t](text: &t [byte], from: int, to: int) -> [] int {
 }
 
 // Parse the file. Answers the number of endpoints, or `0 - line` (the 1-based line number, negated) of the first line that is
-// wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a secret that
-// is not base64, or more than `state.max_endpoints()` endpoints.
-pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) -> [] int {
+// wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a host that is not a public IPv4 address (unless `open`: section 26), a secret that
+// is not base64, a host that is not a public IPv4 address (unless `open`: `destination.ls`), or more than `state.max_endpoints()` endpoints.
+pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], open: bool) -> [] int {
     var count = 0;
     var line = 0;
     var at = 0;
@@ -97,6 +98,9 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) ->
             let id = number(text, first.0, first.1);
             let p = number(text, port.0, port.1);
             if id < 0 || p < 1 || p > 65535 || count >= state.max_endpoints() {
+                return 0 - line;
+            }
+            if !open && !destination.allowed(text[host.0..host.1]) {
                 return 0 - line;
             }
             var i = 0;

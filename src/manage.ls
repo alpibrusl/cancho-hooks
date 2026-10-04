@@ -2,6 +2,7 @@ edition 5;
 
 module manage;
 
+import destination;
 import std.buffer;
 import std.http;
 import std.json;
@@ -151,6 +152,9 @@ pub fn why(code: int) -> [] &static [byte] {
     if code == 5 {
         return "a new endpoint starts from now: \"from\" may only be \"now\"";
     }
+    if code == 6 {
+        return "the host must be a public IPv4 address (four numbers, no name; loopback, private, link-local and reserved ranges are refused: SSRF)";
+    }
     return "the request is not valid";
 }
 
@@ -170,7 +174,7 @@ fn printable[&t](text: &t [byte]) -> [] bool {
 // Answers `(code, port, host length, secret length)`: code 0 if the request is good, else what `why` says. Other members are ignored.
 // `scratch` is at least 400 bytes. The secret is judged by the rule that judges a line of `endpoints.conf`: it must decode as base64
 // (`sign.secret_key` is the caller's check; here only its length and characters are).
-pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], mg: &!m [int]) -> [heap] (int, int, int, int) {
+pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], mg: &!m [int], open: bool) -> [heap] (int, int, int, int) {
     var code = 0;
     var port = 0;
     var host_len = 0;
@@ -188,6 +192,8 @@ pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!
                 host_len = json.string_into(body, t, host, scratch[0..253]);
                 if host_len < 1 || !printable(scratch[0..host_len]) {
                     code = 2;
+                } else if !open && !destination.allowed(scratch[0..host_len]) {
+                    code = 6;
                 }
             }
             if code == 0 {

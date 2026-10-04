@@ -145,7 +145,7 @@ def start_service(endpoints, pg_port, schedule="100", deadline=800, extra_flags=
         for i, port in enumerate(endpoints):
             psql(f"insert into endpoints values ({i}, '127.0.0.1', {port}, '{secret}')")
     port = chaos.free_port()
-    flags = [BIN, "--port", str(port), "--dir", datadir, "--schedule", schedule, "--deadline-ms", str(deadline)]
+    flags = [BIN, "--port", str(port), "--dir", datadir, "--allow-private-hosts", "1", "--schedule", schedule, "--deadline-ms", str(deadline)]
     if pg_flags is True:
         flags += ["--pg-host", PG_HOST, "--pg-port", str(pg_port), "--pg-user", PG_USER, "--pg-database", PG_DB]
         if PG_PASSWORD:
