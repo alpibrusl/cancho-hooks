@@ -25,6 +25,10 @@ here restarts or stops the server.
  11. a table whose answer does not fit the pool's 128 KiB slab ends the start with status 20, `too large`, instead of asking again for ever
  12. the read of the table takes a while (a view that sleeps): in the meantime /readyz is 503 and the routes about endpoints are 503 although a connection is live;
      and a connection lost in the middle of the read is asked again, and the endpoints load
+ 13. (with HOOKS_PG_PASSWORD, i.e. a server that wants SCRAM-SHA-256) the logins of the reconnects are SCRAM: backends ended six times in a row, the
+     longest wait of a probe on /healthz, no attempt failed; a wrong password at the start is refused at once, status 20, `cannot log in`
+ 14. (with HOOKS_PG_STOP and HOOKS_PG_START, shell commands that stop and start the server under test) a server that really goes away and comes back: events
+     flowing, every one delivered once, ready again with no restart, the history accounted. Never run against a server that others use
 """
 import atexit
 import http.client
@@ -742,8 +746,90 @@ def stage12():
         shutil.rmtree(svc.dir, ignore_errors=True)
 
 
+# ---- 13 ---------------------------------------------------------------------------------------------------------------
+
+def stage13():
+    print("== 13. SCRAM-SHA-256 logins", flush=True)
+    if not L.PG_PASSWORD:
+        print("skipped 13: the server under test must want a password (HOOKS_PG_PASSWORD)")
+        return
+    peer = L.Peer("ok")
+    reset([(0, peer.port)])
+    proxy = PgProxy(L.PG_HOST, int(L.PG_PORT))
+    svc = make(proxy)
+    check("13. the service logs in with SCRAM-SHA-256 and has read its endpoints", svc.start() and ready(svc), svc.stderr())
+    sender = Sender(svc, 60)
+    sender.start()
+    probe = Probe(svc)
+    probe.start()
+    time.sleep(1.5)
+    worst = []
+    for _ in range(6):
+        proxy.kill_backends(L.psql)
+        probe.phase("quiet")
+        time.sleep(1.2)
+        worst.append(probe.marks["quiet"])
+    sender.go = False
+    probe.go = False
+    probe.join(3)
+    sender.join(3)
+    s = svc.stats()
+    print(f"INFO 13. the longest wait for /healthz in the 1.2 s after each of six backends ended (SCRAM logins), ms: {worst}; {probe.n} probes, load average {os.getloadavg()[0]:.1f}", flush=True)
+    check("13. six times both backends ended: replaced each time by a SCRAM login, none failed (%d losses, %d reconnects, %d failed attempts)" % (s["database_losses"], s["database_reconnects"], s["database_failures"]),
+          s["database_losses"] >= 12 and s["database_reconnects"] >= 12 and s["database_failures"] == 0 and ready(svc), str(s))
+    check("13. ... the loop never stalled while keys were derived: the longest wait for /healthz was %d ms (limit 250)" % max(worst), max(worst) < 250, str(worst))
+    check("13. ... and nothing was lost or repeated", L.wait_for(lambda: peer.distinct() >= set(sender.ids), 20) and peer.count() == len(set(peer.events())), str((len(sender.ids), peer.count())))
+    svc.stop()
+    proxy.close()
+    peer.close()
+    shutil.rmtree(svc.dir, ignore_errors=True)
+    t = time.time()
+    bad = L.Service(BIN, L.free_dir("hooks-pgre-"), ["--schedule", "200", "--pg-host", L.PG_HOST, "--pg-port", str(L.PG_PORT), "--pg-user", L.PG_USER, "--pg-database", L.PG_DB,
+                                                     "--pg-password", L.PG_PASSWORD + "-wrong", "--pg-start-wait-ms", "60000"])
+    CLEAN.append(bad)
+    bad.start(timeout=10)
+    code = bad.wait_exit(10)
+    check("13. a wrong password at the start: status 20, `cannot log in`, at once (not after pg-start-wait-ms)", code == 20 and bad.has_line("cannot log in") and time.time() - t < 5, f"{code} {bad.stderr()}")
+    shutil.rmtree(bad.dir, ignore_errors=True)
+
+
+# ---- 14 ---------------------------------------------------------------------------------------------------------------
+
+def stage14():
+    print("== 14. a server that really goes away", flush=True)
+    stop_cmd, start_cmd = os.environ.get("HOOKS_PG_STOP"), os.environ.get("HOOKS_PG_START")
+    if not (stop_cmd and start_cmd):
+        print("skipped 14: HOOKS_PG_STOP and HOOKS_PG_START (shell commands for a server that is the test's own) are not set")
+        return
+    peer = L.Peer("ok")
+    reset([(0, peer.port)])
+    svc = make(None)
+    svc.start()
+    sender = Sender(svc, 60)
+    sender.start()
+    time.sleep(1.5)
+    subprocess.run(stop_cmd, shell=True, check=True, capture_output=True)
+    check("14. the server is stopped: /readyz is 503 within a second or two", timed_readyz(svc, 503, 10) is not None)
+    time.sleep(4.0)
+    check("14. ... still serving after four seconds without a database: /healthz 200, events taken", svc.get("/healthz")[0] == 200 and sender.refused == 0 and svc.alive())
+    subprocess.run(start_cmd, shell=True, check=True, capture_output=True)
+    back = timed_readyz(svc, 200, 40)
+    check("14. the server is started again: /readyz is 200 with no restart of the service (%s s)" % back, back is not None)
+    time.sleep(1.5)
+    sender.go = False
+    sender.join(5)
+    ids = list(sender.ids)
+    check("14. every event taken (%d) is delivered, once" % len(ids), L.wait_for(lambda: peer.distinct() >= set(ids), 20) and peer.count() == len(set(peer.events())) == len(ids), f"{len(ids)} {peer.count()}")
+    ok = L.wait_for(lambda: svc.stats()["history_queue"] == 0 and accounted(svc)[0] == accounted(svc)[1], 20)
+    attempts, placed, st = accounted(svc)
+    check("14. the history is accounted: %d = %d written + %d failed + %d dropped" % (attempts, st["history_written"], st["history_failed"], st["history_dropped"]), ok and attempts == placed, str(st))
+    svc.stop()
+    peer.close()
+    shutil.rmtree(svc.dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    stages = {"1": stage1, "2": stage2, "3": stage3, "4": stage4, "5": stage5, "6": stage6, "7": stage7, "8": stage8, "9": stage9, "10": stage10, "11": stage11, "12": stage12}
+    stages = {"1": stage1, "2": stage2, "3": stage3, "4": stage4, "5": stage5, "6": stage6, "7": stage7, "8": stage8, "9": stage9, "10": stage10, "11": stage11, "12": stage12, "13": stage13, "14": stage14}
     for name, fn in stages.items():
         if not STAGES or name in STAGES:
             fn()
