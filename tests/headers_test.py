@@ -101,7 +101,7 @@ def main():
     check("1. the library verifies the signature of a request that carries headers", verifies(r0, sec) and verifies(r1, sec))
     check("1. the retry is the same message (webhook-id) with its own timestamp and signature", dict(r0["headers"])["webhook-id"] == dict(r1["headers"])["webhook-id"])
     n0 = rc.count()
-    st, out = req(svc, "POST", f"/events/1/replay/{ident}", token=None)
+    st, out = req(svc, "POST", f"/events/1/replay/{ident}")
     check("1. a replay carries them", st == 202 and wait_for(lambda: rc.count() == n0 + 1, 5) and {k: v for k, v in custom(last(rc))} == hdrs, str(custom(last(rc))))
     st, out = req(svc, "POST", "/endpoints", {"host": "127.0.0.1", "port": rc.port, "headers": hdrs}, token=None)
     check("1. the token is needed to set headers", st == 401, str((st, out)))

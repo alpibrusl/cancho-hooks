@@ -10,7 +10,10 @@ being CRC-32C over everything after `len`. The reader is the one `tests/chaos.py
 
 What is checked, and why each one matters to a restore:
 
-  * events.seg: every record's CRC, ids dense from 1 (the service numbers events 1, 2, 3 ... and `GET /events/:id` relies on it).
+  * events.seg: every record's CRC, ids dense from 1 (the service numbers events 1, 2, 3 ... and `GET /events/:id` relies on it), and every
+    record one of the four shapes the service writes and reads (docs/design.md section 35.1): the pairs `event`; `event`, `typ` (the event's
+    type, when it has one); `event`, `key`, `t` (an idempotency key); or `event`, `typ`, `key`, `t`. A log from before event types has only
+    the first and the third. Any other shape is one the service refuses to start on (status 16).
   * delivery.seg: every record is a well-formed outcome of a known kind (1 to 14).
   * **delivery.seg must not refer to an event that events.seg does not hold.** A service started on such a pair acknowledged new events
     under ids it already believed delivered, and never delivered them (measured: docs/runbook.md, "Backup"). The service refuses such a
@@ -186,8 +189,20 @@ def check(directory):
         if tail["kind"] == "damage":
             problems.append(f"events.seg: damage in the middle: {torn} bytes after the last valid record (byte {end}) are not a torn tail"
                             f" ({tail['found_records']} intact records start at byte {tail['found_at']}): the service refuses to start on it")
+        shapes = {"event": 0, "event,typ": 0, "event,key,t": 0, "event,typ,key,t": 0}
+        odd = 0
+        for _id, pairs in recs:
+            shape = ",".join(k.decode("latin-1") for k, _v in pairs)
+            if shape in shapes:
+                shapes[shape] += 1
+            else:
+                odd += 1
+        if odd:
+            problems.append(f"events.seg: {odd} record(s) are not of a shape this version writes (event, typ, key, t: the pairs `event`, then `typ` if typed, "
+                            "then `key` and `t` if keyed): the service refuses to start on it (status 16)")
         last_event = len(ids)
-        report["events"] = {"bytes": len(ev), "valid_bytes": end, "torn_bytes": torn, "records": len(ids), "last_id": ids[-1] if ids else 0}
+        report["events"] = {"bytes": len(ev), "valid_bytes": end, "torn_bytes": torn, "records": len(ids), "last_id": ids[-1] if ids else 0,
+                            "typed": shapes["event,typ"] + shapes["event,typ,key,t"]}
     if dl is None:
         # a service that never delivered has no delivery.seg; one that has endpoints and events has one by its first turn
         report["delivery"] = {"bytes": 0, "valid_bytes": 0, "torn_bytes": 0, "records": 0, "max_event_ref": 0, "missing": True}

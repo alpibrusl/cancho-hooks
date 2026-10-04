@@ -286,7 +286,7 @@ def main():
     post_event(svc, 1)
     check("9. an event is sent to both: two signatures at one, one at the other", wait_for(lambda: rc.count() == 2, 5) and sorted(len(sigs(r)) for r in rc.seen) == [1, 2], str([sigs(r) for r in rc.seen]))
     n0 = rc.count()
-    st, out = req(svc, "POST", "/events/1/replay/1", token=None)
+    st, out = req(svc, "POST", "/events/1/replay/1")
     check("9. a replay in the period carries both signatures", st == 202 and wait_for(lambda: rc.count() == n0 + 1, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s1) and verifies(last(rc), s2), str([sigs(r) for r in rc.seen]))
     stop(svc)
     shutil.rmtree(d)

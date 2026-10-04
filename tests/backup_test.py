@@ -456,6 +456,10 @@ def stage_b():
     check(f"5. all {len(backups)} backups hold every event acknowledged before they began, byte for byte, and no torn tail",
           not lost and not wrong, f"lost {lost[:3]} wrong {wrong[:3]}")
     check("5. in none of them does delivery.seg refer to an event events.seg lacks", ahead == 0, str(ahead))
+    # every event of this test has a type, so every record has the `typ` pair (design section 35.1): logcheck knows the shape and counts them
+    last_report = json.loads(run(["python3", LOGCHECK, "check", backups[-1][0]]).stdout)["events"]
+    check("5. logcheck reads the typed records of a backup: every record has its type, and none is a shape it does not know",
+          last_report["records"] > 0 and last_report["typed"] == last_report["records"], str(last_report))
     print(f"   {overlapped} backups overlapped a kill; {torn_cut} bytes of torn tail were cut from copies taken mid-write", flush=True)
 
     # 6. restore a sample and start it
