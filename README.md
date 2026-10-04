@@ -17,7 +17,8 @@ rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the 
 ## Requirements
 
 - The **lex-sys** compiler at the commit `lex-sys.toml` names (`[package] lex-sys`); `lex-sys build` refuses any other. It needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190),
-  `tcp_connect_start` (attempts that do not wait; #191), a lock with an origin (#192) and the project file (#193).
+  `tcp_connect_start` (attempts that do not wait; #191), a lock with an origin (#192), the project file (#193), and `std.hmac`, which signs
+  every delivery and replaced this repository's own HMAC (#229; [`docs/design.md`](docs/design.md) section 30).
 - `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are dependencies in `lex-sys.toml`, pinned to a commit each, and `lex-sys build` fetches and checks them.
 - Rust, to build the compiler; `gcc`, to build the small `fsync` shim the crash tests use.
 - To run the tests: `python3` and `pip install standardwebhooks` (the independent implementation signatures are checked against).
