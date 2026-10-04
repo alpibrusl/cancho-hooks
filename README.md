@@ -6,9 +6,9 @@ A webhook delivery service, written in [lex-sys](https://github.com/alpibrusl/le
 event durably, and it delivers the event, **signed**, to every subscribed endpoint, **at least once**, retrying on a schedule
 and keeping what it could not deliver as a dead letter.
 
-It is also the realistic program that uses the whole stack ([`lexsys-log`](https://github.com/alpibrusl/lexsys-log) today;
-`lexsys-web`, `lexsys-schema`, `lexsys-pg` and `lexsys-cache` as it grows) so that what is missing shows up as a failing test
-rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the program can do.
+It keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and talks to PostgreSQL through
+[`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `Ffi`, no `unsafe`: the authority report (`lex-sys authority`) names what
+the program can do.
 
 ## Status
 
