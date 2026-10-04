@@ -9,16 +9,16 @@ insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, 
 select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200
 
 -- name: endpoints_all
-select id, host, port, secret from endpoints order by id
+select id, host, port, secret, types, headers, secret_old, secret_old_until from endpoints order by id
 
--- name: add_endpoint id host port secret
-insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing
+-- name: add_endpoint id host port secret types headers secret_old secret_old_until
+insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until) values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing
 
--- name: create_endpoint host port secret
-insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id
+-- name: create_endpoint host port secret types headers
+insert into endpoints (id, host, port, secret, types, headers) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text returning id
 
--- name: patch_endpoint id host port secret
-update endpoints set host = $2::text, port = $3::int, secret = $4::text where id = $1::int returning id
+-- name: patch_endpoint id host port secret? types? headers? keep_until?
+update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers) where id = $1::int returning id
 
 -- name: patch_address id host port
 update endpoints set host = $2::text, port = $3::int where id = $1::int returning id

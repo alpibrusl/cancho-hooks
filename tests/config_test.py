@@ -37,7 +37,7 @@ def check(name, ok, detail=""):
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
             "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
-            "stop-deadline-ms": 5000, "repair-logs": 0}
+            "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000}
     base.update(kw)
     return base
 

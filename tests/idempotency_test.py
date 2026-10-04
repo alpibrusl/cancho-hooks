@@ -153,15 +153,15 @@ def stage_contract():
     check(raw(r.port, event(1), None, ["idempotency-key: k-1"]) == a1, "the header name is case-insensitive")
     check(raw(r.port, event(1), None, ["IDEMPOTENCY-KEY:   k-1  "]) == a1, "spaces around the value are not part of the key")
 
-    # The record: event first (delivery and GET read the first pair), then the key, then the time.
+    # The record: event first (delivery and GET read the first pair), then the type (design section 35), then the key, then the time.
     recs = records(r.datadir)
     first = recs[0][1]
-    check([k for k, _ in first] == [b"event", b"key", b"t"], f"a keyed record is event, key, t; got {[k for k, _ in first]}")
+    check([k for k, _ in first] == [b"event", b"typ", b"key", b"t"], f"a keyed record is event, typ, key, t; got {[k for k, _ in first]}")
     check(dict(first)[b"key"] == b"k-1" and dict(first)[b"event"] == event(1), "the record holds the key and the event as sent")
     t = struct.unpack("<Q", dict(first)[b"t"])[0]
     check(abs(t - time.time() * 1000) < 60000, "the record's time is the Unix time in ms")
     unkeyed = [pairs for ms, pairs in recs if ms == id_of(u1)][0]
-    check([k for k, _ in unkeyed] == [b"event"], "an unkeyed record is the event alone")
+    check([k for k, _ in unkeyed] == [b"event", b"typ"], "an unkeyed record is the event and its type")
     st, body = get(r.port, "/events/1")
     check(st == 200 and json.loads(body)["event"]["n"] == 1, "GET /events/1 still reads a keyed event")
     r.close()

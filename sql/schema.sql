@@ -40,8 +40,22 @@ create table if not exists endpoints (
     id integer primary key check (id between 0 and 999999),
     host text not null,
     port int not null check (port between 1 and 65535),
-    secret text not null
+    secret text not null,
+    types text not null default '',
+    headers text not null default '',
+    secret_old text not null default '',
+    secret_old_until bigint not null default 0
 );
+
+-- What a delivery needs beyond an address (docs/design.md section 35). `types` is the event types the endpoint subscribes to, comma separated
+-- (`invoice.paid,user.*`; empty: all events). `headers` is the custom headers every attempt carries, `Name:value` pairs separated by commas, a
+-- value percent-encoded (a space is `%20`, a comma `%2C`, a percent `%25`): the table holds credentials, so it is a secret like `secret`.
+-- `secret_old` is the previous secret while a rotation overlaps (empty when none) and `secret_old_until` the Unix ms after which it is no longer
+-- signed with (0 when none). A table made before these columns existed is given them, with their defaults, by the statements below.
+alter table endpoints add column if not exists types text not null default '';
+alter table endpoints add column if not exists headers text not null default '';
+alter table endpoints add column if not exists secret_old text not null default '';
+alter table endpoints add column if not exists secret_old_until bigint not null default 0;
 
 -- The ids `POST /endpoints` gives (docs/design.md section 25.2): a sequence, so that an id is never given twice even after its endpoint is
 -- deleted. An id somebody inserted by hand is skipped: the new id is the larger of the sequence and one more than the largest in the table.

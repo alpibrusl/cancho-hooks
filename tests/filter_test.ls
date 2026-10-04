@@ -1,0 +1,211 @@
+edition 5;
+
+import std.test;
+import record;
+import filter;
+
+// Which events an endpoint is sent (`src/filter.ls`, docs/design.md section 35): what a pattern and a list may be, what a list accepts, and how the
+// type of an event is found in its record.
+
+fn good(p: &static [byte]) -> [] int {
+    return filter.check_pattern(p);
+}
+
+fn test_good_patterns() -> [] int {
+    test.assert_eq(good("invoice.paid"), 0);
+    test.assert_eq(good("a"), 0);
+    test.assert_eq(good("*"), 0);
+    test.assert_eq(good("user.*"), 0);
+    test.assert_eq(good("a.b.c.*"), 0);
+    test.assert_eq(good("orders/create"), 0);
+    test.assert_eq(good("x:y_z-1"), 0);
+    return 0;
+}
+
+fn test_bad_patterns_each_with_its_own_reason() -> [] int {
+    test.assert_eq(good(""), filter.empty_item());
+    test.assert_eq(good("a b"), filter.bad_byte());
+    test.assert_eq(good("a,b"), filter.bad_byte());
+    test.assert_eq(good("tab\there"), filter.bad_byte());
+    // A star is the whole pattern, or `.*` at the end after at least one character.
+    test.assert_eq(good("a*"), filter.bad_star());
+    test.assert_eq(good("*a"), filter.bad_star());
+    test.assert_eq(good("a*b"), filter.bad_star());
+    test.assert_eq(good(".*"), filter.bad_star());
+    test.assert_eq(good("user.**"), filter.bad_star());
+    test.assert_eq(good("*.*"), filter.bad_star());
+    test.assert_eq(good("user.*x"), filter.bad_star());
+    test.assert_eq(good("user*"), filter.bad_star());
+    return 0;
+}
+
+fn test_a_pattern_is_at_most_128_bytes() -> [] int {
+    region a {
+        let p = alloc_slice[a](130, byte_of('x'));
+        test.assert_eq(filter.check_pattern(p[0..128]), 0);
+        test.assert_eq(filter.check_pattern(p[0..129]), filter.long_item());
+        p[126] = byte_of('.');
+        p[127] = byte_of('*');
+        test.assert_eq(filter.check_pattern(p[0..128]), 0);
+    }
+    return 0;
+}
+
+fn test_lists() -> [] int {
+    test.assert_eq(filter.check_list(""), 0);
+    test.assert_eq(filter.check_list("a"), 0);
+    test.assert_eq(filter.check_list("a,b.*,*"), 0);
+    test.assert_eq(filter.check_list("a,,b"), filter.empty_item());
+    test.assert_eq(filter.check_list("a,"), filter.empty_item());
+    test.assert_eq(filter.check_list(",a"), filter.empty_item());
+    test.assert_eq(filter.check_list("a,b c"), filter.bad_byte());
+    test.assert_eq(filter.check_list("a,b*"), filter.bad_star());
+    // Sixteen patterns, not seventeen.
+    test.assert_eq(filter.check_list("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p"), 0);
+    test.assert_eq(filter.check_list("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q"), filter.too_many());
+    return 0;
+}
+
+fn test_a_list_is_at_most_512_bytes() -> [] int {
+    region a {
+        // 8 patterns of 63 bytes and a comma each is 511 bytes with the last comma missing; 512 is the limit.
+        let l = alloc_slice[a](600, byte_of('x'));
+        var i = 63;
+        while i < 600 {
+            l[i] = byte_of(',');
+            i = i + 64;
+        }
+        test.assert_eq(filter.check_list(l[0..511]), 0);
+        test.assert_eq(filter.check_list(l[0..512]), filter.empty_item());
+        let m = alloc_slice[a](600, byte_of('y'));
+        test.assert_eq(filter.check_list(m[0..129]), filter.long_item());
+        test.assert_eq(filter.check_list(m[0..513]), filter.long_list());
+        var j = 100;
+        while j < 600 {
+            m[j] = byte_of(',');
+            j = j + 100;
+        }
+        test.assert_eq(filter.check_list(m[0..513]), filter.long_list());
+        test.assert_eq(filter.check_list(m[0..512]), 0);
+    }
+    return 0;
+}
+
+fn accepts[&l, &t](list: &l [byte], typ: &t [byte]) -> [] bool {
+    region a {
+        let ints = alloc_slice[a](len(list) + 1, 0);
+        var i = 0;
+        while i < len(list) {
+            ints[i] = int_of(list[i]);
+            i = i + 1;
+        }
+        return filter.accepts(ints[0..len(list)], len(list), typ);
+    }
+}
+
+fn test_the_empty_subscription_wants_everything() -> [] int {
+    test.assert(accepts("", "invoice.paid"));
+    test.assert(accepts("", ""));
+    return 0;
+}
+
+fn test_an_exact_pattern_is_byte_for_byte() -> [] int {
+    test.assert(accepts("invoice.paid", "invoice.paid"));
+    test.assert(!accepts("invoice.paid", "invoice.paid2"));
+    test.assert(!accepts("invoice.paid", "invoice.pai"));
+    test.assert(!accepts("invoice.paid", "Invoice.paid"));
+    test.assert(!accepts("invoice.paid", "invoice.created"));
+    test.assert(!accepts("invoice.paid", ""));
+    return 0;
+}
+
+fn test_a_prefix_pattern_wants_what_begins_with_the_prefix_and_the_dot() -> [] int {
+    test.assert(accepts("user.*", "user.created"));
+    test.assert(accepts("user.*", "user.address.changed"));
+    test.assert(accepts("user.*", "user."));
+    test.assert(!accepts("user.*", "user"));
+    test.assert(!accepts("user.*", "users.created"));
+    test.assert(!accepts("user.*", "usr.created"));
+    test.assert(!accepts("user.*", "xuser.created"));
+    test.assert(!accepts("user.*", "User.created"));
+    test.assert(!accepts("user.*", ""));
+    // a type shorter than the prefix
+    test.assert(!accepts("user.*", "us"));
+    return 0;
+}
+
+fn test_a_star_wants_everything_an_event_with_no_type_too() -> [] int {
+    test.assert(accepts("*", "anything"));
+    test.assert(accepts("*", ""));
+    test.assert(accepts("a,*", ""));
+    return 0;
+}
+
+fn test_a_list_wants_what_any_pattern_wants() -> [] int {
+    test.assert(accepts("order.created,user.*,ping", "user.deleted"));
+    test.assert(accepts("order.created,user.*,ping", "ping"));
+    test.assert(accepts("order.created,user.*,ping", "order.created"));
+    test.assert(!accepts("order.created,user.*,ping", "order.deleted"));
+    test.assert(!accepts("order.created,user.*,ping", "pin"));
+    test.assert(!accepts("order.created,user.*,ping", ""));
+    return 0;
+}
+
+fn test_a_type_is_stored_only_if_it_is_one() -> [] int {
+    test.assert_eq(filter.storable("a"), 1);
+    test.assert_eq(filter.storable("invoice.paid"), 12);
+    test.assert_eq(filter.storable(""), 0);
+    test.assert_eq(filter.storable("has space and é"), 16);
+    test.assert_eq(filter.storable("bad\nline"), 0);
+    test.assert_eq(filter.storable("bad\ttab"), 0);
+    region a {
+        let p = alloc_slice[a](200, byte_of('x'));
+        test.assert_eq(filter.storable(p[0..128]), 128);
+        test.assert_eq(filter.storable(p[0..129]), 0);
+    }
+    return 0;
+}
+
+// The record of event 7 with the pairs named, in `buf`.
+fn record_of[&o](buf: &!o [byte], typed: bool, keyed: bool) -> [] int {
+    var fields = 1;
+    if typed {
+        fields = fields + 1;
+    }
+    if keyed {
+        fields = fields + 2;
+    }
+    let p = record.begin(buf, 0, 7, 0, fields);
+    var end = record.put_pair(buf, p, "event", "{\"type\":\"x\"}");
+    if typed {
+        end = record.put_pair(buf, end, "typ", "invoice.paid");
+    }
+    if keyed {
+        end = record.put_pair(buf, end, "key", "k-1");
+        end = record.put_pair(buf, end, "t", "12345678");
+    }
+    return record.seal(buf, 0, end);
+}
+
+fn test_the_type_is_found_in_the_record() -> [] int {
+    region a {
+        let buf = alloc_slice[a](512, byte_of(0));
+        // typed, unkeyed: event, typ
+        record_of(buf, true, false);
+        let t = filter.type_in(buf);
+        test.assert_eq(t.1, 12);
+        test.assert_eq(int_of(buf[t.0]), int_of(byte_of('i')));
+        test.assert_eq(int_of(buf[t.0 + 11]), int_of(byte_of('d')));
+        // typed and keyed: event, typ, key, t
+        record_of(buf, true, true);
+        let k = filter.type_in(buf);
+        test.assert_eq(k.1, 12);
+        test.assert_eq(int_of(buf[k.0]), int_of(byte_of('i')));
+        // a record from before the type existed: event alone, or event, key, t
+        record_of(buf, false, false);
+        test.assert_eq(filter.type_in(buf).1, 0);
+        record_of(buf, false, true);
+        test.assert_eq(filter.type_in(buf).1, 0);
+    }
+    return 0;
+}

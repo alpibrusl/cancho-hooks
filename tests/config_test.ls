@@ -478,3 +478,27 @@ fn test_stop_deadline_and_repair_logs() -> [] int {
     }
     return 0;
 }
+
+// `rotation-grace-ms` (`docs/design.md` section 35): a day unless set, 1 ms to 30 days, and a refusal changes nothing.
+fn test_rotation_grace_default_and_limits() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.rotation_grace_ms(cfg), 86400000);
+        test.assert_eq(config.set(cfg, blob, "rotation-grace-ms", "1"), 0);
+        test.assert_eq(config.rotation_grace_ms(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "rotation-grace-ms", "2592000000"), 0);
+        test.assert_eq(config.rotation_grace_ms(cfg), 2592000000);
+        test.assert_eq(config.set(cfg, blob, "rotation-grace-ms", "3600000"), 0);
+        test.assert(config.set(cfg, blob, "rotation-grace-ms", "0") != 0);
+        test.assert(config.set(cfg, blob, "rotation-grace-ms", "2592000001") != 0);
+        test.assert(config.set(cfg, blob, "rotation-grace-ms", "-1") != 0);
+        test.assert(config.set(cfg, blob, "rotation-grace-ms", "a day") != 0);
+        test.assert(config.set(cfg, blob, "rotation-grace-ms", "") != 0);
+        test.assert_eq(config.rotation_grace_ms(cfg), 3600000);
+        test.assert_eq(config.parse_file("rotation-grace-ms = 5000\n", cfg, blob), 0);
+        test.assert_eq(config.rotation_grace_ms(cfg), 5000);
+    }
+    return 0;
+}

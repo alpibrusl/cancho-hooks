@@ -4,6 +4,7 @@ import std.test;
 import sign;
 import state;
 import endpoints;
+import epx;
 
 // The endpoints file (`src/endpoints.ls`): what a good file gives, and that every kind of bad line is refused with its line.
 
@@ -295,5 +296,67 @@ fn test_after_remove_the_freed_room_is_used_by_append_and_the_survivors_are_inta
         test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[0]), int_of(byte_of('6')));
         test.assert_eq(int_of(endpoints.key_of(table, blob, 0)[7]), int_of(byte_of('k')));
     }
+    return 0;
+}
+
+// The optional words after the secret (`docs/design.md` section 35): a subscription, custom headers, a previous secret.
+
+fn test_the_optional_words_are_kept_beside_the_endpoint() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        // the previous secret is base64("secret!!"); words in any order
+        let text = "1 8.8.8.8 9001 c2VjcmV0ISE= old=c2VjcmV0ISE=@1700000000000 headers=Authorization:Bearer%20abc,X-Key:k types=user.*,ping\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
+        test.assert_eq(endpoints.parse_x(text, table, blob, true, xt), 2);
+        test.assert_eq(epx.types_len(xt, 0), 11);
+        test.assert(epx.accepts(xt, 0, "user.created"));
+        test.assert(epx.accepts(xt, 0, "ping"));
+        test.assert(!epx.accepts(xt, 0, "order.created"));
+        // "Authorization: Bearer abc\r\nX-Key: k\r\n"
+        test.assert_eq(epx.wire_len(xt, 0), 27 + 10);
+        test.assert_eq(epx.wire_byte(xt, 0, 15), int_of(byte_of('B')));
+        test.assert_eq(epx.wire_byte(xt, 0, 21), int_of(byte_of(' ')));
+        test.assert_eq(epx.old_len(xt, 0), 8);
+        test.assert_eq(epx.old_until(xt, 0), 1700000000000);
+        test.assert_eq(epx.old_byte(xt, 0, 0), int_of(byte_of('s')));
+        // the key and the host of the line are what they were without the words
+        test.assert_eq(len(endpoints.key_of(table, blob, 0)), 8);
+        test.assert_eq(len(endpoints.host_of(table, blob, 0)), 7);
+        test.assert_eq(endpoints.port_of(table, 0), 9001);
+        // the line without words has none
+        test.assert_eq(epx.types_len(xt, 1), 0);
+        test.assert_eq(epx.wire_len(xt, 1), 0);
+        test.assert_eq(epx.old_len(xt, 1), 0);
+        test.assert(epx.accepts(xt, 1, "anything"));
+        test.assert_eq(endpoints.port_of(table, 1), 9002);
+        // `parse`, with nowhere to keep them, judges the same text and keeps nothing
+        test.assert_eq(endpoints.parse(text, table, blob, true), 2);
+    }
+    return 0;
+}
+
+fn test_a_bad_optional_word_refuses_the_line() -> [] int {
+    // the good line first, so the number is the bad one's
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= types=a,,b\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= types=a*\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= headers=Host:x\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= headers=A:x%0d%0aB:y\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= headers=A\n"), 0 - 2);
+    // a word that is none of them, or one of them twice
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= tag=x\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= types=a types=b\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= headers=A:b headers=C:d\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= types\n"), 0 - 1);
+    // the previous secret: needs the secret, an '@' and a time, and the secret must be base64
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@12x\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@0\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=@100\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=not*base64@100\n"), 0 - 1);
+    // and the good ones
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= types=*\n"), 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@100\n"), 1);
     return 0;
 }

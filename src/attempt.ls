@@ -23,8 +23,10 @@ pub fn slots() -> [] int {
     return 64;
 }
 
+// The most bytes of request a slot holds: the largest event (65,487 bytes with the shortest type), the headers the delivery sets (about 300), a second
+// signature (52) and the largest custom headers (2,048, `hdrs.max_wire()`), with room over.
 pub fn req_max() -> [] int {
-    return 66560;
+    return 70656;
 }
 
 pub fn resp_max() -> [] int {
@@ -40,7 +42,7 @@ pub fn at_size() -> [] int {
 }
 
 pub fn req_size() -> [] int {
-    return slots() * 66560;
+    return slots() * 70656;
 }
 
 pub fn resp_size() -> [] int {
