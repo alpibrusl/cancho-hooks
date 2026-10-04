@@ -521,12 +521,12 @@ def stage6():
     role = "pgre_rt"
     L.psql(f"drop owned by {role}") if L.psql(f"select 1 from pg_roles where rolname = '{role}'") else None
     L.psql(f"drop role if exists {role}")
-    L.psql(f"create role {role} login")
+    L.psql(f"create role {role} login" + (" password 'pgre-rt-pw'" if L.PG_PASSWORD else ""))
     L.psql(f"grant all on all tables in schema public to {role}")
     L.psql(f"grant all on all sequences in schema public to {role}")
     proxy = PgProxy(L.PG_HOST, int(L.PG_PORT))
     args = ["--schedule", "200", "--deadline-ms", "800", "--pg-host", L.PG_HOST, "--pg-port", str(proxy.port), "--pg-user", role, "--pg-database", L.PG_DB,
-            "--pg-start-wait-ms", "60000", "--admin-token", TOKEN]
+            "--pg-start-wait-ms", "60000", "--admin-token", TOKEN] + (["--pg-password", "pgre-rt-pw"] if L.PG_PASSWORD else [])
     svc = L.Service(BIN, L.free_dir("hooks-pgre-"), args)
     CLEAN.append(svc)
     try:

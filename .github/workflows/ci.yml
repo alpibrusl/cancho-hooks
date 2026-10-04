@@ -212,6 +212,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/reason_test.py build/hooks
 
+      - name: A database that goes away and comes back (cut, frozen, black-holed, ended under the service; no restart, nothing lost or repeated, the loop never stalls; SCRAM logins)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/pgre_test.py build/hooks
+
       # Only a binary that passed every step above is kept. It is the service as built by the compiler this commit pins, linked
       # against the runner's glibc (ubuntu-latest) and so for a Linux x86-64 host with that glibc or newer. A zip loses the
       # executable bit: `chmod +x` after downloading.

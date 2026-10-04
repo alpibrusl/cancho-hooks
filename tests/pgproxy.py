@@ -143,7 +143,7 @@ class PgProxy:
         ports = self.upstream_ports()
         if not ports:
             return 0
-        rows = psql("select count(pg_terminate_backend(pid)) from pg_stat_activity where client_addr = '127.0.0.1' and client_port in ("
+        rows = psql("select count(pg_terminate_backend(pid)) from pg_stat_activity where client_addr = inet_client_addr() and client_port in ("
                     + ",".join(str(p) for p in ports) + ")")
         return int(rows[0][0])
 
