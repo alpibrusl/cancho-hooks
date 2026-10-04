@@ -458,7 +458,12 @@ fn look[&c, &d, &n, &w, &r](fs: &c Fs(""), dir: &d [byte], name: &n [byte], wind
         let path = path_buf[0..path_into(path_buf, dir, name, 0 - 1)];
         match open_read(fs, path) {
             Opened::Failed(e) => {
-                return (clean(), 0);
+                // No file (ENOENT) is a log with nothing in it. A file that is there and cannot be opened is not: it cannot be judged, and the
+                // start that follows reports it as it always did (status 10 or 12), not as a log that is short.
+                if e == 2 {
+                    return (clean(), 0);
+                }
+                return (segment.unreadable(), 0);
             }
             Opened::Ok(f0) => {
                 var f = f0;
@@ -494,6 +499,10 @@ pub fn preflight[&c, &d, &w, &r](fs: &c Fs(""), dir: &d [byte], window: &!w [byt
     let events = look(fs, dir, "events.seg", window, max_len, rep[0..n], false);
     let delivery = look(fs, dir, "delivery.seg", window, max_len, rep[n..2 * n], true);
     rep[2 * n + 2] = 0;
+    if events.0 == segment.unreadable() || delivery.0 == segment.unreadable() {
+        // A log that cannot be read cannot be judged: go on, and the open that follows says why (status 10 or 12).
+        return 0;
+    }
     if events.0 == damage_refused() && !repair {
         rep[2 * n + 2] = 1;
         return 19;
