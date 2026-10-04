@@ -280,3 +280,41 @@ pub fn replace[&n, &b, &h, &k, &s](table: &!n [int], blob: &!b [byte], count: in
     table[base + 5] = len(key);
     return 0;
 }
+
+// Take the `i`th of the first `count` endpoints out (`docs/design.md` section 25.5): the entries after it move down one place, so the table is
+// still the first `count - 1` endpoints in the order they had. Nothing that holds an index into the table across turns may survive this: the
+// delivery state keys everything that lasts by *slot*, and the table is only ever read by index inside one turn. The bytes of the host and the
+// key stay where they are (every other entry's `host_start` and `key_start` still point at its own), except that the removed endpoint's own are
+// zeroed, so a deleted endpoint's signing key is not left in memory; `blob_used` then shrinks if they were the last, and what is left in the
+// middle is room that `compact` gives back. Answers the new count, or -1 if `i` is not one of the first `count` (nothing is changed then).
+pub fn remove[&n, &b](table: &!n [int], blob: &!b [byte], count: int, i: int) -> [] int {
+    if i < 0 || i >= count {
+        return 0 - 1;
+    }
+    let own = i * stride();
+    var k = 0;
+    while k < table[own + 3] {
+        blob[table[own + 2] + k] = byte_of(0);
+        k = k + 1;
+    }
+    k = 0;
+    while k < table[own + 5] {
+        blob[table[own + 4] + k] = byte_of(0);
+        k = k + 1;
+    }
+    var j = i;
+    while j < count - 1 {
+        var f = 0;
+        while f < stride() {
+            table[j * stride() + f] = table[(j + 1) * stride() + f];
+            f = f + 1;
+        }
+        j = j + 1;
+    }
+    var z = 0;
+    while z < stride() {
+        table[(count - 1) * stride() + z] = 0;
+        z = z + 1;
+    }
+    return count - 1;
+}

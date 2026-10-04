@@ -314,6 +314,50 @@ pub fn patch_address_id[&m](m: &m [byte], row: int) -> [] int {
     return pg.int_text(m, from, to);
 }
 
+// delete_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn delete_endpoint_start[&h](heap: &!h Heap, id: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "delete_endpoint", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// delete_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn delete_endpoint[&h, &c](heap: &!h Heap, conn: &!c Conn, id: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, id);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "delete_endpoint", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn delete_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
+pub fn delete_endpoint_setval[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 1);
+    return pg.int_text(m, from, to);
+}
+
+pub fn delete_endpoint_setval_is_null[&m](m: &m [byte], row: int) -> [] bool {
+    let (from, to) = pg.value(m, row, 1);
+    return from < 0;
+}
+
 // Parse every query above on this connection, once, after login: PostgreSQL then parses and plans each
 // one once instead of on every call. Answers the reply of the first refusal (`pg.failure` says what the
 // server objected to) or an empty one, and a status; the queries are not to be run unless both are clean.
@@ -341,5 +385,8 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
     reply = r6;
     status = s6;
+    let (r7, s7) = pg.prepare_after(heap, conn, reply, status, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
+    reply = r7;
+    status = s7;
     return (reply, status);
 }

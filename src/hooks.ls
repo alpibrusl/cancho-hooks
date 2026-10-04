@@ -349,7 +349,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
     }
     if id == 4 {
         // GET /stats: the delivery counters, for the tests and for a human.
-        var w = json.writer(heap, 320);
+        var w = json.writer(heap, 352);
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "endpoints");
         w = json.put_int(heap, w, stats[c_endpoints()]);
@@ -365,6 +365,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, idem.count(ix));
         w = json.put_key(heap, w, "replays");
         w = json.put_int(heap, w, rp_cap() - rp_free(stats));
+        w = json.put_key(heap, w, "draining");
+        w = json.put_int(heap, w, draining_count(stats));
         w = json.put_key(heap, w, "history_live");
         w = json.put_int(heap, w, history.live(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_written");
@@ -477,6 +479,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         if stats[c_endpoints()] >= state.max_endpoints() {
             return server.failure(heap, out, 409, "the service has as many endpoints as it can (62)", keep);
         }
+        if stats[c_endpoints()] + draining_count(stats) >= state.max_endpoints() {
+            return server.failure(heap, out, 409, "every slot is taken: a deleted endpoint is still finishing an attempt, try again in a moment", keep);
+        }
         let parsed = manage.parse_create(heap, body, scratch, stats[off_mg()..off_mg() + manage.mg_size()], stats[c_private()] == 1);
         if parsed.0 != 0 {
             return server.failure(heap, out, 400, manage.why(parsed.0), keep);
@@ -522,6 +527,39 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
             return server.failure(heap, out, 400, manage.why(4), keep);
         }
         stats[off_mg() + manage.mg_target()] = want;
+        stats[off_mg() + manage.mg_state()] = 1;
+        note[0] = 0 - 3;
+        return out;
+    }
+    if id == 14 {
+        // DELETE /endpoints/:id (`docs/design.md` section 25.5): remove an endpoint. Judged here like `PATCH` and kept for the turn that sends it to the
+        // database; memory and the log change only when the database says commit (`finish_delete`).
+        let auth = manage.authorize(request, table, stats[off_token()..off_token() + manage.token_size()]);
+        if auth == 1 {
+            return server.failure(heap, out, 403, "endpoint management is off: the service was not given an admin-token", keep);
+        }
+        if auth == 2 {
+            return server.failure_with(heap, out, 401, "a valid bearer token is required", keep, "WWW-Authenticate: Bearer\r\n");
+        }
+        if !history.enabled(stats[off_hq()..off_hq() + history.size()]) {
+            return server.failure(heap, out, 503, "endpoints are managed in the database and none is named (--pg-host)", keep);
+        }
+        let want = route.param_nat(path, params, 0);
+        if want < 0 {
+            return server.failure(heap, out, 400, "the id must be a number", keep);
+        }
+        if index_of_id(stats, want) < 0 {
+            return server.failure(heap, out, 404, "no such endpoint", keep);
+        }
+        if stats[off_mg() + manage.mg_state()] != 0 {
+            return server.failure(heap, out, 409, "another change is waiting for the database", keep);
+        }
+        stats[off_mg() + manage.mg_target()] = want;
+        stats[off_mg() + manage.mg_kind()] = 2;
+        stats[off_mg() + manage.mg_fields()] = 0;
+        stats[off_mg() + manage.mg_host_len()] = 0;
+        stats[off_mg() + manage.mg_secret_len()] = 0;
+        stats[off_mg() + manage.mg_make()] = 0;
         stats[off_mg() + manage.mg_state()] = 1;
         note[0] = 0 - 3;
         return out;
@@ -674,6 +712,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "POST", "/endpoints", 11);
     r = route.add(heap, r, "GET", "/endpoints/:id", 12);
     r = route.add(heap, r, "PATCH", "/endpoints/:id", 13);
+    r = route.add(heap, r, "DELETE", "/endpoints/:id", 14);
     return r;
 }
 
@@ -737,7 +776,7 @@ fn c_deadline() -> [] int {
     return 9;
 }
 
-// A bit per endpoint id (0 to 15): set while the endpoint is disabled and gets no new attempts (`docs/design.md` section 22).
+// A bit per slot (0 to 61): set while the endpoint that has the slot is disabled and gets no new attempts (`docs/design.md` section 22).
 fn c_disabled() -> [] int {
     return 10;
 }
@@ -745,6 +784,38 @@ fn c_disabled() -> [] int {
 // 1 if endpoints may be names and non-public addresses (`allow-private-hosts`, section 26), else 0.
 fn c_private() -> [] int {
     return 11;
+}
+
+// A bit per slot: set while the endpoint that had the slot has been deleted (its row is gone and it is not in the table) but an attempt it began is
+// still on the wire. The slot is not free and not dormant, and cannot be given to anyone, until `flying` is 0 and the `removed` record is written
+// (`docs/design.md` section 25.5).
+fn c_draining() -> [] int {
+    return 12;
+}
+
+fn is_draining[&d](dv: &d [int], e: int) -> [] bool {
+    return dv[c_draining()] >> e & 1 == 1;
+}
+
+fn set_draining[&d](dv: &!d [int], e: int, on: bool) -> [] int {
+    if on {
+        dv[c_draining()] = dv[c_draining()] | 1 << e;
+    } else {
+        dv[c_draining()] = dv[c_draining()] & ~(1 << e);
+    }
+    return 0;
+}
+
+fn draining_count[&d](dv: &d [int]) -> [] int {
+    var n = 0;
+    var e = 0;
+    while e < state.max_endpoints() {
+        if is_draining(dv, e) {
+            n = n + 1;
+        }
+        e = e + 1;
+    }
+    return n;
 }
 
 fn is_disabled[&d](dv: &d [int], e: int) -> [] bool {
@@ -1029,13 +1100,13 @@ fn index_of_id[&d](dv: &d [int], ident: int) -> [] int {
     return 0 - 1;
 }
 
-// The id of the endpoint in slot `e`, or -1 if no endpoint has it.
+// The id of the endpoint that has slot `e`, or -1 if none does. It is read from the slot map and not from the table: an endpoint that was deleted
+// while an attempt of it was on the wire is no longer in the table, and that attempt's outcome is still recorded under its id (section 25.5).
 fn ident_of_slot[&d](dv: &d [int], e: int) -> [] int {
-    let i = index_of(dv, e);
-    if i < 0 {
+    if dv[off_slotid() + e] < 0 {
         return 0 - 1;
     }
-    return dv[off_table() + i * endpoints.stride() + 6];
+    return dv[off_slotid() + e];
 }
 
 // Append the record that endpoint `ident` was given slot `e` with its cursor at `start`, or that the slot was freed, to `done`,
@@ -1102,7 +1173,7 @@ fn take_slot[&g, &d](done: &!g log.Log, dv: &!d [int], ident: int) -> [file_writ
     }
     k = 0;
     while k < most && slot < 0 {
-        if dv[off_slotid() + k] >= 0 && index_of_id(dv, dv[off_slotid() + k]) < 0 {
+        if dv[off_slotid() + k] >= 0 && index_of_id(dv, dv[off_slotid() + k]) < 0 && !is_draining(dv, k) {
             if note_removed(done, dv, k) == 0 {
                 return 0 - 1;
             }
@@ -1335,6 +1406,12 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
             dv[b + 3] = tries;
             dv[b + 4] = next_at;
             dv[c_failed()] = dv[c_failed()] + 1;
+            if is_draining(dv, e) {
+                // The endpoint was deleted while this replay was on the wire: its outcome is recorded above, and it is not tried again.
+                if note_outcome(done, dv, state.replay_dead(), e, id, tries, 0) == 1 {
+                    dv[b] = 0;
+                }
+            }
         } else {
             dv[b] = 0;
             if kind == state.replay_delivered() {
@@ -1353,7 +1430,7 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
         }
         history.push(dv[off_hq()..off_hq() + history.size()], ident_of_slot(dv, e), id, 1, tries, outcome, code, clock_unix_ms(clock), latency);
     }
-    if ok == 1 && code == 410 && !is_disabled(dv, e) {
+    if ok == 1 && code == 410 && !is_disabled(dv, e) && !is_draining(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
             set_disabled(dv, e, true);
         }
@@ -1424,7 +1501,7 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
     if ok == 1 {
         history.push(dv[off_hq()..off_hq() + history.size()], ident_of_slot(dv, e), id, 0, tries, kind, code, clock_unix_ms(clock), latency);
     }
-    if ok == 1 && code == 410 && !is_disabled(dv, e) {
+    if ok == 1 && code == 410 && !is_disabled(dv, e) && !is_draining(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
             set_disabled(dv, e, true);
         }
@@ -1597,6 +1674,8 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
     borrow mut table as &!tw in {
         written = written + sweep(done, dv, clock, tw, at);
     }
+    // A deleted endpoint's slot is free once its last attempt has ended (`finish_drains`).
+    written = written + finish_drains(done, dv);
     let (grown, started) = start_attempts(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, token0);
     written = written + started;
     if written > 0 {
@@ -1856,7 +1935,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, route
                         }
                     }
                 }
-                if dv[c_endpoints()] > 0 {
+                if dv[c_endpoints()] > 0 || dv[c_draining()] != 0 {
                     borrow mut srv as &!sw in {
                         borrow mut at as &!aw in {
                             borrow mut req as &!qw in {
@@ -2269,6 +2348,9 @@ fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
 
 // The statement for the change that waits in `mg`: the insert of a new endpoint, the update of an address, or of the address and the secret.
 fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte]) -> [heap] buffer.Buffer {
+    if dv[off_mg() + manage.mg_kind()] == 2 {
+        return queries.delete_endpoint_start(heap, dv[off_mg() + manage.mg_target()]);
+    }
     if dv[off_mg() + manage.mg_kind()] != 1 {
         return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret);
     }
@@ -2279,10 +2361,124 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
 }
 
 fn finish_change[&h, &b, &l, &g, &d, &w, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], rep: &m [byte], status: int, keep: bool) -> [heap, file_read, file_write] buffer.Buffer {
+    if dv[off_mg() + manage.mg_kind()] == 2 {
+        return finish_delete(heap, dv, blob, done, rep, status, keep);
+    }
     if dv[off_mg() + manage.mg_kind()] == 1 {
         return finish_patch(heap, dv, blob, rep, status, keep);
     }
     return finish_create(heap, dv, blob, lg, done, window, rep, status, keep);
+}
+
+// Free slot `e` in memory: its window is empty, its cursor 0, nothing disabled, no replay waiting for it, and no id, so `take_slot` may give it to
+// anyone. The `removed` record that says so is written by the caller, **before** this (a restart reads the record and does the same).
+fn retire_slot[&d](dv: &!d [int], e: int) -> [] int {
+    state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, 0);
+    set_disabled(dv, e, false);
+    var r = 0;
+    while r < rp_cap() {
+        if dv[off_rp() + r * rp_stride() + 1] == e {
+            dv[off_rp() + r * rp_stride()] = 0;
+        }
+        r = r + 1;
+    }
+    dv[off_slotid() + e] = slot_free();
+    set_draining(dv, e, false);
+    return 0;
+}
+
+// Every slot whose endpoint was deleted and whose last attempt on the wire has ended gets its `removed` record (not yet flushed) and is free again
+// (`docs/design.md` section 25.5: the record is written when the slot can be reused, not when the endpoint was deleted). Answers how many were freed.
+// A slot whose record the log refuses stays draining and is tried again on the next turn.
+fn finish_drains[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+    var freed = 0;
+    var e = 0;
+    while e < state.max_endpoints() {
+        if is_draining(dv, e) && dv[off_flying() + e] == 0 {
+            if note_removed(done, dv, e) == 1 {
+                retire_slot(dv, e);
+                freed = freed + 1;
+            }
+        }
+        e = e + 1;
+    }
+    return freed;
+}
+
+// The database has answered a `DELETE` (`docs/design.md` section 25.5). On commit, and only then: the replays that wait for the endpoint are dropped (a
+// record each, flushed), the endpoint leaves the table at once (so it is not in `GET /endpoints`, is sent nothing new and cannot be found by id), and its
+// slot is freed with a `removed` record if no attempt of it is on the wire, else kept as *draining* until the last one ends (`finish_drains`). A row
+// that was already gone (somebody deleted it by hand) is removed from memory all the same: the database is the owner, and it says there is no such endpoint.
+fn finish_delete[&h, &b, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+    let out = buffer.empty(heap, 256);
+    if status != 0 || pg.failure(rep) >= 0 {
+        return server.failure(heap, out, 503, "the database did not delete the endpoint; nothing was changed", keep);
+    }
+    let target = dv[off_mg() + manage.mg_target()];
+    let i = index_of_id(dv, target);
+    let row = pg.first_row(rep);
+    if i < 0 || row >= 0 && queries.delete_endpoint_id(rep, row) != target {
+        return server.failure(heap, out, 503, "the database answered for another endpoint; nothing was changed", keep);
+    }
+    let e = endpoints.slot_of(dv[off_table()..off_table() + endpoints.table_size()], i);
+    // The records first: a replay that waits is over (`replay_dead`, which recovery reads as "ended"), and with nothing on the wire the slot is free.
+    var wrote = 0;
+    var r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 1] == e && dv[b + 6] == 0 {
+            if note_outcome(done, dv, state.replay_dead(), e, dv[b + 2], dv[b + 3], 0) == 0 {
+                return server.failure(heap, out, 503, "the change could not be stored", keep);
+            }
+            wrote = wrote + 1;
+        }
+        r = r + 1;
+    }
+    let idle = dv[off_flying() + e] == 0;
+    if idle {
+        if note_removed(done, dv, e) == 0 {
+            return server.failure(heap, out, 503, "the change could not be stored", keep);
+        }
+        wrote = wrote + 1;
+    }
+    if wrote > 0 && log.flush(done) != 0 {
+        return server.failure(heap, out, 503, "the change could not be stored", keep);
+    }
+    // Memory, after the records are down.
+    r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 1] == e && dv[b + 6] == 0 {
+            dv[b] = 0;
+        }
+        r = r + 1;
+    }
+    dv[c_endpoints()] = endpoints.remove(dv[off_table()..off_table() + endpoints.table_size()], blob, dv[c_endpoints()], i);
+    if idle {
+        retire_slot(dv, e);
+    } else {
+        set_draining(dv, e, true);
+    }
+    var wr = json.writer(heap, 128);
+    wr = json.begin_object(heap, wr);
+    wr = json.put_key(heap, wr, "id");
+    wr = json.put_int(heap, wr, target);
+    wr = json.put_key(heap, wr, "deleted");
+    wr = json.put_bool(heap, wr, true);
+    wr = json.put_key(heap, wr, "draining");
+    wr = json.put_bool(heap, wr, !idle);
+    if row < 0 {
+        wr = json.put_key(heap, wr, "row");
+        wr = json.put_string(heap, wr, "was already gone");
+    }
+    wr = json.end_object(heap, wr);
+    let body = json.finish(wr);
+    var answer = out;
+    borrow body as &sb in {
+        answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, body);
+    return answer;
 }
 
 // The database has answered a `PATCH`: on commit the table in memory takes the new address (and key), so the next attempt, a retry of an event
