@@ -253,8 +253,10 @@ def main():
     svc = start(d)
     for n in range(1, 6):
         post(svc, n)
-    wait_for(lambda: len(r0.seen) == 5 and len(r1.seen) == 5, 10)
-    wait_for(lambda: cursors(svc) == {0: 5, 1: 5}, 5)
+    # The preconditions are checks of their own: if either times out the later checks are about a state that was never reached, and
+    # without these a failure there looks like a bug in what comes after.
+    check("4. (before) both endpoints got events 1 to 5", wait_for(lambda: len(r0.seen) == 5 and len(r1.seen) == 5, 10), str((r0.seen, r1.seen)))
+    check("4. (before) both cursors are at 5 before the stop", wait_for(lambda: cursors(svc) == {0: 5, 1: 5}, 5), str(cursors(svc)))
     stop(svc)
     conf(d, [(1, r1)])
     svc = start(d)
