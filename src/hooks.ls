@@ -948,9 +948,11 @@ fn lowmark[&d](dv: &d [int]) -> [] int {
     var i = 0;
     while i < dv[c_endpoints()] {
         let e = dv[off_table() + i * endpoints.stride()];
-        let c = dv[off_cur() + e];
-        if low < 0 || c < low {
-            low = c;
+        if e >= 0 {
+            let c = dv[off_cur() + e];
+            if low < 0 || c < low {
+                low = c;
+            }
         }
         i = i + 1;
     }
@@ -1069,13 +1071,12 @@ fn take_slot[&g, &d](done: &!g log.Log, dv: &!d [int], ident: int) -> [file_writ
     return slot;
 }
 
-// Give each endpoint of the table the slot the log says it has, and a slot (with a `created` record, flushed) to each that has none. An
-// endpoint that is in the log and not in the table is dormant: its slot stays its own and its state is rebuilt if it comes back, until a new
-// endpoint needs the slot (`take_slot`). Answers 0, or 1 if the log refused a record.
-fn assign_slots[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+// Give each endpoint of the table the slot the log says it has; one the log does not know keeps -1 until `place_new`. An endpoint that is in
+// the log and not in the table is dormant: its slot stays its own and its state is rebuilt if it comes back, until a new endpoint needs
+// the slot (`take_slot`).
+fn match_slots[&d](dv: &!d [int]) -> [] int {
     let n = dv[c_endpoints()];
     let most = state.max_endpoints();
-    var wrote = 0;
     var i = 0;
     while i < n {
         let ident = dv[off_table() + i * endpoints.stride() + 6];
@@ -1090,14 +1091,29 @@ fn assign_slots[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
         dv[off_table() + i * endpoints.stride()] = found;
         i = i + 1;
     }
-    i = 0;
+    return 0;
+}
+
+// Give a slot, a `created` record (flushed) and a cursor to each endpoint of the table that has none: a row added by hand, or a line added
+// to `endpoints.conf`. It starts at the cursor of the slowest endpoint the log knows (`lowmark`; 0 if there is none), which is the
+// furthest back it can start without widening the window the others are held to: starting at 0 made one endpoint with a dead receiver
+// stall every other beyond event 1,024 (`docs/design.md` section 25.1). Called after `replay`, so the cursors are known. Answers 0, or 1
+// if the log refused a record.
+fn place_new[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+    let n = dv[c_endpoints()];
+    let start = lowmark(dv);
+    var wrote = 0;
+    var i = 0;
     while i < n {
         if dv[off_table() + i * endpoints.stride()] < 0 {
             let ident = dv[off_table() + i * endpoints.stride() + 6];
             let slot = take_slot(done, dv, ident);
-            if slot < 0 || note_created(done, dv, slot, ident, 0) == 0 {
+            if slot < 0 || note_created(done, dv, slot, ident, start) == 0 {
                 return 1;
             }
+            state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], slot, start);
+            set_disabled(dv, slot, false);
+            dv[off_flying() + slot] = 0;
             dv[off_slotid() + slot] = ident;
             dv[off_table() + i * endpoints.stride()] = slot;
             wrote = wrote + 1;
@@ -2050,11 +2066,12 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
     // /endpoints`), and it needs to know which slots the log has given and where its records go.
     scan_slots(done, window, dv);
     if n > 0 {
-        if assign_slots(done, dv) != 0 {
-            return 17;
-        }
+        match_slots(dv);
         if replay(done, window, dv) > 0 {
             return 15;
+        }
+        if place_new(done, dv) != 0 {
+            return 17;
         }
         if dv[c_seq()] < 1 {
             dv[c_seq()] = 1;

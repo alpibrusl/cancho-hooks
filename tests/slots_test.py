@@ -17,6 +17,8 @@ writes that log with its own reader and writer, so it checks the format and not 
   6. a slot given to a second endpoint inherits nothing from the first: its outcomes and an outcome that arrives after the `removed`
      are not the new endpoint's (the log is written by hand to say so)
   7. the history (PostgreSQL) says the id, not the slot
+  8. an endpoint the log does not know (a row added by hand, a line added to endpoints.conf) starts at the cursor of the slowest endpoint
+     it does know, not at 0: it does not widen the window the others are held to (section 25.1)
 """
 import base64
 import http.server
@@ -114,9 +116,9 @@ def conf(d, rows):
             f.write(f"{ident} 127.0.0.1 {r.port} {SECRET}\n")
 
 
-def start(d, extra=()):
+def start(d, extra=(), schedule="100"):
     port = chaos.free_port()
-    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--schedule", "100", "--deadline-ms", "800", *extra],
+    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--schedule", schedule, "--deadline-ms", "800", *extra],
                             stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     lines = []
     while True:
@@ -266,9 +268,10 @@ def main():
     conf(d, [(1, r1), (7000, r7000)])
     svc = start(d)
     post(svc, 9)
-    check("4. a new endpoint while 0 is dormant is served", wait_for(lambda: sorted(r7000.seen) == list(range(1, 10)), 8), str(r7000.seen))
+    check("4. a new endpoint while 0 is dormant is served from the slowest cursor (8): it gets event 9", wait_for(lambda: r7000.seen == [9], 8), str(r7000.seen))
+    wait_for(lambda: cursors(svc) == {1: 9, 7000: 9}, 5)
     stop(svc)
-    check("4. ... and takes slot 2 (0 and 1 are taken), freeing nothing", kinds(log, CREATED)[-1] == (2, 7000, 0), str(kinds(log, CREATED)))
+    check("4. ... and takes slot 2 (0 and 1 are taken), freeing nothing", kinds(log, CREATED)[-1] == (2, 7000, 8), str(kinds(log, CREATED)))
     check("4. ... and nothing was freed", not kinds(log, REMOVED), str(kinds(log, REMOVED)))
     conf(d, [(0, r0), (1, r1)])
     svc = start(d)
@@ -292,12 +295,16 @@ def main():
     check("5. slots 0 and 1 were freed (`removed`) and given (`created`), in that order",
           [(r[1], r[2], r[3]) for r in tail[:4]] == [(REMOVED, 0, 0), (CREATED, 0, 5000), (REMOVED, 1, 0), (CREATED, 1, 5001)], str(tail[:6]))
     check("5. no other slot was touched", all(r[2] in (0, 1) for r in tail if r[1] in (CREATED, REMOVED)), str(tail))
-    # the id whose slot was freed is a new endpoint when it comes back: it starts at 0
+    # the id whose slot was freed is a new endpoint when it comes back: it starts at the slowest cursor (1), not where the old one was
     r5c = Receiver()
     conf(d, [(5000, r5a), (5001, r5b), (1000, r5c)])
     svc = start(d)
-    check("5. an id whose slot was freed is a new endpoint when it comes back: it gets the log from the start", wait_for(lambda: r5c.seen == [1], 5), str(r5c.seen))
+    post(svc, 2)
+    check("5. an id whose slot was freed is a new endpoint when it comes back: it starts at the slowest cursor and gets event 2, not 1", wait_for(lambda: r5c.seen == [2], 5), str(r5c.seen))
+    time.sleep(0.3)
+    check("5. ... once", r5c.seen == [2], str(r5c.seen))
     stop(svc)
+    check("5. ... and its `created` record says start 1", kinds(log, CREATED)[-1][1:] == (1000, 1), str(kinds(log, CREATED)[-1:]))
     shutil.rmtree(d)
 
     # 5b. a dormant slot is freed, a live endpoint's never: slot 0 holds id 1000, which is in the table
@@ -350,6 +357,52 @@ def main():
     check("6b. `created` with start 3: the endpoint gets events 4 and 5 and not 1 to 3", wait_for(lambda: sorted(r9.seen) == [4, 5], 8), str(r9.seen))
     time.sleep(0.5)
     check("6b. ... and its cursor is 5", cursors(svc) == {9: 5} and sorted(r9.seen) == [4, 5], str((cursors(svc), r9.seen)))
+    stop(svc)
+    shutil.rmtree(d)
+
+    # 8. a new endpoint starts where the slowest known endpoint is
+    d = tempfile.mkdtemp(prefix="hooks-slots-")
+    svc = start(d)  # no endpoints: it only ingests
+    for n in range(1, 9):
+        post(svc, n)
+    stop(svc)
+    log = os.path.join(d, "delivery.seg")
+    rows = [(CREATED, 0, 10, 0, 0)] + [(DELIVERED, 0, ev, 1, 0) for ev in range(1, 4)]
+    rows += [(CREATED, 1, 11, 0, 0)] + [(DELIVERED, 1, ev, 1, 0) for ev in range(1, 9)]
+    write_outcomes(log, rows)
+    down, r11, r12 = Receiver(), Receiver(), Receiver()
+    down.srv.shutdown()
+    down.srv.server_close()
+    conf(d, [(10, down), (11, r11), (12, r12)])
+    svc = start(d)
+    check("8. the new endpoint (12) gets the events after the slowest cursor (3): 4 to 8, not 1 to 3",
+          wait_for(lambda: sorted(r12.seen) == [4, 5, 6, 7, 8], 8), str((r12.seen, svc.lines)))
+    time.sleep(0.5)
+    check("8. ... each once, and endpoint 11, which had them all, gets none", sorted(r12.seen) == [4, 5, 6, 7, 8] and r11.seen == [], str((r12.seen, r11.seen)))
+    stop(svc)
+    check("8. its `created` record says where it started: slot 12, id 12, start 3", kinds(log, CREATED)[-1] == (12, 12, 3), str(kinds(log, CREATED)))
+    shutil.rmtree(d)
+
+    # 8b. the stall that motivated it: A is far ahead, B is added with a dead receiver. Started at 0, B held every endpoint to a window of
+    # 1,024 events from 0 and A could not go past it.
+    d = tempfile.mkdtemp(prefix="hooks-slots-")
+    ra, rb = Receiver(), Receiver()
+    conf(d, [(0, ra)])
+    svc = start(d)
+    total = 1300
+    for n in range(1, total + 1):
+        post(svc, n)
+    check("8b. A, alone, gets 1,300 events", wait_for(lambda: len(ra.seen) == total, 60), str(len(ra.seen)))
+    wait_for(lambda: cursors(svc) == {0: total}, 10)
+    stop(svc)
+    rb.srv.shutdown()
+    rb.srv.server_close()
+    conf(d, [(0, ra), (1, rb)])
+    ra.seen.clear()
+    svc = start(d, schedule="3600000,3600000")  # B's failures are retried in an hour: it is behind for the whole test
+    post(svc, total + 1)
+    check("8b. B is added with a receiver that is down: A still gets the next event", wait_for(lambda: ra.seen == [total + 1], 10), str((ra.seen, cursors(svc))))
+    check("8b. ... and B began at A's cursor, not 0", kinds(os.path.join(d, "delivery.seg"), CREATED)[-1] == (1, 1, total), str(kinds(os.path.join(d, "delivery.seg"), CREATED)))
     stop(svc)
     shutil.rmtree(d)
 
