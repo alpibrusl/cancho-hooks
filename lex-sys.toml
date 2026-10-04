@@ -101,10 +101,10 @@ std = true
 
 [dependencies.pg]
 git = "https://github.com/alpibrusl/lexsys-pg"
-rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
 path = ".lex-sys-vcs"
 
 [dependencies.pool]
 git = "https://github.com/alpibrusl/lexsys-pg"
-rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
 path = ".lex-sys-vcs-pool"
