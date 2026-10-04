@@ -7,12 +7,13 @@ event durably, and it delivers the event, **signed**, to every subscribed endpoi
 and keeping what it could not deliver as a dead letter.
 
 It keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and talks to PostgreSQL through
-[`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `unsafe`, and one foreign authority: `Ffi("libc")`, held for five functions: four signal functions
-(`sigblock`, `sigsetmask`, `sigpending`, `signal`), which is how a lex-sys program learns it was asked to stop (`src/ops.ls`, [`docs/design.md`](docs/design.md)
-section 34.4), and `statx`, which reads the mode of the data directory for the production profile (`src/perm.ls`, section 33.5; lex-sys has no way to ask for a
-file's mode). The authority report (`lex-sys authority`) names what the program can do, but because it calls foreign code it opens with `UNBOUNDED` (a library is
-not an authority domain: the labels below that line do not bound what the program can reach, as for any such program; `docs/under-a-grant.md` in lex-sys), and lists the five symbols. Without
-those calls it would name every capability, as it did before. A signal builtin and a file-mode builtin in lex-sys would remove the `Ffi` and the caveat with it.
+[`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `unsafe`, and **one foreign symbol: libc's `statx`**, which reads the mode of the data directory for the production profile (`src/perm.ls`; lex-sys has no
+file-mode builtin: lex-sys#243). How the service learns it was asked to stop is not foreign: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability
+(`Signals("INT,TERM")`, `src/ops.ls`) and watches the claim in the same poller as its sockets, so a stop wakes the loop at once. The authority report
+(`lex-sys authority`) therefore says `bounded: false` for exactly one reason, `unbounded_by: ["libc:statx"]` (the labels bound everything except what that symbol
+does; `docs/foreign-authority.md` in lex-sys), and names the two signals. **The report is pinned in CI:** [`docs/authority.json`](docs/authority.json) is the report as
+a person last approved it, and `scripts/check-authority.sh` regenerates it and fails on any difference, so a new foreign symbol is one added line in `unbounded_by`
+and a new capability one added label: a red diff that only a commit of the new file turns green. A file-mode builtin in lex-sys would remove the `Ffi` and the caveat with it.
 
 ## Status
 
@@ -354,7 +355,7 @@ read-token   = <32 random characters>   # the GETs: give it to dashboards and mo
 
 `GET /metrics` is a **read**-scope route: when a `read-token` is configured (or, in production, the admin token), a scraper sends it as `Authorization: Bearer <token>`; without one the route is open, like the other reads ("Securing it" above). `GET /readyz` and `GET /healthz` are always open. What to alert on is in [`docs/runbook.md`](docs/runbook.md) section 1.
 
-**Stopping.** `SIGTERM` (`systemctl stop`, `docker stop`) or `SIGINT`: the service stops taking requests (every write that passes the credential check is a `503` that closes the connection; `GET /readyz` says `stopping`; `GET /healthz`, `/metrics` and the other reads still answer), starts no attempt, lets the attempts on the wire finish for at most `stop-deadline-ms`, flushes both logs and exits **0**. Attempts still on the wire at the deadline are made again at the next start (at least once, as after a crash). A second signal ends the process at once, killed by that signal. Nothing is lost either way: an acknowledgement is only sent after the flush that covers the event.
+**Stopping.** `SIGTERM` (`systemctl stop`, `docker stop`) or `SIGINT`: the service stops taking requests (every write that passes the credential check is a `503` that closes the connection; `GET /readyz` says `stopping`; `GET /healthz`, `/metrics` and the other reads still answer), starts no attempt, lets the attempts on the wire finish for at most `stop-deadline-ms`, flushes both logs and exits **0**. Attempts still on the wire at the deadline are made again at the next start (at least once, as after a crash). A stop is noticed at once, not at the next turn of the loop (the poller waits on the signals too). A second signal ends the process at once, killed by that signal. Nothing is lost either way: an acknowledgement is only sent after the flush that covers the event.
 
 **Exit statuses of a start that ends** (the message is on stderr; the full list with what to do is in `docs/runbook.md` section 1): `0` finished (`--import-endpoints`, or a drain); `2` a setting was refused; `10`/`12` `events.seg`/`delivery.seg` could not be opened; `11` the port is taken; `13` an endpoint line or row is invalid; `14` the retry schedule does not parse; `15`/`16` a log this version does not understand; `17` an endpoint could not be given a slot; **`18` `delivery.seg` refers to an event that `events.seg` does not hold** (an older events log beside a newer delivery log: the service would acknowledge new events and never deliver them), **`19` damage in the middle of a log** (not a torn tail: the message says where the log is whole to, how many bytes the cut would take and how many intact records are among them); `20` the database could not be read; `30` to `35` the production profile refused an unsafe setting or mode (the table under "Securing it" above). A refusal with 18 or 19 leaves both logs exactly as they were. A single torn record at the end, which is what a crash leaves, is still cut at start, and now said (after `listening`).
 
@@ -395,6 +396,7 @@ HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/headers_test.py build/hooks
 python3 tests/chaos.py build/hooks 2000 8 50       # kill -9 as a power cut: no acknowledged event may be lost
 python3 tests/delivery.py build/hooks 300 4 150    # three endpoints, signed, retried and dead-lettered, with the service killed
 FULL=1 python3 tests/idempotency_test.py build/hooks   # idempotency keys: the contract, restarts, chaos, a broken log, a full index
+scripts/check-authority.sh                         # the authority report is docs/authority.json: a new foreign call or capability is a diff to approve
 python3 tests/stop_test.py build/hooks             # SIGTERM and SIGINT drain, the deadline, a second signal, under load nothing is lost or repeated
 python3 tests/corrupt_test.py build/hooks          # a delivery log ahead of its events log, damage in the middle, a torn tail, --repair-logs, and the same rule as scripts/logcheck.py on 153 corruptions (150 random, 3 directed)
 python3 tests/metrics_test.py build/hooks          # /metrics against a known workload: ingest, group commits, attempts by outcome and reason, lag, retries (with HOOKS_PG: the history)
@@ -434,7 +436,7 @@ src/epx.ls         what an endpoint has besides an address and a secret (types, 
 src/wire.ls        the request of one attempt: the headers, one signature or two
 src/cron.ls        cron expressions: parse, and the next and last fire (pure, no clock)
 src/sched.ls       `/schedules`: the requests, what a due row means, and the state the tick keeps
-src/ops.ls         what an operator needs: the counters, readiness, how the service learns it is to stop (four libc signal functions)
+src/ops.ls         what an operator needs: the counters, readiness, how the service learns it is to stop (a claim on `SIGINT` and `SIGTERM`, woken through the poller)
 src/metrics.ls     `GET /metrics`: the Prometheus text, from two arrays of numbers
 src/reason.ls      why an attempt failed: the reasons, their numbers (on disk) and names, and the coarse status the history keeps
 src/logguard.ls    the start's look at the logs before it changes them: torn tail or damage, the pair of logs, `--repair-logs`
@@ -443,6 +445,7 @@ src/view.ls        what the database says, as an HTTP answer
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
 lex-sys.toml       the project file: the compiler, the two libraries (each pinned to a commit) and the programs
 scripts/build.sh   `lex-sys build`, and the fsync shim the crash tests preload
+scripts/check-authority.sh   regenerates the authority report and compares it with `docs/authority.json` (`--update` writes it)
 scripts/backup.sh, restore.sh, logcheck.py   backup and restore of the two logs (and the tables), and the checker that refuses an inconsistent pair
 scripts/release.sh a tarball, SHA256SUMS and an SBOM stub
 Dockerfile, deploy/   the container image; the systemd unit, a settings sample (with the production profile) and the container's health check and entry point
@@ -456,7 +459,7 @@ One process, one thread, one core: the loop does everything, and up to 64 delive
 
 ## Contributing
 
-Every change goes through what CI runs: `$LEX_SYS fmt --check src`, the unit tests and the harnesses above. Design before code,
+Every change goes through what CI runs: `$LEX_SYS fmt --check src`, the unit tests, the harnesses above and `scripts/check-authority.sh` (the authority report must be the committed `docs/authority.json`; a change to it is a change a person approves by committing the file). Design before code,
 in `docs/`, with claims measured; a claim that turns out false is corrected in place.
 
 ## Licence

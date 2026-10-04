@@ -1,20 +1,21 @@
-edition 5;
+edition 6;
 
 module ops;
 
 import std.io;
+import std.signals as sg;
 
 // `ops` -- what an operator needs to watch the service and to stop it (`docs/design.md` section 34).
 //
 //   * the counters `/metrics` shows and `/stats` does not (ingest, group commits, why attempts failed), in one array of integers, `size()` of them, which
 //     the caller keeps at the end of the delivery state;
 //   * whether the service is ready (`GET /readyz`): the logs open and writable, the database reachable, not on its way out;
-//   * how the program learns it has been asked to stop. lex-sys has no builtin for signals; libc has, and `Ffi("libc")` reaches it (the authority
-//     report says so: four functions, listed below). A handler cannot do anything useful (a callback must have an empty effect row), so the program
-//     does not install one: it **blocks** `SIGTERM` and `SIGINT` (`sigblock`), looks at the set of signals that are pending once a turn of the loop
-//     (`sigpending`), and when it sees one it ignores and then restores the default disposition of both and unblocks them, which discards the
-//     pending signal and makes the next one kill the process at once: the second signal of "a second signal exits at once". The set is read by a
-//     system call a turn, which costs nothing measurable, and the latency of a stop is the loop's wait (50 ms at most).
+//   * how the program learns it has been asked to stop. lex-sys has a narrow capability for that (`docs/signals.md` in lex-sys, edition 6): `main` narrows
+//     its `Signals` to `INT,TERM` and claims both (`signals_watch`) before the loop starts; the claim is a handle that the loop's `Poller` waits on, so a stop
+//     wakes `poller_wait` at once instead of at the end of its timeout, and the loop reads which signal arrived (`signals_pending`) once a turn. Nothing is
+//     installed that could run in signal context (a callback must have an empty effect row, so a handler could do nothing useful), and no libc function is
+//     called: the authority report names the two signals and has no `ffi` for them. When the loop sees the first signal it closes the claim (`signals_close`),
+//     which puts the default action back: the next `SIGTERM` or `SIGINT` ends the process at once, the second signal of "a second signal exits at once".
 //
 // The numbers are counted since this start, like the ones in `/stats`.
 
@@ -440,45 +441,67 @@ pub fn sigterm() -> [] int {
     return 15;
 }
 
-// libc's `int sigblock(int mask)`: block the signals whose bits (signal - 1) are set; answers the old mask. `signal(2, handler)` with a handler of 0
-// (`SIG_DFL`) or 1 (`SIG_IGN`) takes an integer where C takes a pointer, which is the same width on both of the targets. `sigpending` fills a set;
-// its length crosses as a second argument that C does not read. `sigsetmask(0)` unblocks everything.
-extern fn sigblock[&f](ffi: &f Ffi("libc"), mask: int) -> [ffi("libc")] int;
-
-extern fn sigsetmask[&f](ffi: &f Ffi("libc"), mask: int) -> [ffi("libc")] int;
-
-extern fn sigpending[&f, &b](ffi: &f Ffi("libc"), set: &!b [byte]) -> [ffi("libc")] int;
-
-extern fn signal[&f](ffi: &f Ffi("libc"), signum: int, handler: int) -> [ffi("libc")] int;
-
-// Hold `SIGINT` and `SIGTERM` (bits 1 and 14) until `pending_signal` looks.
-pub fn hold_signals[&f](libc: &f Ffi("libc")) -> [ffi("libc")] int {
-    return sigblock(libc, 16386);
-}
-
-// The signal that is waiting, 15 or 2, or 0. `set` is at least 128 bytes (`sigset_t` is that big on Linux; the mask is the first eight bytes).
-pub fn pending_signal[&f, &b](libc: &f Ffi("libc"), set: &!b [byte]) -> [ffi("libc")] int {
-    if sigpending(libc, set) != 0 {
-        return 0;
-    }
-    if int_of(set[1]) & 64 != 0 {
+// The signal that asked to stop, from the bits `signals_pending` answered (`std.signals`): `SIGTERM` (15) if it is among them, else `SIGINT` (2), else 0.
+pub fn asked_by(mask: int) -> [] int {
+    if sg.has(mask, sg.sigterm()) {
         return sigterm();
     }
-    if int_of(set[0]) & 2 != 0 {
+    if sg.has(mask, sg.sigint()) {
         return sigint();
     }
     return 0;
 }
 
-// The first signal has been seen. Ignore both signals (which throws away the one that is pending), then give both back their default action and
-// unblock them: the next `SIGTERM` or `SIGINT` ends the process at once.
-pub fn second_signal_kills[&f](libc: &f Ffi("libc")) -> [ffi("libc")] int {
-    signal(libc, 15, 1);
-    signal(libc, 2, 1);
-    signal(libc, 15, 0);
-    signal(libc, 2, 0);
-    sigsetmask(libc, 0);
-    return 0;
+// Is a stop waiting? The signals that arrived since the last look, as the signal that asked. The look clears them. It never waits.
+pub fn caught[&w](watch: &!w SignalWatch) -> [signals_read] int {
+    return asked_by(signals_pending(watch));
+}
+
+// The claim on `SIGINT` and `SIGTERM`, held across the turns of the loop. A claim is a linear value, which a loop body may not consume; so it is carried in this
+// enum, and the first look that finds a stop spends it and carries `Closed` from then on.
+pub enum Held {
+    Live(SignalWatch),
+    Closed,
+}
+
+// One look at the claim, once a turn. Answers the claim and the signal that asked to stop (0 if none). On the first signal the claim is closed (`signals_close`)
+// and what comes back is `Closed`: the signals have their default action again, so the next `SIGTERM` or `SIGINT` ends the process at once.
+pub fn look(held: Held) -> [signals_read] (Held, int) {
+    match held {
+        Held::Live(w) => {
+            var watch = w;
+            var seen = 0;
+            borrow mut watch as &!wh in {
+                seen = caught(wh);
+            }
+            if seen != 0 {
+                signals_close(watch);
+                return (Held::Closed, seen);
+            }
+            return (Held::Live(watch), 0);
+        }
+        Held::Closed => {
+            return (Held::Closed, 0);
+        }
+    }
+}
+
+// Register the claim in the loop's poller under `token`, so a signal wakes `poller_wait`. 0, or the poller's refusal; a refusal costs only the promptness
+// (the loop still looks once a turn, at most its wait later).
+pub fn wake_on[&p, &w](poller: &!p Poller, watch: &w SignalWatch, token: int) -> [poll] int {
+    return poller_add_signals(poller, watch, token);
+}
+
+// End whatever is still claimed, at the end of the loop: the signals have their default action again.
+pub fn release_claim(held: Held) -> [] int {
+    match held {
+        Held::Live(w) => {
+            return signals_close(w);
+        }
+        Held::Closed => {
+            return 0;
+        }
+    }
 }
 
 pub fn stopping[&o](o: &o [int]) -> [] bool {

@@ -55,6 +55,12 @@ jobs:
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
 
+      # What the service can do, as `lex-sys authority` reports it, is pinned in docs/authority.json. A new foreign call or capability changes the report,
+      # and the step is red until a person reads the diff and commits the new file (`scripts/check-authority.sh --update`): that commit is the approval.
+      - name: The authority report is the committed one (docs/authority.json)
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh
+
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks
 
