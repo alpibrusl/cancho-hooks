@@ -92,6 +92,11 @@ pub fn event_of[&a](at: &a [int], slot: int) -> [] int {
     return at[slot * stride() + 2];
 }
 
+// When the attempt in `slot` must end by (`clock_ms`).
+pub fn deadline_of[&a](at: &a [int], slot: int) -> [] int {
+    return at[slot * stride() + 3];
+}
+
 // Has the attempt in `slot` run past its deadline (`clock_ms`)?
 pub fn expired[&a](at: &a [int], slot: int, now: int) -> [] bool {
     return busy(at, slot) && now >= at[slot * stride() + 3];

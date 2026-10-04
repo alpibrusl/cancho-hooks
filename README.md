@@ -51,6 +51,28 @@ curl -XPOST -d '{"type":"user.created","id":7}' localhost:8080/events      # {"i
 With nothing listening on port 9000 the event is stored and retried (5 s, 5 min, ...). To watch a delivery arrive, run the
 receiver below first.
 
+## A database
+
+With `--pg-host` the service uses PostgreSQL for two things (`docs/design.md` section 24):
+
+* **the endpoints**: they are the `endpoints` table, read once at start. `endpoints.conf` is **not read** when a database is named,
+  and a database that cannot be read is a refusal to start (status 20, with what failed), not a guess: a stale list would deliver to the
+  wrong receivers. The start waits while the database is silent.
+* **the history**: a row for every delivery attempt that ends (the receiver's status, the outcome, the attempt's number, when and how
+  long), read back by `GET /events/:id/attempts`. The log files stay the truth about delivery, so the history is **best effort**: the
+  service delivers while the database is slow or gone, and counts the rows it could not write (`/stats`). A connection that is lost is
+  not reopened until the service is restarted.
+
+```sh
+createdb hooks && psql hooks -f sql/schema.sql
+build/hooks --dir /var/lib/hooks --pg-host 127.0.0.1 --pg-user hooks_rw --import-endpoints 1   # copy endpoints.conf into the table, once
+build/hooks --port 8080 --dir /var/lib/hooks --pg-host 127.0.0.1 --pg-user hooks_rw
+psql hooks -c "select * from attempts where event = 41 order by endpoint, attempt"
+```
+
+The import is one transaction, leaves a row whose id is already there as it is, and refuses a file with a bad line without importing any
+of it. The `endpoints` table holds the secrets in a form the service can sign with: give it the permissions of a secret.
+
 ## A prebuilt binary
 
 Every CI run that passes keeps the service as an artifact of the run (Actions, the run, "Artifacts": `hooks-linux-x86_64-<commit>`,
@@ -120,6 +142,9 @@ ignored). It is its own file because it holds the secrets: give it the permissio
 | `schedule` | `5000,300000,...` (nine delays, to a day) | retry delays in ms, comma separated; after the last, a dead letter |
 | `deadline-ms` | `2000` | how long one delivery attempt may take |
 | `window-ms` | `86400000` | how long an idempotency key is remembered |
+| `pg-host` | (none) | a PostgreSQL: the endpoints are read from it and the attempt history written to it; without it the endpoints are `endpoints.conf` and there is no history (design.md section 24) |
+| `pg-port`, `pg-user`, `pg-database`, `pg-password` | `5432`, `hooks`, `hooks`, none | how to reach it. Put a password in the settings file, not on the command line |
+| `import-endpoints` | `0` | `1`: copy `endpoints.conf` into the database and exit (needs `pg-host`; no `port` needed) |
 
 ```sh
 build/hooks --port 8080 --dir /tmp/hooks-data --schedule 100,200,400,800   # four retries, then a dead letter after the fifth attempt
@@ -156,8 +181,9 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 |---|---|
 | `POST /events` | a JSON object with a string `"type"`, and optionally an `Idempotency-Key` (1 to 255 visible ASCII characters); answers `202 {"id":N}` after the flush, `422` for a body that is not one or a key already used for a different event, `400` for a bad or doubled key, `413` for an event too large (over 65,499 bytes, less 28 and the key's length with a key), `507` for a new key when 65,536 are held, `503` if the log is broken |
 | `GET /events/:id` | the stored event, `404` if there is none |
-| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys","replays"}` |
+| `GET /stats` | `{"endpoints","attempts","delivered","failed","dead","keys","replays","history_live","history_written","history_failed","history_dropped"}` |
 | `POST /events/:id/replay` | send the event again to every endpoint; `/replay/:endpoint` for one. `202 {"event","endpoints"}`, `404` for an unknown event or endpoint, `507` if 32 replays already wait. Same `webhook-id`, same schedule (design.md section 23) |
+| `GET /events/:id/attempts` | the attempts of an event from the database, as `[{"endpoint","replay","attempt","outcome","status","at","latency_ms"}]`; `503` if no database is named or it cannot answer, `504` after five seconds |
 | `GET /endpoints` | each endpoint's `{"id","port","cursor","disabled"}` (not the host, not the secret) |
 | `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
 | `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |
@@ -180,6 +206,8 @@ request held; after the turn one `flush` covers every append and the held reques
 ```sh
 $LEX_SYS test                                      # the four unit-test sets of lex-sys.toml (state, endpoints, idem, config)
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/history_test.py build/hooks   # the history in PostgreSQL (needs one: see the file)
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/roster_test.py build/hooks    # the endpoints in PostgreSQL: import, read at start, every refusal
 python3 tests/replay_test.py build/hooks           # replay: one endpoint or all, restarts, capacity, an event far behind the cursor
 python3 tests/gone_test.py build/hooks             # 410 Gone disables an endpoint, restarts keep it, enable undoes it
 python3 tests/config_test.py build/hooks           # settings: a file, flags, which wins, and every refusal

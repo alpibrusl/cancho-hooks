@@ -8,6 +8,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A PostgreSQL that wants a password (SCRAM-SHA-256), for the history test.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pgpass
+          POSTGRES_DB: hooks
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,6 +69,16 @@ jobs:
       - name: Settings, from a file and from flags (precedence, refusals)
         working-directory: hooks
         run: python3 tests/config_test.py build/hooks
+
+      - name: The history of attempts in PostgreSQL (a database that is slow, gone, wrong)
+        working-directory: hooks
+        run: |
+          which psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
+          HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/history_test.py build/hooks
+
+      - name: The endpoints in PostgreSQL (import, read at start, every refusal)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/roster_test.py build/hooks
 
       - name: Replay an event to one endpoint or all
         working-directory: hooks

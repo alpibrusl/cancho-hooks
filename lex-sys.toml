@@ -47,3 +47,13 @@ std = true
 name = "config"
 sources = ["tests/config_test.ls", "src/config.ls"]
 std = true
+
+[dependencies.pg]
+git = "https://github.com/alpibrusl/lexsys-pg"
+rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+path = ".lex-sys-vcs"
+
+[dependencies.pool]
+git = "https://github.com/alpibrusl/lexsys-pg"
+rev = "61357a422c92471882541c15ae8a53cd57aabd83"
+path = ".lex-sys-vcs-pool"
