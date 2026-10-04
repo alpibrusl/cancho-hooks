@@ -229,8 +229,15 @@ def stage3():
     kills = 0
     t0 = time.time()
     mid = []  # how far B had got at each kill: the kills must land while B is being sent events, or the stage proves nothing
+    step = TOTAL // 12  # B's progress between two kills once it is up: the kills follow what B has been sent, not the clock (a fast machine
+    #                    finishes B's 3,000 events in less than the old fixed 0.6 s apart, and then no kill lands in the middle)
     while kills < 12:
-        time.sleep(0.6)
+        if kills < 2:
+            time.sleep(0.6)
+        else:
+            goal, give_up = len(set(b.got())) + step, time.time() + 3.0
+            while len(set(b.got())) < goal and time.time() < give_up:
+                time.sleep(0.01)
         svc.kill()
         kills += 1
         mid.append(len(set(b.got())))
