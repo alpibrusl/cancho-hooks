@@ -38,7 +38,8 @@ def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
             "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
             "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000,
-            "retention-days": 30, "segment-bytes": 67108864, "delivery-log-bytes": 33554432, "idem-keys": 262144}
+            "retention-days": 30, "segment-bytes": 67108864, "delivery-log-bytes": 33554432, "idem-keys": 262144,
+            "pg-backoff-min-ms": 100, "pg-backoff-max-ms": 5000, "pg-attempt-ms": 5000, "pg-request-ms": 10000, "pg-start-wait-ms": 30000}
     base.update(kw)
     return base
 
@@ -178,6 +179,15 @@ def stage3():
     _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nrotation-grace-ms = 2592000000\n")
     shutil.rmtree(w)
     check("3. rotation-grace-ms 30 days (the most) from a file, read back", cfg == settings(**{"rotation-grace-ms": 2592000000}), str(cfg))
+    # the settings of the database's connections (docs/design.md section 37): by flag, by file, the file's beaten by the flag, 0 where 0 means "never"
+    _, _, cfg, w = serve(["--pg-backoff-min-ms", "20", "--pg-backoff-max-ms=800", "--pg-attempt-ms", "1500", "--pg-request-ms", "4000", "--pg-start-wait-ms", "9000"], None, {})
+    shutil.rmtree(w)
+    check("3. the five settings of the database's connections, as flags, read back",
+          cfg == settings(**{"pg-backoff-min-ms": 20, "pg-backoff-max-ms": 800, "pg-attempt-ms": 1500, "pg-request-ms": 4000, "pg-start-wait-ms": 9000}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf", "--pg-request-ms", "0"], "port = @PORT\ndir = @DIR\npg-backoff-min-ms = 50\npg-backoff-max-ms = 60\npg-attempt-ms = 7\npg-request-ms = 4000\npg-start-wait-ms = 0\n", {})
+    shutil.rmtree(w)
+    check("3. ... from a file too, and a flag beats the file (pg-request-ms 0: never; pg-start-wait-ms 0: for ever)",
+          cfg == settings(**{"pg-backoff-min-ms": 50, "pg-backoff-max-ms": 60, "pg-attempt-ms": 7, "pg-request-ms": 0, "pg-start-wait-ms": 0}), str(cfg))
     # the settings of the operating, credentials and per-endpoint work sit in one table of integers: every one given at once must come back as given
     _, _, cfg, w = serve(["--config", "@/hooks.conf", "--stop-deadline-ms", "1500", "--ingest-token", "ingest-token-1", "--rotation-grace-ms", "7200000",
                           "--repair-logs", "1", "--cron-seconds", "1", "--breaker-days", "3"], "port = @PORT\ndir = @DIR\nadmin-token = admin-token-1\nrotation-grace-ms = 1000\n", {})
@@ -238,6 +248,14 @@ def stage4():
     refused("rotation-grace-ms that is 0", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "0"], expect=["`--rotation-grace-ms` has a value"])
     refused("rotation-grace-ms over 30 days", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "2592000001"], expect=["`--rotation-grace-ms` has a value"])
     refused("rotation-grace-ms that is not a number", ["--port", "@PORT", "--dir", "@", "--rotation-grace-ms", "a day"], expect=["`--rotation-grace-ms` has a value"])
+    refused("pg-backoff-min-ms that is 0", ["--port", "@PORT", "--dir", "@", "--pg-backoff-min-ms", "0"], expect=["`--pg-backoff-min-ms` has a value"])
+    refused("pg-backoff-max-ms over an hour", ["--port", "@PORT", "--dir", "@", "--pg-backoff-max-ms", "3600001"], expect=["`--pg-backoff-max-ms` has a value"])
+    refused("pg-backoff-max-ms below pg-backoff-min-ms", ["--port", "@PORT", "--dir", "@", "--pg-backoff-min-ms", "500", "--pg-backoff-max-ms", "499"], expect=["pg-backoff-max-ms is below pg-backoff-min-ms"])
+    refused("pg-backoff-max-ms alone below the default first wait", ["--port", "@PORT", "--dir", "@", "--pg-backoff-max-ms", "50"], expect=["pg-backoff-max-ms is below pg-backoff-min-ms"])
+    refused("pg-attempt-ms that is 0", ["--port", "@PORT", "--dir", "@", "--pg-attempt-ms", "0"], expect=["`--pg-attempt-ms` has a value"])
+    refused("pg-request-ms that is not a number", ["--port", "@PORT", "--dir", "@", "--pg-request-ms", "never"], expect=["`--pg-request-ms` has a value"])
+    refused("pg-request-ms over an hour", ["--port", "@PORT", "--dir", "@", "--pg-request-ms", "3600001"], expect=["`--pg-request-ms` has a value"])
+    refused("pg-start-wait-ms over a day", ["--port", "@PORT", "--dir", "@", "--pg-start-wait-ms", "86400001"], expect=["`--pg-start-wait-ms` has a value"])
     refused("breaker-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--breaker-days", "soon"], expect=["`--breaker-days` has a value"])
     refused("breaker-days over 100 years", ["--port", "@PORT", "--dir", "@", "--breaker-days=36501"], expect=["`--breaker-days=36501` has a value"])
     refused("ingest-token that is too short", ["--port", "@PORT", "--dir", "@", "--ingest-token", "short"], expect=["`--ingest-token` has a value"])

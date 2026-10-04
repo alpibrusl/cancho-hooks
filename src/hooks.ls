@@ -2934,7 +2934,12 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                             while tag >= 0 {
                                 if tag == dbup.load_tag() {
                                     // the answer to the read of the endpoints table (section 37.2)
-                                    if pool.status(qw) != 0 {
+                                    if pool.status(qw) == 8 {
+                                        // the answer does not fit the pool's input slab (128 KiB): a table far over the 32 KiB of text the service reads
+                                        say_unreadable(io, 20, 6);
+                                        code = 20;
+                                        running = false;
+                                    } else if pool.status(qw) != 0 {
                                         // the connection went with the request on it: it is asked again when one is live
                                         history.set_load_state(dv[off_hq()..off_hq() + history.size()], 0);
                                     } else {

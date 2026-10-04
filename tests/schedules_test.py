@@ -43,6 +43,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 from pgproxy import PgProxy  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 128
@@ -117,7 +118,7 @@ class Svc:
             self.lines.append(line)
             if line in ("listening", ""):
                 break
-        self.up = line == "listening"
+        self.up = line == "listening" and not pgwait.after_listening(self.proc, self.lines, self.args)
         return self
 
     def stop(self):

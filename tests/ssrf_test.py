@@ -30,6 +30,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 PG = os.environ.get("HOOKS_PG", "127.0.0.1:5432:postgres:hooks").split(":")
@@ -90,8 +91,9 @@ def start(d, extra=()):
         lines.append(line)
         if line in ("listening", ""):
             break
+    gone = line == "listening" and pgwait.after_listening(proc, lines, extra)
     svc = Svc()
-    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening"
+    svc.port, svc.proc, svc.lines, svc.exited = port, proc, lines, line != "listening" or gone
     svc.status = proc.wait(timeout=10) if svc.exited else None
     return svc
 

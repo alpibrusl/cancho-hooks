@@ -40,6 +40,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+import pgwait  # noqa: E402
 from pgproxy import PgProxy  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 256
@@ -162,7 +163,7 @@ def start_service(endpoints, pg_port, schedule="100", deadline=800, extra_flags=
             break
     svc = type("Svc", (), {})()
     svc.port, svc.proc, svc.datadir, svc.lines = port, proc, datadir, lines
-    svc.exited = line != "listening"
+    svc.exited = line != "listening" or (line == "listening" and pgwait.after_listening(proc, lines, flags))
     return svc
 
 
@@ -213,11 +214,13 @@ def main():
     check("3. and the first run's rows are untouched", len(rows("where replay = 0 and endpoint = 0")) == 2, str(rows("where endpoint = 0")))
     stop(svc)
 
-    # 4. no database at start: the endpoints are its table, so the service refuses to start (it does not guess who to deliver to)
+    # 4. no database at start: the endpoints are its table. The start does not wait for it (it listens at once, section 37), and a service that never
+    # gets its endpoints ends with status 20 once `pg-start-wait-ms` has passed (it does not guess who to deliver to)
     psql("truncate attempts")
-    svc = start_service([b.port], closed_port())
-    check("4. the service does not start when the database it reads its endpoints from is not there",
-          svc.exited and svc.proc.wait() == 20 and any("cannot connect" in l for l in svc.lines), str(svc.lines))
+    t_start = time.time()
+    svc = start_service([b.port], closed_port(), extra_flags=("--pg-start-wait-ms", "1500"))
+    check("4. the service listens at once, and ends with status 20 and `cannot connect` when the database does not come within pg-start-wait-ms",
+          svc.exited and svc.lines[0] == "listening" and svc.proc.wait() == 20 and any("cannot connect" in l for l in svc.lines) and 1.4 <= time.time() - t_start <= 10, str((svc.lines, time.time() - t_start)))
     stop(svc)
 
     if PG_PASSWORD:
@@ -264,8 +267,8 @@ def main():
     check("6. delivery goes on after the database is cut: all 120 delivered", wait_for(lambda: stats(svc)["delivered"] == 120, 20), str(stats(svc)))
     wait_for(lambda: stats(svc)["history_failed"] + stats(svc)["history_dropped"] > 0, 10)
     st = stats(svc)
-    check("6. the rows that could not be written are counted (failed or dropped), the ones before the cut stay",
-          st["history_failed"] + st["history_dropped"] > 0 and int(psql("select count(*) from attempts")[0][0]) >= 20, str(st))
+    check("6. the rows that could not be written wait in the queue, or are counted (failed or dropped); the ones before the cut stay",
+          st["history_queue"] + st["history_failed"] + st["history_dropped"] > 0 and int(psql("select count(*) from attempts")[0][0]) >= 20, str(st))
     check("6. the service still answers", get(svc, "/healthz") == {"ok": True})
     stop(svc)
     proxy.close()
@@ -418,7 +421,9 @@ def main():
     # 11. the same request, when the database is not right
     psql("truncate attempts")
     proxy = PgProxy(PG_HOST, PG_PORT)
-    svc = start_service([b.port], proxy.port)
+    # (`--pg-request-ms 0`: the pool never gives up a connection that has gone silent, which is what these slots and their five seconds are about. With the
+    # default of ten seconds the connection is given up at ten and the request that is waiting then is a 503: tests/pgre_test.py says that.)
+    svc = start_service([b.port], proxy.port, extra_flags=("--pg-request-ms", "0"))
     for n in range(5):
         post(svc, n)
     wait_for(lambda: stats(svc)["history_written"] == 5, 10)
