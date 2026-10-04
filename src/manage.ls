@@ -18,6 +18,8 @@ import pg;
 //     [1] the pool's tag for it   [2] the ticket of the held connection   [3] keep the connection alive   [4] when to give up (ms)
 //     [5] port   [6] host length   [7] secret length   [8] 1 if the service has to make the secret
 //     [9 .. 265) the host   [265 .. 361) the secret, `whsec_` and base64
+//     [361] what it is: 0 a new endpoint, 1 a change (`PATCH`, section 25.3)   [362] the id of the endpoint a change is for
+//     [363] the members a change names: 1 host, 2 port, 4 secret, 8 rotate (a secret made by the service)
 
 pub fn token_size() -> [] int {
     return 256;
@@ -61,6 +63,18 @@ pub fn mg_secret_len() -> [] int {
 
 pub fn mg_make() -> [] int {
     return 8;
+}
+
+pub fn mg_kind() -> [] int {
+    return 361;
+}
+
+pub fn mg_target() -> [] int {
+    return 362;
+}
+
+pub fn mg_fields() -> [] int {
+    return 363;
 }
 
 pub fn mg_host() -> [] int {
@@ -152,6 +166,12 @@ pub fn why(code: int) -> [] &static [byte] {
     if code == 5 {
         return "a new endpoint starts from now: \"from\" may only be \"now\"";
     }
+    if code == 7 {
+        return "a change needs at least one of \"host\", \"port\", \"secret\" and \"rotate\"";
+    }
+    if code == 8 {
+        return "\"rotate\" must be true, and cannot be given with a \"secret\"";
+    }
     if code == 6 {
         return "the host must be a public IPv4 address (four numbers, no name; loopback, private, link-local and reserved ranges are refused: SSRF)";
     }
@@ -242,6 +262,8 @@ pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!
         mg[mg_secret() + i] = int_of(scratch[256 + i]);
         i = i + 1;
     }
+    mg[mg_kind()] = 0;
+    mg[mg_fields()] = 0;
     mg[mg_port()] = port;
     mg[mg_host_len()] = host_len;
     mg[mg_secret_len()] = secret_len;
@@ -251,6 +273,104 @@ pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!
         mg[mg_make()] = 0;
     }
     return (0, port, host_len, secret_len);
+}
+
+// What a `PATCH /endpoints/:id` body says, kept in `mg` as `parse_create` does: any of `host`, `port`, `secret` (a secret to use) and
+// `rotate` (`true`: the service makes one). Answers `(code, members)`: 0 and the members it names (1 host, 2 port, 4 secret, 8 rotate),
+// or a refusal code for `why`. What it does not name is not touched (the caller fills in the current host and port when it sends the update).
+pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], mg: &!m [int], open: bool) -> [heap] (int, int) {
+    var code = 0;
+    var fields = 0;
+    var port = 0;
+    var host_len = 0;
+    var secret_len = 0;
+    let tape = box_slice(heap, json.tape_len(body), 0);
+    borrow mut tape as &!tw in {
+        let t = contents(tw);
+        if json.parse(body, t) < 0 || !json.is_object(t, 0) {
+            code = 1;
+        } else {
+            let host = json.get(body, t, 0, "host");
+            if host >= 0 {
+                fields = fields + 1;
+                if !json.is_string(t, host) {
+                    code = 2;
+                } else {
+                    host_len = json.string_into(body, t, host, scratch[0..253]);
+                    if host_len < 1 || !printable(scratch[0..host_len]) {
+                        code = 2;
+                    } else if !open && !destination.allowed(scratch[0..host_len]) {
+                        code = 6;
+                    }
+                }
+            }
+            if code == 0 {
+                let p = json.get(body, t, 0, "port");
+                if p >= 0 {
+                    fields = fields + 2;
+                    if !json.is_int(t, p) || !json.fits_int(body, t, p) {
+                        code = 3;
+                    } else {
+                        port = json.to_int(body, t, p);
+                        if port < 1 || port > 65535 {
+                            code = 3;
+                        }
+                    }
+                }
+            }
+            if code == 0 {
+                let sc = json.get(body, t, 0, "secret");
+                if sc >= 0 {
+                    fields = fields + 4;
+                    if !json.is_string(t, sc) {
+                        code = 4;
+                    } else {
+                        secret_len = json.string_into(body, t, sc, scratch[256..352]);
+                        if secret_len < 7 || !printable(scratch[256..256 + secret_len]) {
+                            code = 4;
+                        }
+                    }
+                }
+            }
+            if code == 0 {
+                let r = json.get(body, t, 0, "rotate");
+                if r >= 0 {
+                    fields = fields + 8;
+                    if !json.is_bool(t, r) || !json.to_bool(t, r) || fields >= 12 {
+                        code = 8;
+                    }
+                }
+            }
+            if code == 0 && fields == 0 {
+                code = 7;
+            }
+        }
+    }
+    unbox_slice(heap, tape);
+    if code != 0 {
+        return (code, 0);
+    }
+    var i = 0;
+    while i < host_len {
+        mg[mg_host() + i] = int_of(scratch[i]);
+        i = i + 1;
+    }
+    i = 0;
+    while i < secret_len {
+        mg[mg_secret() + i] = int_of(scratch[256 + i]);
+        i = i + 1;
+    }
+    mg[mg_port()] = port;
+    mg[mg_host_len()] = host_len;
+    mg[mg_secret_len()] = secret_len;
+    mg[mg_kind()] = 1;
+    mg[mg_fields()] = fields;
+    if fields >= 8 {
+        mg[mg_make()] = 1;
+    } else {
+        mg[mg_make()] = 0;
+    }
+    return (0, fields);
 }
 
 // Make a secret for the endpoint in `mg`: `whsec_` and the base64 of 24 bytes from the kernel. Answers 0, or -1 if the kernel did not

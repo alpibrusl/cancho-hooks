@@ -103,3 +103,79 @@ fn test_at_most_max_endpoints_are_accepted() -> [] int {
     }
     return 0;
 }
+
+// `replace` and `compact` (`docs/design.md` section 25.4): a change of host and key goes after the used bytes, the old ones are left until the blob is full, and then
+// everything is moved to the front without changing what any endpoint says.
+
+fn test_replace_changes_one_endpoint_and_leaves_the_others() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let scratch = alloc_slice[a](512, byte_of(0));
+        let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
+        test.assert_eq(endpoints.parse(text, table, blob, true), 2);
+        let key = alloc_slice[a](3, byte_of('k'));
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 9100, "9.9.9.9", key, scratch), 0);
+        test.assert_eq(endpoints.port_of(table, 0), 9100);
+        test.assert_eq(len(endpoints.host_of(table, blob, 0)), 7);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('9')));
+        test.assert_eq(len(endpoints.key_of(table, blob, 0)), 3);
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 0)[2]), int_of(byte_of('k')));
+        test.assert_eq(endpoints.port_of(table, 1), 9002);
+        test.assert_eq(len(endpoints.host_of(table, blob, 1)), 7);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[0]), int_of(byte_of('1')));
+        test.assert_eq(len(endpoints.key_of(table, blob, 1)), 8);
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 1)[0]), int_of(byte_of('s')));
+        test.assert_eq(endpoints.slot_of(table, 0), 1);
+        test.assert_eq(endpoints.ident_of(table, 1), 2);
+    }
+    return 0;
+}
+
+fn test_compact_moves_everything_to_the_front_unchanged() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let scratch = alloc_slice[a](512, byte_of(0));
+        let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
+        test.assert_eq(endpoints.parse(text, table, blob, true), 2);
+        let used = endpoints.blob_used(table, 2);
+        let key = alloc_slice[a](3, byte_of('k'));
+        // three replacements leave three old entries behind
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 1, "5.5.5.5", key, scratch), 0);
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 2, "6.6.6.6", key, scratch), 0);
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 3, "7.7.7.7", key, scratch), 0);
+        test.assert(endpoints.blob_used(table, 2) > used + 20);
+        let packed = endpoints.compact(table, blob, 2, scratch);
+        test.assert_eq(packed, 7 + 3 + 7 + 8);
+        test.assert_eq(endpoints.blob_used(table, 2), packed);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('7')));
+        test.assert_eq(endpoints.port_of(table, 0), 3);
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 0)[1]), int_of(byte_of('k')));
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[6]), int_of(byte_of('1')));
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 1)[7]), int_of(byte_of('!')));
+    }
+    return 0;
+}
+
+fn test_replace_compacts_when_the_blob_is_full_and_refuses_when_it_cannot() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](40, byte_of(0));
+        let scratch = alloc_slice[a](40, byte_of(0));
+        // 7 + 8 (host and key of 1) and 7 + 8 (of 2) = 30 of 40 bytes
+        let text = "1 8.8.8.8 9001 c2VjcmV0ISE=\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
+        test.assert_eq(endpoints.parse(text, table, blob, true), 2);
+        let key = alloc_slice[a](8, byte_of('k'));
+        // 7 + 8 more does not fit after 30, but does once the old 15 bytes of endpoint 1 (the one being changed) are taken out
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 5, "9.9.9.9", key, scratch), 0);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('9')));
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[0]), int_of(byte_of('1')));
+        test.assert_eq(endpoints.blob_used(table, 2), 30);
+        // a host that cannot fit however the blob is packed is refused and nothing changes
+        test.assert_eq(endpoints.replace(table, blob, 2, 0, 6, "123456789012345678901234567890", key, scratch), 0 - 1);
+        test.assert_eq(endpoints.port_of(table, 0), 5);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('9')));
+    }
+    return 0;
+}

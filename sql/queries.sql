@@ -16,3 +16,9 @@ insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on confli
 
 -- name: create_endpoint host port secret
 insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id
+
+-- name: patch_endpoint id host port secret
+update endpoints set host = $2::text, port = $3::int, secret = $4::text where id = $1::int returning id
+
+-- name: patch_address id host port
+update endpoints set host = $2::text, port = $3::int where id = $1::int returning id

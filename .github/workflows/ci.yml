@@ -92,6 +92,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/slots_test.py build/hooks
 
+      - name: Change an endpoint without a restart (PATCH)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/patch_test.py build/hooks
+
       - name: Where a delivery may go (no private, loopback or reserved addresses, no names)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ssrf_test.py build/hooks
