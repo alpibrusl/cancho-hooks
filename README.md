@@ -125,7 +125,7 @@ Webhook("whsec_...").verify(body, {"webhook-id": "evt_1", "webhook-timestamp": "
 ```
 
 **Several endpoints.** `endpoints.conf`, in the data directory, takes one endpoint a line (`#` comments and blank lines are
-ignored). It is its own file because it holds the secrets: give it the permissions secrets need, and keep it out of the settings.
+ignored; at most 62 endpoints, each with an id of up to six digits, written and never counted). It is its own file because it holds the secrets: give it the permissions secrets need, and keep it out of the settings.
 
 ```
 # <id> <host> <port> <secret>
@@ -208,6 +208,8 @@ $LEX_SYS test                                      # the four unit-test sets of 
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/history_test.py build/hooks   # the history in PostgreSQL (needs one: see the file)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/roster_test.py build/hooks    # the endpoints in PostgreSQL: import, read at start, every refusal
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/slots_test.py build/hooks     # endpoint ids and slots: the legacy log, ids above 15, dormant, reclaimed
+python3 tests/layout_test.py build/hooks           # the delivery state's regions do not overlap (2,300 events, two fail once)
 python3 tests/replay_test.py build/hooks           # replay: one endpoint or all, restarts, capacity, an event far behind the cursor
 python3 tests/gone_test.py build/hooks             # 410 Gone disables an endpoint, restarts keep it, enable undoes it
 python3 tests/config_test.py build/hooks           # settings: a file, flags, which wins, and every refusal

@@ -211,3 +211,53 @@ fn test_replay_records_read_back_and_change_no_cell() -> [] int {
     }
     return 0;
 }
+
+// The slot records read back as themselves (the id and the starting cursor ride in the event and attempts fields), and `apply`
+// does nothing with them.
+fn test_slot_records_read_back_and_change_no_cell() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        state.put_outcome(buf, 0, 9, state.created(), 3, 999999, 41, 0);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, state.created());
+        test.assert_eq(o.1, 3);
+        test.assert_eq(o.2, 999999);
+        test.assert_eq(o.3, 41);
+        state.put_outcome(buf, 0, 10, state.removed(), 3, 0, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, state.removed());
+        test.assert_eq(state.outcome_at(buf, 0).1, 3);
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.created(), 1, 41, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.removed(), 1, 0, 0), 0);
+        test.assert_eq(c[0], 0);
+        test.assert(!state.is_final(w, c, 0, 1));
+    }
+    return 0;
+}
+
+// `reset` empties one slot's window and moves its cursor, and touches no other slot.
+fn test_reset_empties_one_slot_and_only_that_one() -> [] int {
+    region a {
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        state.apply(w, c, 0, state.delivered(), 1, 1, 0);
+        state.apply(w, c, 0, state.failed(), 3, 2, 7000);
+        state.apply(w, c, 1, state.delivered(), 1, 1, 0);
+        state.apply(w, c, 1, state.failed(), 4, 3, 8000);
+        test.assert_eq(state.reset(w, c, 0, 50), 0);
+        test.assert_eq(c[0], 50);
+        test.assert(!state.is_final(w, c, 0, 51));
+        test.assert_eq(state.attempts(w, 0, 51), 0);
+        test.assert_eq(state.attempts(w, 0, 3 + 1024), 0);
+        test.assert_eq(state.next_at(w, 0, 3 + 1024), 0);
+        // slot 1 is as it was
+        test.assert_eq(c[1], 1);
+        test.assert_eq(state.attempts(w, 1, 4), 3);
+        test.assert_eq(state.next_at(w, 1, 4), 8000);
+        // a reset slot works as a new one
+        test.assert_eq(state.apply(w, c, 0, state.delivered(), 51, 1, 0), 0);
+        test.assert_eq(c[0], 51);
+    }
+    return 0;
+}

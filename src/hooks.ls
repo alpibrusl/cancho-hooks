@@ -409,17 +409,19 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
     if id == 6 {
         // POST /endpoints/:id/enable: let a disabled endpoint be tried again. Answers 200 whether it was disabled or not.
         let want = route.param_nat(path, params, 0);
-        if want < 0 || want >= state.max_endpoints() {
-            return server.failure(heap, out, 400, "the id must be a number below 16", keep);
+        if want < 0 {
+            return server.failure(heap, out, 400, "the id must be a number", keep);
         }
-        if index_of(stats, want) < 0 {
+        let wi = index_of_id(stats, want);
+        if wi < 0 {
             return server.failure(heap, out, 404, "no such endpoint", keep);
         }
-        if is_disabled(stats, want) {
-            if note_endpoint(done, stats, state.enabled(), want) == 0 || log.flush(done) != 0 {
+        let slot = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+        if is_disabled(stats, slot) {
+            if note_endpoint(done, stats, state.enabled(), slot) == 0 || log.flush(done) != 0 {
                 return server.failure(heap, out, 503, "the change could not be stored", keep);
             }
-            set_disabled(stats, want, false);
+            set_disabled(stats, slot, false);
         }
         return server.reply(heap, out, 200, "{\"enabled\":true}", keep);
     }
@@ -430,10 +432,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.begin_array(heap, w);
         var i = 0;
         while i < stats[c_endpoints()] {
-            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
             w = json.begin_object(heap, w);
             w = json.put_key(heap, w, "id");
-            w = json.put_int(heap, w, e);
+            w = json.put_int(heap, w, endpoints.ident_of(stats[off_table()..off_table() + endpoints.table_size()], i));
             w = json.put_key(heap, w, "port");
             w = json.put_int(heap, w, endpoints.port_of(stats[off_table()..off_table() + endpoints.table_size()], i));
             w = json.put_key(heap, w, "cursor");
@@ -461,12 +463,14 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         var only = 0 - 1;
         if id == 9 {
             only = route.param_nat(path, params, 1);
-            if only < 0 || only >= state.max_endpoints() {
-                return server.failure(heap, out, 400, "the endpoint must be a number below 16", keep);
+            if only < 0 {
+                return server.failure(heap, out, 400, "the endpoint must be a number", keep);
             }
-            if index_of(stats, only) < 0 {
+            let oi = index_of_id(stats, only);
+            if oi < 0 {
                 return server.failure(heap, out, 404, "no such endpoint", keep);
             }
+            only = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], oi);
         }
         let offset = find_offset(lg, window, want);
         if offset < 0 {
@@ -475,7 +479,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         var needed = 0;
         var i = 0;
         while i < stats[c_endpoints()] {
-            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
             if (only < 0 || e == only) && rp_find(stats, e, want) < 0 {
                 needed = needed + 1;
             }
@@ -487,7 +491,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         // The records first, then one flush, and only then the table: a replay that was not stored is not started.
         i = 0;
         while i < stats[c_endpoints()] {
-            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
             if only < 0 || e == only {
                 if note_outcome(done, stats, state.replay(), e, want, 0, 0) == 0 {
                     return server.failure(heap, out, 503, "the replay could not be stored", keep);
@@ -506,10 +510,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.begin_array(heap, w);
         i = 0;
         while i < stats[c_endpoints()] {
-            let e = endpoints.id_of(stats[off_table()..off_table() + endpoints.table_size()], i);
+            let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
             if only < 0 || e == only {
                 rp_put(stats, e, want, offset);
-                w = json.put_int(heap, w, e);
+                w = json.put_int(heap, w, endpoints.ident_of(stats[off_table()..off_table() + endpoints.table_size()], i));
             }
             i = i + 1;
         }
@@ -572,15 +576,18 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 // Delivery
 // ---------------------------------------------------------------------
 
-// The delivery state is one heap array of integers, `dv`, laid out as follows (`docs/design.md` section 15):
+// The delivery state is one heap array of integers, `dv`, laid out as follows (`docs/design.md` sections 15 and 25). Every offset
+// is computed from the one before it (`off_*` below): the offsets table once overlapped the cells because two of them were written
+// by hand.
 //
 //     ctl      16    counters and the scan position (the `c_*` indices below)
-//     table    96    the endpoints, six integers each (`endpoints.ls`)
-//     cur      16    per endpoint id: every event up to this one is final
+//     table    434   the endpoints, seven integers each (`endpoints.ls`); the first is the *slot*, the last the *id*
+//     cur      62    per slot: every event up to this one is final
 //     sched    17    the retry schedule: the number of delays, then the delays in ms
-//     flying   16    per endpoint id: how many attempts are in flight
+//     flying   62    per slot: how many attempts are in flight
+//     slotid   62    per slot: the id of the endpoint that has it, or free, or never seen
 //     offs     1024  where in the events log each event of the window starts, by `id % window`
-//     cells    ...   `state.cells(16)`: final / attempts / next attempt, per endpoint id and `id % window`
+//     cells    ...   `state.cells(62)`: final / attempts / next attempt, per slot and `id % window`
 
 fn c_scanned() -> [] int {
     return 0;
@@ -666,23 +673,36 @@ fn off_table() -> [] int {
 }
 
 fn off_cur() -> [] int {
-    return 112;
+    return off_table() + endpoints.table_size();
 }
 
 fn off_sched() -> [] int {
-    return 128;
+    return off_cur() + state.max_endpoints();
 }
 
 fn off_flying() -> [] int {
-    return 145;
+    return off_sched() + 17;
+}
+
+// Per slot: the id of the endpoint that has it, `slot_free()` if none does, `slot_unseen()` if the log has never mentioned it.
+fn off_slotid() -> [] int {
+    return off_flying() + state.max_endpoints();
 }
 
 fn off_offs() -> [] int {
-    return 161;
+    return off_slotid() + state.max_endpoints();
 }
 
 fn off_cells() -> [] int {
-    return 145 + state.span();
+    return off_offs() + state.span();
+}
+
+fn slot_free() -> [] int {
+    return 0 - 1;
+}
+
+fn slot_unseen() -> [] int {
+    return 0 - 2;
 }
 
 // One flag per cell: is an attempt at this (endpoint, event) in flight? (An event with one is not started again.)
@@ -861,7 +881,7 @@ fn lowmark[&d](dv: &d [int]) -> [] int {
     return low;
 }
 
-// The index in the table of the endpoint with id `e`, or -1.
+// The index in the table of the endpoint in slot `e`, or -1.
 fn index_of[&d](dv: &d [int], e: int) -> [] int {
     var i = 0;
     while i < dv[c_endpoints()] {
@@ -871,6 +891,137 @@ fn index_of[&d](dv: &d [int], e: int) -> [] int {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+// The index in the table of the endpoint with id `ident` (what the API and the history call it), or -1.
+fn index_of_id[&d](dv: &d [int], ident: int) -> [] int {
+    var i = 0;
+    while i < dv[c_endpoints()] {
+        if dv[off_table() + i * endpoints.stride() + 6] == ident {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// The id of the endpoint in slot `e`, or -1 if no endpoint has it.
+fn ident_of_slot[&d](dv: &d [int], e: int) -> [] int {
+    let i = index_of(dv, e);
+    if i < 0 {
+        return 0 - 1;
+    }
+    return dv[off_table() + i * endpoints.stride() + 6];
+}
+
+// Append the record that endpoint `ident` was given slot `e` with its cursor at `start`, or that the slot was freed, to `done`,
+// not yet flushed. Answers 1 if it was appended, 0 if the log refused it.
+fn note_created[&g, &d](done: &!g log.Log, dv: &!d [int], e: int, ident: int, start: int) -> [file_write] int {
+    return note_outcome(done, dv, state.created(), e, ident, start, 0);
+}
+
+fn note_removed[&g, &d](done: &!g log.Log, dv: &!d [int], e: int) -> [file_write] int {
+    return note_outcome(done, dv, state.removed(), e, 0, 0, 0);
+}
+
+// Pass one over the outcome log (`docs/design.md` section 25): which endpoint has each slot, and the largest sequence number. A
+// log written before slots had records mentions an endpoint only by the number of its outcomes, and that number was its id, so a
+// slot first met in an outcome belongs to the endpoint with that id. An outcome for a slot that has been freed is stale and does
+// not give it back. Records that are not outcomes are counted by the second pass, which refuses the log.
+fn scan_slots[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [file_read] int {
+    var k = 0;
+    while k < state.max_endpoints() {
+        dv[off_slotid() + k] = slot_unseen();
+        k = k + 1;
+    }
+    var at = 0;
+    var going = true;
+    while going {
+        let r = log.read_at(done, at, window);
+        if r.0 != 0 {
+            going = false;
+        } else {
+            let o = state.outcome_at(window, 0);
+            if o.0 != 0 && o.1 >= 0 && o.1 < state.max_endpoints() {
+                if o.0 == state.created() {
+                    dv[off_slotid() + o.1] = o.2;
+                } else if o.0 == state.removed() {
+                    dv[off_slotid() + o.1] = slot_free();
+                } else if dv[off_slotid() + o.1] == slot_unseen() {
+                    dv[off_slotid() + o.1] = o.1;
+                }
+            }
+            if record.ms_of(window, 0) >= dv[c_seq()] {
+                dv[c_seq()] = record.ms_of(window, 0) + 1;
+            }
+            at = at + r.1;
+        }
+    }
+    return 0;
+}
+
+// Give each endpoint of the table the slot the log says it has, and a slot (with a `created` record, flushed) to each that has none:
+// the slot with its own number if that is not taken, else the lowest that is. An endpoint that is in the log and not in the table
+// is dormant: its slot stays its own and its state is rebuilt if it comes back, until a new endpoint needs the slot, and then it is
+// freed with a `removed` record. Answers 0, or 1 if the log refused a record.
+fn assign_slots[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+    let n = dv[c_endpoints()];
+    let most = state.max_endpoints();
+    var wrote = 0;
+    var i = 0;
+    while i < n {
+        let ident = dv[off_table() + i * endpoints.stride() + 6];
+        var found = 0 - 1;
+        var k = 0;
+        while k < most {
+            if dv[off_slotid() + k] == ident && found < 0 {
+                found = k;
+            }
+            k = k + 1;
+        }
+        dv[off_table() + i * endpoints.stride()] = found;
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        if dv[off_table() + i * endpoints.stride()] < 0 {
+            let ident = dv[off_table() + i * endpoints.stride() + 6];
+            var slot = 0 - 1;
+            if ident < most && dv[off_slotid() + ident] < 0 {
+                slot = ident;
+            }
+            var k = 0;
+            while k < most && slot < 0 {
+                if dv[off_slotid() + k] < 0 {
+                    slot = k;
+                }
+                k = k + 1;
+            }
+            k = 0;
+            while k < most && slot < 0 {
+                if dv[off_slotid() + k] >= 0 && index_of_id(dv, dv[off_slotid() + k]) < 0 {
+                    if note_removed(done, dv, k) == 0 {
+                        return 1;
+                    }
+                    dv[off_slotid() + k] = slot_free();
+                    slot = k;
+                    wrote = wrote + 1;
+                }
+                k = k + 1;
+            }
+            if slot < 0 || note_created(done, dv, slot, ident, 0) == 0 {
+                return 1;
+            }
+            dv[off_slotid() + slot] = ident;
+            dv[off_table() + i * endpoints.stride()] = slot;
+            wrote = wrote + 1;
+        }
+        i = i + 1;
+    }
+    if wrote > 0 && log.flush(done) != 0 {
+        return 1;
+    }
+    return 0;
 }
 
 // Apply one replay record to the table of replays (`docs/design.md` section 23): asked for, failed (with its count and the time of
@@ -912,6 +1063,22 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             } else if o.0 >= state.replay() && o.0 <= state.replay_dead() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
                     recover_replay(dv, o.0, o.1, o.2, o.3, o.4);
+                }
+            } else if o.0 == state.created() || o.0 == state.removed() {
+                if o.1 >= 0 && o.1 < state.max_endpoints() {
+                    var start = 0;
+                    if o.0 == state.created() {
+                        start = o.3;
+                    }
+                    state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], o.1, start);
+                    set_disabled(dv, o.1, false);
+                    var r2 = 0;
+                    while r2 < rp_cap() {
+                        if dv[off_rp() + r2 * rp_stride() + 1] == o.1 {
+                            dv[off_rp() + r2 * rp_stride()] = 0;
+                        }
+                        r2 = r2 + 1;
+                    }
                 }
             } else if o.0 == state.disabled() || o.0 == state.enabled() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
@@ -1039,7 +1206,7 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
         } else if kind == state.replay_dead() {
             outcome = state.dead();
         }
-        history.push(dv[off_hq()..off_hq() + history.size()], e, id, 1, tries, outcome, code, clock_unix_ms(clock), latency);
+        history.push(dv[off_hq()..off_hq() + history.size()], ident_of_slot(dv, e), id, 1, tries, outcome, code, clock_unix_ms(clock), latency);
     }
     if ok == 1 && code == 410 && !is_disabled(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
@@ -1110,7 +1277,7 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
         }
     }
     if ok == 1 {
-        history.push(dv[off_hq()..off_hq() + history.size()], e, id, 0, tries, kind, code, clock_unix_ms(clock), latency);
+        history.push(dv[off_hq()..off_hq() + history.size()], ident_of_slot(dv, e), id, 0, tries, kind, code, clock_unix_ms(clock), latency);
     }
     if ok == 1 && code == 410 && !is_disabled(dv, e) {
         if note_endpoint(done, dv, state.disabled(), e) == 1 {
@@ -1160,7 +1327,7 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
         return (atab, 0);
     }
     let p = record.pair_at(window, record.first_pair(0));
-    let e = endpoints.id_of(dv[off_table()..off_table() + endpoints.table_size()], i);
+    let e = endpoints.slot_of(dv[off_table()..off_table() + endpoints.table_size()], i);
     let request = request_for(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), clock_unix_ms(clock) / 1000);
     var table = atab;
     var started = 0 - 1;
@@ -1611,7 +1778,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
     }
 }
 
-// Read `<dir>/endpoints.conf` into `out` (16 KiB). Answers the number of bytes, 0 if there is no such file (the service then only
+// Read `<dir>/endpoints.conf` into `out` (32 KiB). Answers the number of bytes, 0 if there is no such file (the service then only
 // ingests), or -1000 if the file cannot be read or is too large.
 fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte]) -> [fs_read(""), file_read] int {
     region a {
@@ -1641,7 +1808,7 @@ fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte
                     }
                 }
                 file_close(rd);
-                if got >= 0 && got < 16384 {
+                if got >= 0 && got < endpoints.text_limit() {
                     return got;
                 }
                 return 0 - 1000;
@@ -1653,7 +1820,7 @@ fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte
 // Read `<dir>/endpoints.conf` into the delivery state. Answers the number of endpoints, 0 if there is no such file (the service
 // then only ingests), or a negative number: `0 - line` for the first bad line, -1000 if the file cannot be read or is too large.
 fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], dv: &!v [int], blob: &!b [byte]) -> [heap, fs_read(""), file_read] int {
-    let text = box_slice(heap, 16384, byte_of(0));
+    let text = box_slice(heap, endpoints.text_limit(), byte_of(0));
     var result = 0 - 1000;
     borrow mut text as &!tw in {
         let got = read_endpoints_file(fs, dir, contents(tw));
@@ -1702,7 +1869,7 @@ fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], a
 
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // scan of the events log positioned at the slowest endpoint. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool) -> [heap, fs_read(""), file_read] int {
+fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool) -> [heap, fs_read(""), file_read, file_write] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
     dv[c_deadline()] = default_deadline_ms();
     if deadline_ms > 0 {
@@ -1727,6 +1894,10 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
     }
     dv[c_endpoints()] = n;
     if n > 0 {
+        scan_slots(done, window, dv);
+        if assign_slots(done, dv) != 0 {
+            return 17;
+        }
         if replay(done, window, dv) > 0 {
             return 15;
         }
@@ -1848,6 +2019,22 @@ fn say[&i, &t](out: &!i Io, text: &t [byte]) -> [err_write] int {
     return io.error_all(out, text);
 }
 
+// Parse `text` into scratch tables, to find out whether `endpoints.parse` accepts it: the number of endpoints, or `0 - line`. The scratch
+// is on the heap because it is as large as the text, and a region of `main` has room for the text and not for a second copy of it.
+fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte]) -> [heap] int {
+    let table = box_slice(heap, endpoints.table_size(), 0);
+    let blob = box_slice(heap, endpoints.text_limit(), byte_of(0));
+    var count = 0;
+    borrow mut table as &!tw in {
+        borrow mut blob as &!bw in {
+            count = endpoints.parse(text, contents(tw), contents(bw));
+        }
+    }
+    unbox_slice(heap, table);
+    unbox_slice(heap, blob);
+    return count;
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock } = split(world);
     release(ffi);
@@ -1930,7 +2117,7 @@ fn main(world: World) -> [] int {
         // The endpoints (section 24, C3c): with a database named they are its `endpoints` table, read here, before the logs are
         // opened and before the service listens, and a database that cannot be read is a refusal to start (the file is not a
         // fallback: a stale list delivers to the wrong receivers). `--import-endpoints 1` copies the file into the table and exits.
-        let etext = alloc_slice[a](16384, byte_of(0));
+        let etext = alloc_slice[a](endpoints.text_limit(), byte_of(0));
         var etext_n = 0;
         var from_db = false;
         var go = bad == 0 && dir_len > 0;
@@ -1953,8 +2140,6 @@ fn main(world: World) -> [] int {
                     say(i, "hooks: --import-endpoints needs --pg-host\n");
                 }
             } else {
-                let scratch = alloc_slice[a](endpoints.table_size(), 0);
-                let sblob = alloc_slice[a](16384, byte_of(0));
                 var text_len = 0;
                 borrow fs as &fs0 in {
                     text_len = read_endpoints_file(fs0, cblob[0..dir_len], etext);
@@ -1964,7 +2149,10 @@ fn main(world: World) -> [] int {
                         say(i, "hooks: no endpoints.conf to import in --dir\n");
                     }
                 } else {
-                    let count = endpoints.parse(etext[0..text_len], scratch, sblob);
+                    var count = 0;
+                    borrow mut heap as &!h0 in {
+                        count = parse_check(h0, etext[0..text_len]);
+                    }
                     if count < 0 {
                         borrow mut io as &!i in {
                             let nb = alloc_slice[a](12, byte_of(0));
@@ -2022,15 +2210,16 @@ fn main(world: World) -> [] int {
                     } else if got == 0 - 4 {
                         say(i, "a row has an empty field or a byte that is not printable\n");
                     } else {
-                        say(i, "the table is too large (the service reads at most 16 KiB of it)\n");
+                        say(i, "the table is too large (the service reads at most 32 KiB of it)\n");
                     }
                 }
             } else {
                 etext_n = got;
                 from_db = true;
-                let scratch = alloc_slice[a](endpoints.table_size(), 0);
-                let sblob = alloc_slice[a](16384, byte_of(0));
-                let count = endpoints.parse(etext[0..etext_n], scratch, sblob);
+                var count = 0;
+                borrow mut heap as &!h0 in {
+                    count = parse_check(h0, etext[0..etext_n]);
+                }
                 if count < 0 {
                     go = false;
                     status = 13;
@@ -2038,7 +2227,7 @@ fn main(world: World) -> [] int {
                         let nb = alloc_slice[a](12, byte_of(0));
                         say(i, "hooks: the endpoints table: row ");
                         say(i, nb[0..digits_of(0 - count, nb)]);
-                        say(i, " is not valid (an id of 16 or more, a repeated id, a port, or a secret that is not whsec_ and base64)\n");
+                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
                     }
                 }
             }
@@ -2048,7 +2237,7 @@ fn main(world: World) -> [] int {
             borrow mut heap as &!h in {
                 var wbuf = buffer.empty(h, max_len() + 4096);
                 let dvb = box_slice(h, dv_size(), 0);
-                let blob = box_slice(h, 16384, byte_of(0));
+                let blob = box_slice(h, endpoints.text_limit(), byte_of(0));
                 let ixb = box_slice(h, idem.ix_size(), 0);
                 let arenab = box_slice(h, idem.arena_size(), byte_of(0));
                 borrow mut wbuf as &!wb in {

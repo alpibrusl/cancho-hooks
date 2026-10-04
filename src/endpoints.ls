@@ -11,23 +11,30 @@ import state;
 //
 //     <id> <host> <port> <secret>
 //
-// with `#` comments and blank lines ignored. The id is a number below `state.max_endpoints()` and is the endpoint's identity
-// in the outcome log, so it must not change when the file is reordered: it is written, not counted. The secret is a Standard
+// with `#` comments and blank lines ignored. The id is a number of at most six digits and is the endpoint's identity, so it
+// must not change when the file is reordered: it is written, not counted. The secret is a Standard
 // Webhooks one (`whsec_` and base64); what is kept is the key it decodes to.
 //
-// `parse` fills a table of six integers per endpoint, in the order the lines came:
+// `parse` fills a table of seven integers per endpoint, in the order the lines came:
 //
-//     [id, port, host_start, host_len, key_start, key_len]
+//     [slot, port, host_start, host_len, key_start, key_len, id]
 //
 // where the starts index `blob`. The caller sizes both: `table` for `state.max_endpoints()` endpoints, `blob` for the file's
-// own length (a host and a key are never longer than the line they came from).
+// own length (a host and a key are never longer than the line they came from). The **id** is the endpoint's identity (what the
+// API and the history call it, 0 to 999999, never reused); the **slot** is its place in the delivery state's arrays, which
+// `parse` cannot know: it writes the id there, and `hooks.ls` replaces it once it has read the log (`docs/design.md` section 25).
 
 pub fn stride() -> [] int {
-    return 6;
+    return 7;
 }
 
 pub fn table_size() -> [] int {
-    return 6 * state.max_endpoints();
+    return 7 * state.max_endpoints();
+}
+
+// The most bytes of text (a file, or the database's table written as one) that `parse` is given.
+pub fn text_limit() -> [] int {
+    return 32768;
 }
 
 fn is_space(c: int) -> [] bool {
@@ -65,7 +72,7 @@ pub fn number[&t](text: &t [byte], from: int, to: int) -> [] int {
 }
 
 // Parse the file. Answers the number of endpoints, or `0 - line` (the 1-based line number, negated) of the first line that is
-// wrong: not four fields, an id that is not a number below the limit or is repeated, a port outside 1 to 65535, a secret that
+// wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a secret that
 // is not base64, or more than `state.max_endpoints()` endpoints.
 pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) -> [] int {
     var count = 0;
@@ -89,7 +96,7 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) ->
             }
             let id = number(text, first.0, first.1);
             let p = number(text, port.0, port.1);
-            if id < 0 || id >= state.max_endpoints() || p < 1 || p > 65535 || count >= state.max_endpoints() {
+            if id < 0 || p < 1 || p > 65535 || count >= state.max_endpoints() {
                 return 0 - line;
             }
             var i = 0;
@@ -116,6 +123,7 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) ->
             }
             table[base + 4] = used;
             table[base + 5] = klen;
+            table[base + 6] = id;
             used = used + klen;
             count = count + 1;
         }
@@ -124,9 +132,18 @@ pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte]) ->
     return count;
 }
 
-// The `i`th endpoint's id, port, host and key.
-pub fn id_of[&n](table: &n [int], i: int) -> [] int {
+// The `i`th endpoint's slot, id, port, host and key.
+pub fn slot_of[&n](table: &n [int], i: int) -> [] int {
     return table[i * stride()];
+}
+
+pub fn ident_of[&n](table: &n [int], i: int) -> [] int {
+    return table[i * stride() + 6];
+}
+
+pub fn set_slot[&n](table: &!n [int], i: int, slot: int) -> [] int {
+    table[i * stride()] = slot;
+    return 0;
 }
 
 pub fn port_of[&n](table: &n [int], i: int) -> [] int {

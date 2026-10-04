@@ -153,7 +153,7 @@ def main():
     # 6. the edges
     check("6. enabling an enabled endpoint is a 200", request(svc, "POST", "/endpoints/1/enable")[0] == 200)
     check("6. an unknown endpoint is a 404", request(svc, "POST", "/endpoints/7/enable")[0] == 404)
-    check("6. an id out of range is a 400", request(svc, "POST", "/endpoints/99/enable")[0] == 400)
+    check("6. an id that is not a number is a 400 and one that is not there a 404", request(svc, "POST", "/endpoints/x/enable")[0] == 400 and request(svc, "POST", "/endpoints/99/enable")[0] == 404)
     check("6. a GET on the enable path is a 405", request(svc, "GET", "/endpoints/0/enable")[0] == 405)
     check("6. no secret or host in /endpoints", secret not in json.dumps(get(svc, "/endpoints")) and "127.0.0.1" not in json.dumps(get(svc, "/endpoints")))
 

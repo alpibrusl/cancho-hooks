@@ -13,8 +13,8 @@ The database must exist; the test applies sql/schema.sql and empties `endpoints`
   3. with --pg-host the service delivers to the table's endpoints and **not** to endpoints.conf, signing with the table's secret
   4. the table is read at each start: a row removed, a restart, and that endpoint is no longer delivered to; and an empty table
      starts the service with no endpoints (it accepts and keeps events)
-  5. (also: an empty host, and a table too large for the 16 KiB the service reads it into)
-  5. a row the service cannot use is a refusal to start with the row's number (an id of 16 or more, a repeated id cannot be: it
+  5. (also: an empty host, and a table too large for the 32 KiB the service reads it into)
+  5. a row the service cannot use is a refusal to start with the row's number (an id of seven digits, a repeated id cannot be: it
      is the key; a secret that is not base64), and a row with an unprintable byte is refused as such
   6. a table that is not there, a database that is not there, a wrong password: status 20 and what failed
   7. without --pg-host the file is read as before
@@ -254,9 +254,9 @@ def main():
           svc.exited and svc.proc.wait() == 13 and any("row 2" in l for l in svc.lines), str(svc.lines))
     stop(svc)
     psql("truncate endpoints")
-    psql(f"insert into endpoints values (1, '127.0.0.1', 80, '{s1}'), (20, '127.0.0.1', 80, '{s1}')")
+    psql(f"insert into endpoints values (1, '127.0.0.1', 80, '{s1}'), (1000000, '127.0.0.1', 80, '{s1}')")
     svc = start(d, pg_flags())
-    check("5. an id of 16 or more: status 13, row 2", svc.exited and svc.proc.wait() == 13 and any("row 2" in l for l in svc.lines), str(svc.lines))
+    check("5. an id of seven digits: status 13, row 2", svc.exited and svc.proc.wait() == 13 and any("row 2" in l for l in svc.lines), str(svc.lines))
     stop(svc)
     psql("truncate endpoints")
     psql(f"insert into endpoints values (1, 'bad host', 80, '{s1}')")

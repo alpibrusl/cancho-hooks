@@ -9,7 +9,7 @@ Two endpoints, A (id 0) and B (id 1), each with a receiver this test controls. S
      A once more with the same webhook-id, and B sees nothing
   2. `POST /events/1/replay` sends it to both
   3. a replay that fails is retried on the schedule and then dead-lettered, like any attempt
-  4. the refusals: unknown event 404, unknown endpoint 404, event 0 400, endpoint 99 400, a GET 405
+  4. the refusals: unknown event 404, unknown endpoint 404, event 0 400, endpoint 99 404, endpoint x 400, a GET 405
   5. a replay survives a restart: it is pending (failed once, waiting for its next attempt) when the service is killed, and is
      delivered once, not lost and not twice, after the restart
   6. a replay for a disabled endpoint waits, and is delivered when it is enabled
@@ -171,7 +171,7 @@ def main():
     check("4. an unknown event is a 404", request(svc, "POST", "/events/77/replay")[0] == 404)
     check("4. an unknown endpoint is a 404", request(svc, "POST", "/events/1/replay/5")[0] == 404)
     check("4. event 0 is a 400", request(svc, "POST", "/events/0/replay")[0] == 400)
-    check("4. endpoint 99 is a 400", request(svc, "POST", "/events/1/replay/99")[0] == 400)
+    check("4. endpoint 99 is a 404 (an id that is not there) and endpoint x a 400", request(svc, "POST", "/events/1/replay/99")[0] == 404 and request(svc, "POST", "/events/1/replay/x")[0] == 400)
     check("4. a GET is a 405", request(svc, "GET", "/events/1/replay")[0] == 405)
     check("4. the refusals started nothing", get(svc, "/stats")["replays"] == 0)
     stop(svc, d)

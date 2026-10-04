@@ -22,8 +22,9 @@ pub fn span() -> [] int {
     return 1024;
 }
 
+// How many endpoints the service has at once: the slots of the arrays below. (The disabled set is one integer, a bit a slot.)
 pub fn max_endpoints() -> [] int {
-    return 16;
+    return 62;
 }
 
 // The kinds of outcome record. 0 is not one: it is what a record that does not decode answers.
@@ -66,6 +67,18 @@ pub fn replay_delivered() -> [] int {
 
 pub fn replay_dead() -> [] int {
     return 9;
+}
+
+// Two records about a *slot*, not an event (`docs/design.md` section 25): the endpoint with `id` was given the slot, its cursor
+// starting at `attempts` (the record's fourth field), and the slot was freed. Everything before a `created` for a slot, and
+// everything after a `removed` until the next `created`, is about an endpoint that is not the slot's now. `apply` does nothing
+// with them: `reset` is what recovery does.
+pub fn created() -> [] int {
+    return 10;
+}
+
+pub fn removed() -> [] int {
+    return 11;
 }
 
 // The size of the cell array for `n` endpoints: three ints (final, attempts, next attempt) per cell.
@@ -140,6 +153,17 @@ pub fn apply[&w, &c](w: &!w [int], cur: &!c [int], e: int, kind: int, id: int, a
     return 0;
 }
 
+// Forget everything about slot `e`: its window is empty and its cursor is `start`. What a `created` or a `removed` record does.
+pub fn reset[&w, &c](w: &!w [int], cur: &!c [int], e: int, start: int) -> [] int {
+    var i = 0;
+    while i < span() * 3 {
+        w[e * span() * 3 + i] = 0;
+        i = i + 1;
+    }
+    cur[e] = start;
+    return 0;
+}
+
 // An outcome as a log record at `at` in `out`, with sequence number `seq` as its id: one pair, `o`, whose value is five
 // 8-byte integers: kind, endpoint, event, attempts, next attempt. Answers the record's size.
 pub fn put_outcome[&o](out: &!o [byte], at: int, seq: int, kind: int, e: int, id: int, attempts: int, next_at: int) -> [] int {
@@ -167,7 +191,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 9 {
+    if kind < 1 || kind > 11 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));
