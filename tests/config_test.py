@@ -37,7 +37,8 @@ def check(name, ok, detail=""):
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
             "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
-            "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000}
+            "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000,
+            "retention-days": 30, "segment-bytes": 67108864, "delivery-log-bytes": 33554432, "idem-keys": 262144}
     base.update(kw)
     return base
 
@@ -183,6 +184,13 @@ def stage3():
     shutil.rmtree(w)
     check("3. every side's settings given together come back as given (the flag over the file)",
           cfg == settings(**{"stop-deadline-ms": 1500, "repair-logs": 1, "rotation-grace-ms": 7200000, "cron-seconds": 1, "breaker-days": 3}), str(cfg))
+    _, _, cfg, w = serve(["--retention-days", "0", "--segment-bytes", "262144", "--delivery-log-bytes=65536", "--idem-keys", "1000"], None, {})
+    shutil.rmtree(w)
+    check("3. retention-days, segment-bytes, delivery-log-bytes and idem-keys are settings, from flags",
+          cfg == settings(**{"retention-days": 0, "segment-bytes": 262144, "delivery-log-bytes": 65536, "idem-keys": 1000}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nretention-days = 7\nsegment-bytes = 1048576\nidem-keys = 5000\n")
+    shutil.rmtree(w)
+    check("3. ... and from a file", cfg == settings(**{"retention-days": 7, "segment-bytes": 1048576, "idem-keys": 5000}), str(cfg))
     code, line, _, w = serve(["--allow-private-hosts", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
     shutil.rmtree(w)
     check("3. a private host in the file with the default is refused before the service listens (status 13)", code == 13 and line != "listening", str((code, line)))
@@ -235,6 +243,14 @@ def stage4():
     refused("ingest-token that is too short", ["--port", "@PORT", "--dir", "@", "--ingest-token", "short"], expect=["`--ingest-token` has a value"])
     refused("read-token with a space in it", ["--port", "@PORT", "--dir", "@", "--read-token", "has a space"], expect=["`--read-token` has a value"])
     refused("production that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--production", "yes"], expect=["`--production` has a value"])
+    refused("retention-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--retention-days", "month"], expect=["`--retention-days` has a value"])
+    refused("retention-days over 100 years", ["--port", "@PORT", "--dir", "@", "--retention-days=36501"], expect=["`--retention-days=36501` has a value"])
+    refused("a segment smaller than 256 KiB", ["--port", "@PORT", "--dir", "@", "--segment-bytes", "1000"], expect=["`--segment-bytes` has a value"])
+    refused("a delivery log limit under 64 KiB", ["--port", "@PORT", "--dir", "@", "--delivery-log-bytes", "1000"], expect=["`--delivery-log-bytes` has a value"])
+    refused("idem-keys under 16", ["--port", "@PORT", "--dir", "@", "--idem-keys", "3"], expect=["`--idem-keys` has a value"])
+    refused("idem-keys over 4,194,304", ["--port", "@PORT", "--dir", "@", "--idem-keys", "4194305"], expect=["`--idem-keys` has a value"])
+    refused("compact-now that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--compact-now", "2"], expect=["`--compact-now` has a value"])
+    refused("compact-kill-at over 64", ["--port", "@PORT", "--dir", "@", "--compact-kill-at", "65"], expect=["`--compact-kill-at` has a value"])
     refused("a bad flag after a good file", ["--config", "@/hooks.conf", "--port", "0"],
             {"hooks.conf": "dir = /tmp\nport = 5\n"}, expect=["`--port` has a value"])
 

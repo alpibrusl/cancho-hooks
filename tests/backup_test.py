@@ -4,6 +4,7 @@
     HOOKS_PG=host:port:user:database [HOOKS_PG_PASSWORD=...] python3 tests/backup_test.py build/hooks
                                                               (default 127.0.0.1:5432:postgres:hooks)
     EVENTS=1500 BACKUPS=24 MEAN_MS=250   # the defaults: sizes of stage B
+    D_EVENTS=1800                        # stage D
 
 The database must exist; the test applies sql/schema.sql and EMPTIES `endpoints` and `attempts` (and drops them in stage A).
 
@@ -32,6 +33,16 @@ files, read with the reader of tests/chaos.py (not the one in scripts/logcheck.p
         backup.sh and restores; a log with damage in the middle is refused rather than silently shortened
      9. the two hazards restore.sh refuses, given to the service itself: it refuses both before it listens, with a status of its own (18 for the pair, 19 for damage in the
         middle), a message, and the files exactly as they were. (They were information here: the service silently stalled, or silently cut 500 events to 250.)
+  D. retention (docs/retention.md): a service that rolls its events log in 256 KiB segments, drops what is final everywhere after 1.2 s and
+     replaces its outcomes log at 64 KiB, under kill -9 as a power cut, with online backups taken all the time
+     13. every backup exits 0; each holds, byte for byte, every event acknowledged before it began, or the event was dropped and was final at both
+         endpoints in the backup's own delivery.seg; ids are dense from the first retained, no torn tail, the pair consistent
+     14. a sample (the first, a middle one, the last, and some that had dropped segments) is restored and started with retention off: what is
+         retained is served, what was dropped answers 404, a new event takes the next id (even when every event had been dropped), each retained
+         event not final in the backup is delivered once to the endpoint that lacked it, none that was final is delivered again
+  E. 15. compact.lock held by someone else (what a backup is): the service drops nothing and replaces nothing, counts the deferral, still takes
+         events; a backup waits for the lock and finishes when it is let go; the service resumes
+     16. a directory of the previous format (no headers, one events.seg) is backed up as it is, restored, and runs: the numbering continues
 """
 import base64
 import http.server
@@ -45,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -210,10 +222,34 @@ def wait_for(cond, secs, step=0.02):
 
 # ---- reading a backup, independently of scripts/logcheck.py ----------------------------------------------------------------
 
+def event_files(directory):
+    """The events segments of a backup (the MANIFEST lists them) or of a data directory (events.first, then up while the files exist)."""
+    mf = os.path.join(directory, "MANIFEST")
+    if os.path.exists(mf):
+        for line in open(mf).read().splitlines():
+            if line.startswith("events_files="):
+                return line.split("=", 1)[1].split()
+    first = 0
+    if os.path.exists(os.path.join(directory, "events.first")):
+        first = int(open(os.path.join(directory, "events.first")).read().strip() or 0)
+    names, k = [], first
+    while os.path.exists(os.path.join(directory, "events.seg" if k == 0 else f"events-{k}.seg")):
+        names.append("events.seg" if k == 0 else f"events-{k}.seg")
+        k += 1
+    return names or ["events.seg"]
+
+
 def read_events(directory):
-    data = open(os.path.join(directory, "events.seg"), "rb").read()
-    records, end = chaos.read_log(data)
-    return {ms: dict(pairs)[b"event"] for ms, pairs in records}, len(data) - end
+    """{event id: body} over every segment, and the bytes of torn tail after the last record of the last segment."""
+    events, torn = {}, 0
+    names = event_files(directory)
+    for i, name in enumerate(names):
+        data = open(os.path.join(directory, name), "rb").read()
+        records, end = chaos.read_log(data)
+        events.update({ms: dict(pairs)[b"event"] for ms, pairs in records})
+        if i == len(names) - 1:
+            torn = len(data) - end
+    return events, torn
 
 
 def final_sets(directory, endpoints=(0, 1)):
@@ -236,7 +272,7 @@ def final_sets(directory, endpoints=(0, 1)):
 
 
 def sha_resign(directory):
-    names = [n for n in ("events.seg", "delivery.seg", "MANIFEST", "endpoints.conf", "hooks.pgdump") if os.path.exists(os.path.join(directory, n))]
+    names = [n for n in (*event_files(directory), "events.first", "delivery.seg", "MANIFEST", "endpoints.conf", "hooks.pgdump") if os.path.exists(os.path.join(directory, n))]
     out = run(["sha256sum", "--", *names], cwd=directory)
     open(os.path.join(directory, "SHA256SUMS"), "w").write(out.stdout)
 
@@ -592,6 +628,18 @@ def stage_c(backups, a_backup, a_data):
           out.stderr)
     out = run([RESTORE, "--backup", tb, "--dir", os.path.join(WORK, "c-torn-restored")]) if tb else out
     check("8. ... and that backup restores", out.returncode == 0, out.stderr)
+    # a power cut that zeroes the last 64 bytes of what it kept spoils the ends of two small records at once: still a torn tail (found by stage D)
+    two = os.path.join(WORK, "c-torn2")
+    os.makedirs(two)
+    spoiled = bytearray(good_dl[-154:-77] + good_dl[-77:-57])      # one record and 20 bytes of the next: 97 bytes
+    spoiled[-64:] = bytes(64)
+    open(os.path.join(two, "events.seg"), "wb").write(good_ev)
+    open(os.path.join(two, "delivery.seg"), "wb").write(good_dl + bytes(spoiled))
+    out = run([BACKUP, "--dir", two, "--out", os.path.join(WORK, "c-torn2-out"), "--mode", "online"])
+    tb2 = out.stdout.strip().splitlines()[-1] if out.returncode == 0 else ""
+    check("8. two records spoiled by one zeroed 64 bytes are a torn tail too: cut (97 bytes), and the log up to them is the backup",
+          out.returncode == 0 and open(os.path.join(tb2, "delivery.seg"), "rb").read() == good_dl and "torn_bytes_cut_delivery=97" in open(os.path.join(tb2, "MANIFEST")).read(),
+          out.stderr)
     dmg = bytearray(good_ev)
     dmg[len(dmg) // 2] ^= 0xFF
     dmg_dir = os.path.join(WORK, "c-damaged")
@@ -634,11 +682,278 @@ def stage_c(backups, a_backup, a_data):
           open(os.path.join(d, "events.seg"), "rb").read() == events_before, f"{p.returncode} {p.stderr!r}")
 
 
+# ---- stage D: retention (docs/retention.md) ---------------------------------------------------------------------------------
+
+RETAIN = ["--retention-ms", "1200", "--window-ms", "300", "--segment-bytes", "262144", "--delivery-log-bytes", "65536"]
+D_EVENTS = int(os.environ.get("D_EVENTS", "1800"))
+
+
+def manifest_of(bk):
+    return dict(line.split("=", 1) for line in open(os.path.join(bk, "MANIFEST")).read().splitlines() if "=" in line)
+
+
+def write_conf(d, receivers):
+    with open(os.path.join(d, "endpoints.conf"), "w") as f:
+        for i, r in enumerate(receivers):
+            f.write(f"{i} 127.0.0.1 {r.port} {secret()}\n")
+
+
+def verify_restore_retained(bk, before, fin, ev):
+    """Restore a backup of a service that drops what it has delivered, start it with retention off, and see: what is retained is served, what
+    was dropped was final everywhere in the backup, a new event takes the next id, every retained event not final at an endpoint is
+    delivered there once and none that was final is delivered again."""
+    name = os.path.basename(bk)
+    d = os.path.join(WORK, "restored-" + name)
+    out = run([RESTORE, "--backup", bk, "--dir", d])
+    if out.returncode != 0:
+        check(f"14. {name}: restore", False, out.stderr)
+        return
+    m = manifest_of(bk)
+    first, last = int(m["events_first_id"]), int(m["events_last_id"])
+    r0, r1 = Receiver(), Receiver(flaky=True)
+    write_conf(d, [r0, r1])
+    svc = Svc(d, ["--schedule", "100,200,400", "--deadline-ms", "800", "--retention-days", "0"])
+    try:
+        svc.start()
+        bad, gone = [], []
+        for i, body in before.items():
+            try:
+                got = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/events/{i}", timeout=5).read())["event"]
+                if got != json.loads(body):
+                    bad.append(i)
+            except urllib.error.HTTPError as e:
+                if e.code == 404 and i < first:
+                    gone.append(i)
+                else:
+                    bad.append((i, e.code))
+        status, body = post_event(svc, 99999)
+        new_id = json.loads(body)["id"] if status == 202 else None
+        retained = set(range(first, last + 1))
+        want = [(retained - fin[0]) | {last + 1}, (retained - fin[1]) | {last + 1}]
+        ok = wait_for(lambda: set(r0.delivered()) >= want[0] and set(r1.delivered()) >= want[1], 20)
+        time.sleep(0.5)
+        g0, g1 = sorted(r0.delivered()), sorted(r1.delivered())
+        check(f"14. {name} (events {first}..{last}, {len(gone)} acknowledged ones dropped): retained ones served intact, dropped ones 404, next id {last + 1}",
+              not bad and new_id == last + 1, f"bad {bad[:3]} new_id {new_id}")
+        check(f"14. {name}: the new event reaches both endpoints; each retained event not final in the backup exactly once, none that was final again",
+              ok and g0 == sorted(want[0]) and g1 == sorted(want[1]),
+              f"endpoint0 diff {sorted(set(g0) ^ want[0])[:6]} dup {len(g0) - len(set(g0))}; endpoint1 diff {sorted(set(g1) ^ want[1])[:6]} dup {len(g1) - len(set(g1))}")
+    finally:
+        svc.stop()
+        r0.close()
+        r1.close()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def stage_d():
+    print("== D. retention: online backups while segments are dropped and the outcomes log is replaced, under kill -9 as a power cut", flush=True)
+    r0, r1 = Receiver(), Receiver(flaky=True)
+    data = os.path.join(WORK, "d-data")
+    os.makedirs(data)
+    write_conf(data, [r0, r1])
+    svc = Svc(data, ["--schedule", "100,200,400", "--deadline-ms", "800", *RETAIN], power_loss=True)
+    svc.start()
+    acked, lock = {}, threading.Lock()
+    done = threading.Event()
+    kills = [0]
+    rng = random.Random(29)
+    backups, failures = [], []
+    outdir = os.path.join(WORK, "d-backups")
+    pad = "x" * 1400
+
+    def chaos_loop():
+        while not done.is_set():
+            time.sleep(rng.expovariate(1000.0 / 400))
+            if done.is_set():
+                break
+            svc.kill()
+            kills[0] += 1
+            time.sleep(rng.uniform(0.0, 0.05))
+            svc.start()
+
+    def worker(first, step):
+        for n in range(first, D_EVENTS, step):
+            body = json.dumps({"type": "backup.test", "n": n, "pad": pad}).encode()
+            while True:
+                try:
+                    status, data_ = chaos.post(svc.port, body)
+                except (OSError, chaos.http.client.HTTPException):
+                    time.sleep(0.01)
+                    continue
+                if status == 202:
+                    with lock:
+                        acked[json.loads(data_)["id"]] = body
+                    break
+                time.sleep(0.01)
+            time.sleep(0.004)
+
+    def backup_loop():
+        while not done.is_set():
+            time.sleep(rng.uniform(0.0, 0.25))
+            with lock:
+                before = dict(acked)
+            k0 = kills[0]
+            out = run([BACKUP, "--dir", data, "--out", outdir, "--mode", "online"])
+            if out.returncode != 0:
+                failures.append(f"backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+                continue
+            backups.append((out.stdout.strip().splitlines()[-1], before, k0, kills[0]))
+
+    chaos_t = threading.Thread(target=chaos_loop, daemon=True)
+    workers = [threading.Thread(target=worker, args=(i, 4)) for i in range(4)]
+    backer = threading.Thread(target=backup_loop)
+    started = time.time()
+    chaos_t.start()
+    backer.start()
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join()
+    done.set()
+    chaos_t.join()
+    backer.join()
+    if not svc.alive():
+        svc.start()
+    # let the service drop what it can, then one more backup after the last acknowledgement, with nothing killing it
+    time.sleep(3.0)
+    with lock:
+        before = dict(acked)
+    out = run([BACKUP, "--dir", data, "--out", outdir, "--mode", "online"])
+    if out.returncode == 0:
+        backups.append((out.stdout.strip().splitlines()[-1], before, kills[0], kills[0]))
+    else:
+        failures.append(f"final backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+    st = svc.get("/stats")
+    print(f"   {D_EVENTS} events of 1.4 KB, {kills[0]} kills as power cuts, {svc.starts} starts, {len(backups)} online backups in {time.time() - started:.1f}s; "
+          f"the live service: {st['segments_dropped']} segments dropped, {st['segments_sealed']} sealed, {st['snapshots']} snapshots, events {st['events_first_id']}..{st['events_last_id']}, "
+          f"{st['maintenance_lock_skips']} steps deferred by the backup's lock", flush=True)
+    check("13. retention was at work: segments dropped, the outcomes log replaced, while the backups ran", st["segments_dropped"] >= 2 and st["snapshots"] >= 1, str(st))
+    check("13. every online backup exited 0", not failures and len(backups) >= 5, "; ".join(failures[:3]) + f" ({len(backups)} backups)")
+
+    existing = [b for b in backups if os.path.isdir(b[0])]
+    lost, wrong, dropped_seen, multi = [], [], 0, 0
+    infos = {}
+    for bk, before, k0, k1 in existing:
+        ev, torn = read_events(bk)
+        m = manifest_of(bk)
+        fin = final_sets(bk)
+        ids = sorted(ev)
+        if ids and ids != list(range(ids[0], ids[-1] + 1)):
+            wrong.append((bk, "ids not contiguous"))
+        if torn:
+            wrong.append((bk, "torn tail kept"))
+        first = int(m["events_first_id"])
+        multi += len(event_files(bk)) > 1
+        for i, body in before.items():
+            if i in ev:
+                if ev[i] != body:
+                    wrong.append((bk, i))
+            elif i < first and i in fin[0] and i in fin[1]:
+                dropped_seen += 1
+            else:
+                lost.append((bk, i))
+        v = run(["python3", LOGCHECK, "check", bk, "--kv"])
+        if v.returncode != 0:
+            wrong.append((bk, "logcheck: " + v.stderr))
+        infos[bk] = (fin, ev)
+    check(f"13. all {len(existing)} backups: every event acknowledged before they began is there byte for byte, or was dropped after being final at both endpoints "
+          f"({dropped_seen} such, {multi} backups of more than one segment); ids dense, no torn tail, the pair consistent",
+          not lost and not wrong and dropped_seen > 0, f"lost {lost[:3]} wrong {wrong[:3]} dropped_seen {dropped_seen}")
+
+    sample = [existing[0][0], existing[len(existing) // 2][0], existing[-1][0]]
+    seen_dropped = [b for b, *_ in existing if int(manifest_of(b)["events_first_id"]) > 1]
+    sample += seen_dropped[:: max(1, len(seen_dropped) // 2)][:3]
+    for bk in dict.fromkeys(sample):
+        before = next(b for p, b, *_ in existing if p == bk)
+        fin, ev = infos[bk]
+        verify_restore_retained(bk, before, fin, ev)
+    svc.kill()
+    r0.close()
+    r1.close()
+    return existing[-1][0]
+
+
+def stage_e():
+    print("== E. the lock, and a directory of the previous format", flush=True)
+    import fcntl
+    r0 = Receiver()
+    d = os.path.join(WORK, "e-data")
+    os.makedirs(d)
+    write_conf(d, [r0])
+    svc = Svc(d, ["--schedule", "100,200", "--deadline-ms", "800", "--retention-ms", "300", "--window-ms", "100", "--segment-bytes", "262144",
+                  "--delivery-log-bytes", "65536"])
+    svc.start()
+    pad = "y" * 1400
+    for n in range(300):
+        chaos.post(svc.port, json.dumps({"type": "e", "n": n, "pad": pad}).encode())
+    wait_for(lambda: svc.get("/stats")["delivered"] >= 300, 20)
+    # a holder of compact.lock (what a backup is): the service defers its steps, and goes on serving
+    fd = os.open(os.path.join(d, "compact.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    time.sleep(0.5)
+    a = svc.get("/stats")
+    for n in range(300, 1500):
+        chaos.post(svc.port, json.dumps({"type": "e", "n": n, "pad": pad}).encode())
+    time.sleep(2.5)
+    b = svc.get("/stats")
+    check("15. while compact.lock is held, the service drops no segment and replaces no log, and says it deferred",
+          b["segments_dropped"] == a["segments_dropped"] and b["snapshots"] == a["snapshots"] and b["maintenance_lock_skips"] > a["maintenance_lock_skips"], f"{a} {b}")
+    check("15. ... and still takes events (rolling only adds a file after the ones a backup lists)", b["events_last_id"] == a["events_last_id"] + 1200 and b["segments_sealed"] >= a["segments_sealed"], str((a, b)))
+    t0 = time.time()
+    bk_proc = subprocess.Popen([BACKUP, "--dir", d, "--out", os.path.join(WORK, "e-backups"), "--mode", "online"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV)
+    time.sleep(1.0)
+    check("15. a backup waits for the lock instead of copying under a step", bk_proc.poll() is None)
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    out, err = bk_proc.communicate(timeout=60)
+    check("15. ... and finishes when the lock is let go", bk_proc.returncode == 0, err)
+    check("15. the service resumes its steps once the lock is free", wait_for(lambda: svc.get("/stats")["segments_dropped"] > b["segments_dropped"], 20), str(svc.get("/stats")))
+    svc.stop()
+    r0.close()
+
+    # a directory of format 1 (no headers, one events.seg): backed up, restored, started
+    d = os.path.join(WORK, "e-legacy")
+    os.makedirs(d)
+    body = lambda i: json.dumps({"type": "legacy", "n": i}).encode()   # noqa: E731
+    rec = lambda ms, pairs, seq=0: (lambda b: struct.pack("<II", 4 + len(b), chaos.crc32c(b)) + b)(          # noqa: E731
+        struct.pack("<QQI", ms, seq, len(pairs)) + b"".join(struct.pack("<I", len(k)) + k + struct.pack("<I", len(v)) + v for k, v in pairs))
+    with open(os.path.join(d, "events.seg"), "wb") as f:
+        for i in range(1, 9):
+            f.write(rec(i, [(b"event", body(i))]))
+    with open(os.path.join(d, "delivery.seg"), "wb") as f:
+        f.write(rec(1, [(b"o", struct.pack("<5q", 10, 0, 0, 0, 0))], 1))
+        for i in range(1, 6):
+            f.write(rec(i + 1, [(b"o", struct.pack("<5q", 1, 0, i, 1, 0))], i + 1))
+    out = run([BACKUP, "--dir", d, "--out", os.path.join(WORK, "e-legacy-out"), "--mode", "online"])
+    bk = out.stdout.strip().splitlines()[-1] if out.returncode == 0 else ""
+    check("16. a directory of the previous format (no headers) is backed up: one file, no header added, MANIFEST names it",
+          out.returncode == 0 and "events_files=events.seg" in open(os.path.join(bk, "MANIFEST")).read() and
+          open(os.path.join(bk, "events.seg"), "rb").read() == open(os.path.join(d, "events.seg"), "rb").read(), out.stderr)
+    d2 = os.path.join(WORK, "e-legacy-restored")
+    out = run([RESTORE, "--backup", bk, "--dir", d2]) if bk else out
+    r = Receiver()
+    write_conf(d2, [r])
+    check("16. ... and restored", out.returncode == 0, out.stderr)
+    s2 = Svc(d2, ["--schedule", "100,200", "--retention-days", "0"])
+    s2.start()
+    got = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{s2.port}/events/3", timeout=5).read())["event"]
+    status, nb = post_event(s2, 77)
+    ok = wait_for(lambda: set(r.delivered()) >= {6, 7, 8, 9}, 15)
+    time.sleep(0.4)
+    s2.stop()
+    check("16. the restored previous-format directory runs: event 3 served, the next id is 9, events 6 to 9 delivered once, 1 to 5 not again",
+          got == {"type": "legacy", "n": 3} and status == 202 and json.loads(nb)["id"] == 9 and ok and sorted(r.delivered()) == [6, 7, 8, 9],
+          f"{got} {status} {nb} {sorted(r.delivered())}")
+    r.close()
+
+
 def main():
     try:
         a_bk, a_data = stage_a()
         backups = stage_b()
         stage_c(backups, a_bk, a_data)
+        stage_d()
+        stage_e()
     finally:
         keep = os.environ.get("KEEP")
         if keep or FAILS:

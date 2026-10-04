@@ -65,8 +65,16 @@ def crc32c(data):
     return c ^ 0xFFFFFFFF
 
 
-def read_log(data):
-    """The longest valid prefix: [(id, [(key, value), ...])], and where it ends."""
+def is_header(ms, pairs):
+    """The header record a file of the format since retention (docs/retention.md section 4) begins with: an events segment's (id 0, a `format`
+    pair) or the outcomes log's (an outcome of kind 15)."""
+    if ms == 0 and pairs and pairs[0][0] == b"format":
+        return True
+    return len(pairs) == 1 and pairs[0][0] == b"o" and len(pairs[0][1]) == 40 and struct.unpack_from("<q", pairs[0][1], 0)[0] == 15
+
+
+def read_log(data, headers=False):
+    """The longest valid prefix: [(id, [(key, value), ...])], and where it ends. A file's header record is not returned (headers=True keeps it)."""
     at, out = 0, []
     while len(data) - at >= 4:
         (length,) = struct.unpack_from("<I", data, at)
@@ -98,9 +106,42 @@ def read_log(data):
                 break
         if not ok or p != end:
             break
-        out.append((ms, pairs))
+        if headers or not is_header(ms, pairs):
+            out.append((ms, pairs))
         at += total
     return out, at
+
+
+def segment_files(datadir):
+    """The events log's files, oldest first: events.seg, events-1.seg, ... that exist."""
+    names = []
+    k = 0
+    first = 0
+    try:
+        first = int(open(os.path.join(datadir, "events.first")).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    k = first
+    while True:
+        name = "events.seg" if k == 0 else f"events-{k}.seg"
+        if not os.path.exists(os.path.join(datadir, name)):
+            break
+        names.append(name)
+        k += 1
+    return names
+
+
+def read_events(datadir):
+    """Every retained event of a data directory, oldest first, across segments: ([(id, pairs)], torn bytes at the end of the last)."""
+    out, torn = [], 0
+    names = segment_files(datadir)
+    for i, name in enumerate(names):
+        data = open(os.path.join(datadir, name), "rb").read()
+        recs, end = read_log(data)
+        out += recs
+        if i == len(names) - 1:
+            torn = len(data) - end
+    return out, torn
 
 
 # ---- the service under chaos -----------------------------------------------------------------------------------
@@ -110,6 +151,7 @@ def flags(port, datadir, extra=()):
     out = ["--port", str(port), "--dir", datadir, "--allow-private-hosts", "1"]
     for name, value in zip(("schedule", "deadline-ms", "window-ms"), extra):
         out += [f"--{name}", str(value)]
+    out += [str(a) for a in extra[3:]]   # any further entries are flags, as they are written
     return out
 
 
@@ -139,8 +181,9 @@ class Service:
 
     def power_cut(self):
         """Leave each file as a power cut could: all of what the last fsync covered, a random part of the rest."""
-        for name in ("events.seg", "delivery.seg"):
-            self.cut_file(os.path.join(self.datadir, name))
+        for name in sorted(os.listdir(self.datadir)):
+            if name.endswith((".seg", ".first")):
+                self.cut_file(os.path.join(self.datadir, name))
 
     def cut_file(self, path):
         if not os.path.exists(path):
@@ -230,8 +273,8 @@ def main():
     svc.kill()
     elapsed = time.time() - started
 
-    data = open(os.path.join(datadir, "events.seg"), "rb").read()
-    records, end = read_log(data)
+    records, torn = read_events(datadir)
+    data = b"".join(open(os.path.join(datadir, n), "rb").read() for n in segment_files(datadir))
     by_id = {ms: dict(pairs) for ms, pairs in records}
     ids = [ms for ms, _ in records]
     failures = []
@@ -249,7 +292,6 @@ def main():
     missing_n = [n for n in range(EVENTS) if n not in n_values]
     if missing_n:
         failures.append(f"{len(missing_n)} events the clients finished posting are not in the log by value")
-    torn = len(data) - end
     mode = "power cuts" if POWER_LOSS else "process kills only (no fsync shim: this cannot show a missing flush)"
     print(f"{EVENTS} events, {THREADS} threads, {kills[0]} kills as {mode}, {svc.starts} starts, {elapsed:.1f}s")
     if POWER_LOSS:

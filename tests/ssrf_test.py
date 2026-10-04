@@ -178,7 +178,7 @@ def main():
     check("3. ... and the message says why (SSRF, public IPv4)", status == 400 and "public IPv4" in json.dumps(body), str((status, body)))
     log = os.path.join(d, "delivery.seg")
     check("3. ... nothing was stored: no row, and nothing in the outcome log (no `created` record)", psql("select count(*) from endpoints") == [("0",)] and
-          (not os.path.exists(log) or os.path.getsize(log) == 0), str((psql("select count(*) from endpoints"), os.path.getsize(log))))
+          (not os.path.exists(log) or chaos.read_log(open(log, "rb").read())[0] == []), str((psql("select count(*) from endpoints"), os.path.getsize(log))))
     status, body = req(svc, "POST", "/endpoints", {"host": "8.8.8.8", "port": 9}, TOKEN)
     check("3. a public host is a 201", status == 201 and body["host"] == "8.8.8.8", str((status, body)))
     stop(svc)

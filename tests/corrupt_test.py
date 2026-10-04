@@ -123,8 +123,14 @@ def flip(data, at):
 
 
 def records_end(data, k):
-    """The offset where record number k (0-based) starts."""
+    """The offset where event record number k (0-based) starts; a file's leading header record is skipped."""
     at = 0
+    if len(data) >= 4:
+        (n,) = struct.unpack_from("<I", data, 0)
+        if 24 <= n <= 65536 and len(data) >= 4 + n:
+            first, _ = chaos.read_log(data[: 4 + n], headers=True)
+            if first and chaos.is_header(*first[0]):
+                at = 4 + n
     for _ in range(k):
         (n,) = struct.unpack_from("<I", data, at)
         at += 4 + n
@@ -419,7 +425,7 @@ def stage_e(base_small):
             total += 1
             continue
         x = bytearray(ev)
-        kind = rng.choice(["flip", "flip2", "truncate", "zero", "garbage", "hole", "dupe", "tailflip"])
+        kind = rng.choice(["flip", "flip2", "truncate", "zero", "garbage", "hole", "dupe", "tailflip", "boundary"])
         if kind == "flip":
             x[rng.randrange(len(x))] ^= 1 << rng.randrange(8)
         elif kind == "flip2":
@@ -438,6 +444,9 @@ def stage_e(base_small):
         elif kind == "dupe":
             at = records_end(ev, rng.randrange(1, 55))
             x = bytearray(ev[:at] + ev[records_end(ev, 3):records_end(ev, 5)] + ev[at:])
+        elif kind == "boundary":
+            # cut exactly between two whole records: nothing is torn, nothing is damaged
+            x = x[:records_end(ev, rng.randrange(1, 55))]
         else:
             x[len(x) - rng.randrange(1, 80)] ^= 0xFF
         data = bytes(x)
@@ -449,7 +458,9 @@ def stage_e(base_small):
         if want == "damage":
             ok = r.code == 19 and read(d, "events.seg") == data
         else:
-            ok = r.up and len(read(d, "events.seg")) == end
+            now = read(d, "events.seg")
+            # a file cut to nothing (or to a torn header) is begun again with its header record
+            ok = r.up and (len(now) == end or (end == 0 and chaos.read_log(now, headers=True) == (chaos.read_log(now, headers=True)[0][:1], len(now)) and chaos.read_log(now)[0] == []))
             if r.up:
                 ok = ok and (want == "clean") == (r.lines == ["listening"])
         agree[want] += 1

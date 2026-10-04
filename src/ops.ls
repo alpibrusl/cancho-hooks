@@ -321,6 +321,8 @@ fn path_into[&d, &n, &w](out: &!w [byte], dir: &d [byte], name: &n [byte]) -> []
 // file that is rewritten in place gives back the block it needs when it is truncated, and a full disk would then take the probe: the new file needs a block of its own while
 // the old one still holds its.
 pub fn probe_write[&f, &d](fs: &f Fs(""), dir: &d [byte], round: int) -> [fs_write("")] bool {
+    // Left by falling out of the region, not by `return`: a region left by a `return` is not given back (`docs/lexsys-log-retention.md`, gap 6).
+    var ok = false;
     region a {
         let path_buf = alloc_slice[a](4096, byte_of(0));
         let other_buf = alloc_slice[a](4096, byte_of(0));
@@ -329,17 +331,17 @@ pub fn probe_write[&f, &d](fs: &f Fs(""), dir: &d [byte], round: int) -> [fs_wri
         let one = alloc_slice[a](1, byte_of('1'));
         // (Compared directly, `fs_write(..) == 1` makes the LLVM backend fail with "cannot determine the scalar kind"; see docs/design.md section 34.9.)
         let wrote = fs_write(fs, path, one);
-        if wrote != 1 {
-            return false;
-        }
-        match fs_remove(fs, other) {
-            Done::Ok(n) => {
+        if wrote == 1 {
+            match fs_remove(fs, other) {
+                Done::Ok(n) => {
+                }
+                Done::Failed(e) => {
+                }
             }
-            Done::Failed(e) => {
-            }
+            ok = true;
         }
-        return true;
     }
+    return ok;
 }
 
 fn probe_name(which: int) -> [] &static [byte] {

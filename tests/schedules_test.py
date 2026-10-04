@@ -131,8 +131,9 @@ class Svc:
             self.proc.send_signal(signal.SIGKILL)
         self.proc.wait()
         if power:
-            for name in ("events.seg", "delivery.seg"):
-                chaos.Service.cut_file(self, os.path.join(self.d, name))
+            for name in sorted(os.listdir(self.d)):
+                if name.endswith(".seg"):
+                    chaos.Service.cut_file(self, os.path.join(self.d, name))
 
     def req(self, method, path, body=None, token=TOKEN, headers=None, raw=False, timeout=15):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
@@ -175,10 +176,7 @@ def wait_for(cond, secs, step=0.05):
 
 def events(d):
     """Every event in the log: (id, the event, the idempotency key or None)."""
-    path = os.path.join(d, "events.seg")
-    if not os.path.exists(path):
-        return []
-    recs, _ = chaos.read_log(open(path, "rb").read())
+    recs, _ = chaos.read_events(d)
     out = []
     for ms, pairs in recs:
         kv = dict(pairs)
@@ -692,32 +690,33 @@ def stage10():
 
 
 def stage11():
+    # The schedules' keys have an index of their own, a quarter of `idem-keys` (docs/retention.md section 7), so clients' keys cannot fill it and it
+    # cannot be filled by them. `--idem-keys 64` makes it 16 keys, which a schedule of every second fills in 16 seconds.
     reset()
     d = fresh_dir()
-    svc = Svc(d).start()
-    done = [0]
-    lock = threading.Lock()
+    svc = Svc(d, extra=["--idem-keys", "64"]).start()
+    codes = [chaos.post(svc.port, b'{"type":"t"}', timeout=5)[0] for _ in range(1)]
     refused = []
-
-    def worker(first):
+    for i in range(64):
         c = http.client.HTTPConnection("127.0.0.1", svc.port, timeout=30)
-        for i in range(first, 65536, 64):
-            c.request("POST", "/events", body=b'{"type":"t"}', headers={"Idempotency-Key": f"full-{i}"})
-            resp = c.getresponse()
-            resp.read()
-            if resp.status != 202:
-                with lock:
-                    refused.append((i, resp.status))
-
-    ts = [threading.Thread(target=worker, args=(i,)) for i in range(64)]
-    [t.start() for t in ts]
-    [t.join() for t in ts]
-    check("11. 65,536 keys held", not refused and svc.stats()["keys"] == 65536, str((refused[:3], svc.stats())))
+        c.request("POST", "/events", body=b'{"type":"t"}', headers={"Idempotency-Key": f"full-{i}"})
+        resp = c.getresponse()
+        resp.read()
+        if resp.status != 202:
+            refused.append((i, resp.status))
+    check("11. 64 clients' keys held (the whole of that index)", not refused and svc.stats()["keys"] == 64, str((refused[:3], svc.stats())))
+    c = http.client.HTTPConnection("127.0.0.1", svc.port, timeout=30)
+    c.request("POST", "/events", body=b'{"type":"t"}', headers={"Idempotency-Key": "one-too-many"})
+    check("11. ... and the 65th is a 507", c.getresponse().status == 507)
     r, c = svc.create({"expr": "* * * * * *", "type": "t"})
+    check("11. a schedule is made", r == 201, str((r, c)))
+    ok = wait_for(lambda: svc.stats()["cron_keys"] == 16, 40)
+    st = svc.stats()
+    check("11. with the clients' index full the schedule still fires: its keys have their own (%d held)" % st["cron_keys"], ok and len(fires(d)) == 16, str((st, len(fires(d)))))
     time.sleep(3.5)
     st = svc.stats()
-    check("11. a schedule with the index full does not fire (the fire would have no key to be made once by)", len(fires(d)) == 0 and st["cron_fired"] == 0 and st["cron_errors"] >= 2, str(st))
-    check("11. and its row is untouched, due again at every cycle", psql(f"select last_fired from schedules where id = {c['id']}") == [("0",)])
+    check("11. with ITS index full (16) a schedule does not fire (the fire would have no key to be made once by)", len(fires(d)) == 16 and st["cron_fired"] == 16 and st["cron_errors"] >= 2, str(st))
+    check("11. and its row is untouched, due again at every cycle", psql(f"select last_fired from schedules where id = {c['id']}") == [(str(fires(d)[-1][0]),)])
     check("11. the service goes on: an event without a key is stored", chaos.post(svc.port, b'{"type":"t"}')[0] == 202)
     svc.stop()
     shutil.rmtree(d)

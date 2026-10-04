@@ -86,8 +86,10 @@ LABEL org.opencontainers.image.title="lexsys-hooks" \
       org.opencontainers.image.source="https://github.com/alpibrusl/lexsys-hooks" \
       org.opencontainers.image.licenses="EUPL-1.2"
 
-# The data directory: events.seg, delivery.seg and endpoints.conf, mode 0700 and made under a umask of 077 (hooks-entrypoint), which is
-# what `production = 1` insists on. A bind mount must be owned by uid 10001, and be 0700 too if the service is to run in production.
+# The data directory: the events log (events.seg, events-N.seg, events.first), delivery.seg, compact.lock and endpoints.conf, mode 0700 and made
+# under a umask of 077 (hooks-entrypoint), which is what `production = 1` insists on. The logs are bounded by retention (docs/retention.md):
+# events final at every endpoint are dropped after retention-days (default 30), so this volume holds about that many days of events and no
+# more. A bind mount must be owned by uid 10001, and be 0700 too if the service is to run in production.
 VOLUME /var/lib/hooks
 WORKDIR /var/lib/hooks
 EXPOSE 8080
