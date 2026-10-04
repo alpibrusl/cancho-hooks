@@ -96,6 +96,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/patch_test.py build/hooks
 
+      - name: Delete an endpoint without a restart (DELETE)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/delete_test.py build/hooks
+
       - name: Where a delivery may go (no private, loopback or reserved addresses, no names)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ssrf_test.py build/hooks

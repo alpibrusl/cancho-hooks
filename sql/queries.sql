@@ -22,3 +22,6 @@ update endpoints set host = $2::text, port = $3::int, secret = $4::text where id
 
 -- name: patch_address id host port
 update endpoints set host = $2::text, port = $3::int where id = $1::int returning id
+
+-- name: delete_endpoint id
+with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone

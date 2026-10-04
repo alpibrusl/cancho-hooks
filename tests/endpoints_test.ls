@@ -179,3 +179,121 @@ fn test_replace_compacts_when_the_blob_is_full_and_refuses_when_it_cannot() -> [
     }
     return 0;
 }
+
+// `remove` (`docs/design.md` section 25.5): the entries after the removed one move down, every other endpoint says what it said, the removed one's
+// bytes are zeroed, and what a later `append` needs is there.
+
+fn test_remove_shifts_the_later_entries_and_keeps_every_other_one_unchanged() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n3 2.2.2.2 9003 c2VjcmV0ISE=\n4 3.3.3.3 9004 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
+        test.assert_eq(endpoints.parse(text, table, blob, true), 4);
+        endpoints.set_slot(table, 0, 10);
+        endpoints.set_slot(table, 1, 11);
+        endpoints.set_slot(table, 2, 12);
+        endpoints.set_slot(table, 3, 13);
+        // the middle one
+        test.assert_eq(endpoints.remove(table, blob, 4, 1), 3);
+        test.assert_eq(endpoints.ident_of(table, 0), 1);
+        test.assert_eq(endpoints.ident_of(table, 1), 3);
+        test.assert_eq(endpoints.ident_of(table, 2), 4);
+        test.assert_eq(endpoints.slot_of(table, 0), 10);
+        test.assert_eq(endpoints.slot_of(table, 1), 12);
+        test.assert_eq(endpoints.slot_of(table, 2), 13);
+        test.assert_eq(endpoints.port_of(table, 0), 9001);
+        test.assert_eq(endpoints.port_of(table, 1), 9003);
+        test.assert_eq(endpoints.port_of(table, 2), 9004);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('8')));
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[0]), int_of(byte_of('2')));
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 2)[0]), int_of(byte_of('3')));
+        test.assert_eq(len(endpoints.key_of(table, blob, 0)), 16);
+        test.assert_eq(len(endpoints.key_of(table, blob, 1)), 8);
+        test.assert_eq(len(endpoints.key_of(table, blob, 2)), 16);
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 1)[0]), int_of(byte_of('s')));
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 2)[15]), int_of(byte_of('f')));
+        // the vacated row is cleared
+        test.assert_eq(endpoints.ident_of(table, 3), 0);
+        test.assert_eq(endpoints.port_of(table, 3), 0);
+        // the first one, then the last, then the only one left
+        test.assert_eq(endpoints.remove(table, blob, 3, 0), 2);
+        test.assert_eq(endpoints.ident_of(table, 0), 3);
+        test.assert_eq(endpoints.ident_of(table, 1), 4);
+        test.assert_eq(endpoints.remove(table, blob, 2, 1), 1);
+        test.assert_eq(endpoints.ident_of(table, 0), 3);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('2')));
+        test.assert_eq(endpoints.remove(table, blob, 1, 0), 0);
+        test.assert_eq(endpoints.blob_used(table, 0), 0);
+    }
+    return 0;
+}
+
+fn test_remove_zeroes_the_removed_endpoints_host_and_key() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        test.assert_eq(endpoints.parse("1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n", table, blob, true), 2);
+        let host_at = table[2];
+        let key_at = table[4];
+        test.assert_eq(int_of(blob[host_at]), int_of(byte_of('8')));
+        test.assert_eq(int_of(blob[key_at]), int_of(byte_of('0')));
+        test.assert_eq(endpoints.remove(table, blob, 2, 0), 1);
+        var k = 0;
+        while k < 7 {
+            test.assert_eq(int_of(blob[host_at + k]), 0);
+            k = k + 1;
+        }
+        k = 0;
+        while k < 16 {
+            test.assert_eq(int_of(blob[key_at + k]), 0);
+            k = k + 1;
+        }
+        // and the one that stayed is untouched
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('1')));
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 0)[0]), int_of(byte_of('s')));
+    }
+    return 0;
+}
+
+fn test_remove_refuses_an_index_that_is_not_there_and_changes_nothing() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        test.assert_eq(endpoints.parse("1 8.8.8.8 9001 c2VjcmV0ISE=\n2 1.1.1.1 9002 c2VjcmV0ISE=\n", table, blob, true), 2);
+        test.assert_eq(endpoints.remove(table, blob, 2, 2), 0 - 1);
+        test.assert_eq(endpoints.remove(table, blob, 2, 0 - 1), 0 - 1);
+        test.assert_eq(endpoints.remove(table, blob, 0, 0), 0 - 1);
+        test.assert_eq(endpoints.ident_of(table, 0), 1);
+        test.assert_eq(endpoints.ident_of(table, 1), 2);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('8')));
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 1)[0]), int_of(byte_of('s')));
+    }
+    return 0;
+}
+
+fn test_after_remove_the_freed_room_is_used_by_append_and_the_survivors_are_intact() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](40, byte_of(0));
+        let scratch = alloc_slice[a](40, byte_of(0));
+        // two entries of 7 + 8 bytes: 30 of 40
+        test.assert_eq(endpoints.parse("1 8.8.8.8 9001 c2VjcmV0ISE=\n2 1.1.1.1 9002 c2VjcmV0ISE=\n", table, blob, true), 2);
+        let key = alloc_slice[a](8, byte_of('k'));
+        // the last one leaves: its 15 bytes are the end of the used part again, so a 15 byte entry fits where it was
+        test.assert_eq(endpoints.remove(table, blob, 2, 1), 1);
+        test.assert_eq(endpoints.blob_used(table, 1), 15);
+        test.assert_eq(endpoints.append(table, blob, 1, 5, 9, 9009, "7.7.7.7", key), 2);
+        test.assert_eq(endpoints.ident_of(table, 1), 9);
+        test.assert_eq(endpoints.slot_of(table, 1), 5);
+        // the first one leaves: its 15 bytes are a hole at the front; a second append of 15 does not fit after the used 30, `replace` compacts
+        test.assert_eq(endpoints.remove(table, blob, 2, 0), 1);
+        test.assert_eq(endpoints.ident_of(table, 0), 9);
+        test.assert_eq(endpoints.append(table, blob, 1, 6, 10, 9010, "6.6.6.6", key), 0 - 1);
+        test.assert_eq(endpoints.compact(table, blob, 1, scratch), 15);
+        test.assert_eq(endpoints.append(table, blob, 1, 6, 10, 9010, "6.6.6.6", key), 2);
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 0)[0]), int_of(byte_of('7')));
+        test.assert_eq(int_of(endpoints.host_of(table, blob, 1)[0]), int_of(byte_of('6')));
+        test.assert_eq(int_of(endpoints.key_of(table, blob, 0)[7]), int_of(byte_of('k')));
+    }
+    return 0;
+}
