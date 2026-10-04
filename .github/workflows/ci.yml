@@ -100,6 +100,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/delete_test.py build/hooks
 
+      - name: Ten endpoints beside 64 connections (a start beyond them is not a failure)
+        working-directory: hooks
+        run: python3 tests/saturation_test.py build/hooks
+
       - name: Where a delivery may go (no private, loopback or reserved addresses, no names)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ssrf_test.py build/hooks

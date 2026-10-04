@@ -672,3 +672,25 @@ It applies at **every place an endpoint comes from**, with the same function (`e
 ## 27. Inbound gateway
 
 *Design only; nothing is built.* [`docs/inbound-gateway.md`](inbound-gateway.md) designs the service in reverse: public URLs per source (Stripe, GitHub, Shopify, Slack, a generic HMAC) that verify the provider's signature, store the exact raw body in `events.seg`, answer `2xx` only after the flush, and forward byte for byte through the existing delivery, retry, idempotency and replay machinery. It also records two statements in this file and in the README that its measurements found false: section 17's claim that a request over the server's input limit is answered by closing the connection rather than with `413` (the pinned `http-server` answers `413`), and the README's "over 65,500 bytes" (the limit is 65,499).
+
+## 28. A bug found by measuring: starts beyond the 64 connections were recorded as failed attempts
+
+**Found** while measuring what one core does (`scripts/bench/run.py`, a load generator and a sink in C): with ten endpoints beside a healthy sink, 3 of 5 runs of 50,000 deliveries had failed attempts (13, 39 and 79), although the sink answered every request it received (its count was exactly 50,000). One endpoint never had any (it cannot have more than 8 in flight, which is under 64). A first guess, that the load generator exhausted the ephemeral ports, was wrong: 25,000 deliveries, under the range, failed too (31 in two runs of three).
+
+**Cause (read from `start_attempts`, `start_one`, `attempt.begin`).** A turn starts at most `most_starts()` (16) attempts, and an endpoint has at most `per_endpoint()` (8) in flight, but **nothing limited the service's connections**: `attempt.slots()` is 64 and ten endpoints can want 80. A start beyond the 64th reached `attempt.begin`, which answers "no connection" when `held >= slots()`; `start_one` then recorded that as an outcome like any other: **a failed attempt**. It uses a step of the retry schedule for a receiver that was never called. With the default schedule the next try is 5 s later, then 5 min, 30 min, ... and after the last one the event is a dead letter for that endpoint. So a burst over nine or more endpoints could delay deliveries by seconds to minutes and, repeated, dead-letter an event nobody ever refused. The README said "up to 64 delivery attempts are in flight at once (8 per endpoint)", which read as a queue; it was a cliff.
+
+**Measured, before and after** (`tests/saturation_test.py`: ten endpoints share one healthy receiver that holds each request for 60 to 400 ms, 60 events, 600 deliveries):
+
+| | attempts | delivered | failed |
+|---|---|---|---|
+| before the fix (30 events, 300 deliveries; the first version of the test) | 536 | 175 in a minute | 361 |
+| after the fix (600 deliveries) | 600 | 600 | 0 |
+
+and the benchmark's ten-endpoint case, three runs after the fix: 50,000 attempts, 50,000 delivered, 0 failed each time.
+
+**The fix.** A turn starts no more attempts than there are free connections: `state.starts_allowed(held, slots, most)`, a pure function (`min(most, slots - held)`, never negative), used by `start_attempts`; the replays that follow in the same turn share what is left of the budget. `attempt.begin`'s check stays as the last defence and should no longer be reachable.
+
+**What the tests do and do not pin.** The end-to-end test fails on the old binary and passes on the new, and it checks that the receiver really saw about 64 at once (otherwise it proves nothing). It does **not** kill a cap that is off by one to three **inside the band where 49 to 51 connections are in use at the start of a turn**: two such mutants of the inline version survived five runs each, with random hold times, because that state is rare. So the rule was extracted into `state.starts_allowed` and **unit-tested at its boundaries** (0, 47, 48, 49, 50, 51, 63, 64 and 70 connections in use): six mutants of it (off by +1, off by -1, no clamp at zero, applied too late, applied one late, no cap at all) are all killed.
+
+**What it does not fix.** Events that earlier versions failed spuriously were retried by the schedule and are not "lost", but the delay was real and nothing recorded why: a failed attempt carries no reason in the log (the history table has the status), so a spurious failure cannot be told from a refusal after the fact. Recording the cause of a failed attempt is a separate change and is listed in the README's limits.
+

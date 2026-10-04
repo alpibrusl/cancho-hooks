@@ -1615,7 +1615,15 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     let count = dv[c_endpoints()];
     extend_scan(lg, window, dv);
     var table = atab;
-    var budget = most_starts();
+    // The service has `attempt.slots()` connections in all, and `attempt.begin` answers "no connection" for a start beyond them, which
+    // `start_one` records as a failed attempt: a step of the retry schedule used for a receiver that was never called. So a turn
+    // starts no more attempts than there are free slots (found by `scripts/bench/run.py` and `tests/saturation_test.py`:
+    // ten endpoints can want 80 in flight).
+    var held = 0;
+    borrow table as &tt in {
+        held = conns.live(tt);
+    }
+    var budget = state.starts_allowed(held, attempt.slots(), most_starts());
     var written = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
