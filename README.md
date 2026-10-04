@@ -12,11 +12,7 @@ rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the 
 
 ## Status
 
-**Step H1e.** Working: durable ingest (`202` only after the flush that covers the event; requests that arrive together share one
-flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the
-reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next
-attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). Since H1e a client may send an `Idempotency-Key`: a repeat of the same event answers the first answer, byte for byte, and stores nothing, also across a crash ([`docs/design.md`](docs/design.md) section 17). Not built: endpoints and
-attempt history in Postgres, jitter, TLS (`https`) endpoints.
+**Working:** durable ingest (`202` only after the flush that covers the event; requests that arrive together share one flush), delivery to several endpoints with [Standard Webhooks](https://www.standardwebhooks.com) signatures checked against the reference library, retries on the Standard Webhooks schedule, dead letters, and every outcome (with the time of the next attempt) surviving a crash. A slow, silent or unreachable endpoint costs the others almost nothing: delivery attempts do not hold the loop (up to 64 in flight, a state machine each), so ingest stays at a median of 2.3 ms and healthy endpoints see their deliveries within milliseconds ([`docs/design.md`](docs/design.md) section 16). A client may send an `Idempotency-Key` ([section 17](docs/design.md)); an event can be replayed to one endpoint or all (section 23); a `410 Gone` disables an endpoint (section 22); with PostgreSQL the endpoints are a table, every ended attempt is a row, and an endpoint can be created with `POST /endpoints` behind an admin token (sections 24 and 25). **Not built:** changing or deleting an endpoint without a restart (`PATCH`, `DELETE`: designed in section 25), filtering by event type, jitter in the retry schedule, TLS (`https`) endpoints.
 
 ## Requirements
 
@@ -144,6 +140,7 @@ ignored; at most 62 endpoints, each with an id of up to six digits, written and 
 | `window-ms` | `86400000` | how long an idempotency key is remembered |
 | `pg-host` | (none) | a PostgreSQL: the endpoints are read from it and the attempt history written to it; without it the endpoints are `endpoints.conf` and there is no history (design.md section 24) |
 | `pg-port`, `pg-user`, `pg-database`, `pg-password` | `5432`, `hooks`, `hooks`, none | how to reach it. Put a password in the settings file, not on the command line |
+| `admin-token` | (none) | the bearer token that lets a request create endpoints, 8 to 255 visible characters; without it `POST /endpoints` is a `403`. Anyone who has it can make the service send requests to any host it can reach, so keep it secret and put it in the settings file, not on the command line |
 | `import-endpoints` | `0` | `1`: copy `endpoints.conf` into the database and exit (needs `pg-host`; no `port` needed) |
 
 ```sh
@@ -185,6 +182,8 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `POST /events/:id/replay` | send the event again to every endpoint; `/replay/:endpoint` for one. `202 {"event","endpoints"}`, `404` for an unknown event or endpoint, `507` if 32 replays already wait. Same `webhook-id`, same schedule (design.md section 23) |
 | `GET /events/:id/attempts` | the attempts of an event from the database, as `[{"endpoint","replay","attempt","outcome","status","at","latency_ms"}]`; `503` if no database is named or it cannot answer, `504` after five seconds |
 | `GET /endpoints` | each endpoint's `{"id","port","cursor","disabled"}` (not the host, not the secret) |
+| `GET /endpoints/:id` | one endpoint, as `GET /endpoints` lists it; `404` for an unknown id, `400` for one that is not a number |
+| `POST /endpoints` | create an endpoint (needs a database and an `admin-token`): `{"host","port"}` and optionally `"secret"` (`whsec_` and base64; the service makes one if it is left out) and `"from":"now"`. `201 {"id","host","port","secret","from","cursor"}`: **the secret is in this answer and in no other**. The endpoint gets the events from now on, not the log's past. `403` if the service has no `admin-token`, `401` without `Authorization: Bearer <token>`, `400` with the reason for a bad request, `409` if another change waits or 62 exist, `503` if no database is named or it refused, `504` after five seconds (the row may still have been stored: it is an endpoint at the next start) |
 | `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
 | `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |
 | `GET /healthz` | `{"ok":true}` |
@@ -208,6 +207,7 @@ $LEX_SYS test                                      # the four unit-test sets of 
 python3 tests/sign_test.py build/sign_probe        # signatures and base64 against the reference library (536 checks)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/history_test.py build/hooks   # the history in PostgreSQL (needs one: see the file)
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/roster_test.py build/hooks    # the endpoints in PostgreSQL: import, read at start, every refusal
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/manage_test.py build/hooks    # POST /endpoints and GET /endpoints/:id: the token, the request, from now
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/slots_test.py build/hooks     # endpoint ids and slots: the legacy log, ids above 15, dormant, reclaimed
 python3 tests/layout_test.py build/hooks           # the delivery state's regions do not overlap (2,300 events, two fail once)
 python3 tests/replay_test.py build/hooks           # replay: one endpoint or all, restarts, capacity, an event far behind the cursor
@@ -227,16 +227,22 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 ## Documentation
 
 - [`docs/design.md`](docs/design.md): what this is for, which store owns which fact, the delivery semantics, the test scenario
-  fixed before the build, the gaps predicted, and sections 13 to 17 on what building each step showed.
+  fixed before the build, the gaps predicted, and sections 13 to 25 on what building each step showed. (Its first sections are the plan; where a later section says otherwise, the later one is what was built.)
 
 ## Layout
 
 ```
 src/hooks.ls       the service: routes, the loop, delivery
 src/attempt.ls     delivery attempts that do not hold the loop: connect, send, read a status line, each waiting for the poller
-src/state.ls       the per-endpoint cursor and window, and the outcome record
+src/state.ls       the per-slot cursor and window, and the outcome record
 src/idem.ls        the idempotency-key index (rebuilt from the log at start)
-src/endpoints.ls   the endpoints file
+src/endpoints.ls   the endpoints (file or table) as the service holds them: id, slot, port, host, key
+src/config.ls      the settings, from a file and from flags
+src/history.ls     the attempts that ended, written to PostgreSQL, and the connections to it
+src/roster.ls      the endpoints table: read at start, and `--import-endpoints`
+src/manage.ls      `POST /endpoints`: who may call it, what a request may say, a secret for the endpoint
+src/queries.ls     the SQL of `sql/queries.sql` as functions (generated by `pgen`)
+src/view.ls        what the database says, as an HTTP answer
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
 lex-sys.toml       the project file: the compiler, the two libraries (each pinned to a commit) and the programs
 scripts/build.sh   `lex-sys build`, and the fsync shim the crash tests preload
@@ -246,7 +252,7 @@ docs/design.md     the design and what building it found
 
 ## Limitations
 
-One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, not a database; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 16 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
+One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, or from the `endpoints` table (read at start, and added to with `POST /endpoints`); they cannot yet be changed or removed without a restart; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 62 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
 
 ## Contributing
 

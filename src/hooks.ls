@@ -34,6 +34,8 @@ import history;
 import view;
 import queries;
 import pg.pool;
+import manage;
+import pg;
 import roster;
 import record;
 import attempt;
@@ -454,6 +456,69 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         buffer.drop(heap, body);
         return answer;
     }
+    if id == 11 {
+        // POST /endpoints (`docs/design.md` section 25.2): register an endpoint. It is written to the database first, and the answer waits
+        // for the database (`run` holds the connection), so here the request is only judged and kept.
+        let auth = manage.authorize(request, table, stats[off_token()..off_token() + manage.token_size()]);
+        if auth == 1 {
+            return server.failure(heap, out, 403, "endpoint management is off: the service was not given an admin-token", keep);
+        }
+        if auth == 2 {
+            return server.failure_with(heap, out, 401, "a valid bearer token is required", keep, "WWW-Authenticate: Bearer\r\n");
+        }
+        if !history.enabled(stats[off_hq()..off_hq() + history.size()]) {
+            return server.failure(heap, out, 503, "endpoints are managed in the database and none is named (--pg-host)", keep);
+        }
+        if stats[off_mg() + manage.mg_state()] != 0 {
+            return server.failure(heap, out, 409, "another change is waiting for the database", keep);
+        }
+        if stats[c_endpoints()] >= state.max_endpoints() {
+            return server.failure(heap, out, 409, "the service has as many endpoints as it can (62)", keep);
+        }
+        let parsed = manage.parse_create(heap, body, scratch, stats[off_mg()..off_mg() + manage.mg_size()]);
+        if parsed.0 != 0 {
+            return server.failure(heap, out, 400, manage.why(parsed.0), keep);
+        }
+        if parsed.3 > 0 && sign.secret_key(scratch[256..256 + parsed.3], scratch[400..496]) < 0 {
+            return server.failure(heap, out, 400, manage.why(4), keep);
+        }
+        if endpoints.blob_used(stats[off_table()..off_table() + endpoints.table_size()], stats[c_endpoints()]) + parsed.2 + 48 > endpoints.text_limit() {
+            return server.failure(heap, out, 507, "there is no room for another host name", keep);
+        }
+        stats[off_mg() + manage.mg_state()] = 1;
+        note[0] = 0 - 3;
+        return out;
+    }
+    if id == 12 {
+        // GET /endpoints/:id: one endpoint, as `GET /endpoints` lists it. Not the host and not the secret.
+        let want = route.param_nat(path, params, 0);
+        if want < 0 {
+            return server.failure(heap, out, 400, "the id must be a number", keep);
+        }
+        let wi = index_of_id(stats, want);
+        if wi < 0 {
+            return server.failure(heap, out, 404, "no such endpoint", keep);
+        }
+        let slot = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+        var w = json.writer(heap, 96);
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "id");
+        w = json.put_int(heap, w, want);
+        w = json.put_key(heap, w, "port");
+        w = json.put_int(heap, w, endpoints.port_of(stats[off_table()..off_table() + endpoints.table_size()], wi));
+        w = json.put_key(heap, w, "cursor");
+        w = json.put_int(heap, w, stats[off_cur() + slot]);
+        w = json.put_key(heap, w, "disabled");
+        w = json.put_bool(heap, w, is_disabled(stats, slot));
+        w = json.end_object(heap, w);
+        let body = json.finish(w);
+        var answer = out;
+        borrow body as &sb in {
+            answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, body);
+        return answer;
+    }
     if id == 8 || id == 9 {
         // POST /events/:id/replay[/:endpoint]: send the event again to every endpoint, or to one, whatever happened to it there.
         let want = route.param_nat(path, params, 0);
@@ -569,6 +634,8 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "POST", "/events/:id/replay", 8);
     r = route.add(heap, r, "POST", "/events/:id/replay/:endpoint", 9);
     r = route.add(heap, r, "GET", "/events/:id/attempts", 10);
+    r = route.add(heap, r, "POST", "/endpoints", 11);
+    r = route.add(heap, r, "GET", "/endpoints/:id", 12);
     return r;
 }
 
@@ -586,6 +653,8 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 //     sched    17    the retry schedule: the number of delays, then the delays in ms
 //     flying   62    per slot: how many attempts are in flight
 //     slotid   62    per slot: the id of the endpoint that has it, or free, or never seen
+//     token    256   the admin token: its length, then its bytes
+//     mg       368   the change that waits for the database (`manage.ls`)
 //     offs     1024  where in the events log each event of the window starts, by `id % window`
 //     cells    ...   `state.cells(62)`: final / attempts / next attempt, per slot and `id % window`
 
@@ -689,8 +758,18 @@ fn off_slotid() -> [] int {
     return off_flying() + state.max_endpoints();
 }
 
-fn off_offs() -> [] int {
+// The bearer token that lets a request change endpoints (its length, then its bytes), and the one change that may wait for the
+// database (`manage.ls`).
+fn off_token() -> [] int {
     return off_slotid() + state.max_endpoints();
+}
+
+fn off_mg() -> [] int {
+    return off_token() + manage.token_size();
+}
+
+fn off_offs() -> [] int {
+    return off_mg() + manage.mg_size();
 }
 
 fn off_cells() -> [] int {
@@ -960,10 +1039,39 @@ fn scan_slots[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) 
     return 0;
 }
 
-// Give each endpoint of the table the slot the log says it has, and a slot (with a `created` record, flushed) to each that has none:
-// the slot with its own number if that is not taken, else the lowest that is. An endpoint that is in the log and not in the table
-// is dormant: its slot stays its own and its state is rebuilt if it comes back, until a new endpoint needs the slot, and then it is
-// freed with a `removed` record. Answers 0, or 1 if the log refused a record.
+// A slot for the endpoint `ident`, which has none: the slot with its own number if that is free, else the lowest that is, else the lowest
+// dormant one (an endpoint in the log and not in the table), freed with a `removed` record. Answers the slot, or -1 if the log refused the
+// record. The caller writes the `created` record, for it knows the cursor.
+fn take_slot[&g, &d](done: &!g log.Log, dv: &!d [int], ident: int) -> [file_write] int {
+    let most = state.max_endpoints();
+    var slot = 0 - 1;
+    if ident < most && dv[off_slotid() + ident] < 0 {
+        slot = ident;
+    }
+    var k = 0;
+    while k < most && slot < 0 {
+        if dv[off_slotid() + k] < 0 {
+            slot = k;
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while k < most && slot < 0 {
+        if dv[off_slotid() + k] >= 0 && index_of_id(dv, dv[off_slotid() + k]) < 0 {
+            if note_removed(done, dv, k) == 0 {
+                return 0 - 1;
+            }
+            dv[off_slotid() + k] = slot_free();
+            slot = k;
+        }
+        k = k + 1;
+    }
+    return slot;
+}
+
+// Give each endpoint of the table the slot the log says it has, and a slot (with a `created` record, flushed) to each that has none. An
+// endpoint that is in the log and not in the table is dormant: its slot stays its own and its state is rebuilt if it comes back, until a new
+// endpoint needs the slot (`take_slot`). Answers 0, or 1 if the log refused a record.
 fn assign_slots[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
     let n = dv[c_endpoints()];
     let most = state.max_endpoints();
@@ -986,29 +1094,7 @@ fn assign_slots[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
     while i < n {
         if dv[off_table() + i * endpoints.stride()] < 0 {
             let ident = dv[off_table() + i * endpoints.stride() + 6];
-            var slot = 0 - 1;
-            if ident < most && dv[off_slotid() + ident] < 0 {
-                slot = ident;
-            }
-            var k = 0;
-            while k < most && slot < 0 {
-                if dv[off_slotid() + k] < 0 {
-                    slot = k;
-                }
-                k = k + 1;
-            }
-            k = 0;
-            while k < most && slot < 0 {
-                if dv[off_slotid() + k] >= 0 && index_of_id(dv, dv[off_slotid() + k]) < 0 {
-                    if note_removed(done, dv, k) == 0 {
-                        return 1;
-                    }
-                    dv[off_slotid() + k] = slot_free();
-                    slot = k;
-                    wrote = wrote + 1;
-                }
-                k = k + 1;
-            }
+            let slot = take_slot(done, dv, ident);
             if slot < 0 || note_created(done, dv, slot, ident, 0) == 0 {
                 return 1;
             }
@@ -1469,7 +1555,7 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), blob: &x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], pl0: pool.Pool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, net_out("")] int {
+fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], pl0: pool.Pool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), net_out("")] int {
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
@@ -1532,13 +1618,62 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                         }
                         var accepted = 0 - 1;
                         var asked = 0 - 1;
+                        var creating = false;
                         borrow note as &nr in {
                             accepted = contents(nr)[0];
                             if contents(nr)[0] == 0 - 2 {
                                 asked = contents(nr)[1];
                             }
+                            if contents(nr)[0] == 0 - 3 {
+                                creating = true;
+                            }
                         }
-                        if asked >= 0 {
+                        if creating {
+                            // A new endpoint (`finish_create` has the rest): make its secret if it brought none, send the insert to the
+                            // database and hold the connection until the database answers; or say at once that it cannot be done.
+                            var sent = 0 - 1;
+                            var made = 0;
+                            if dv[off_mg() + manage.mg_make()] == 1 {
+                                made = manage.make_secret(heap, fs, dv[off_mg()..off_mg() + manage.mg_size()]);
+                            }
+                            if made == 0 {
+                                region ra {
+                                    let hl = dv[off_mg() + manage.mg_host_len()];
+                                    let sl = dv[off_mg() + manage.mg_secret_len()];
+                                    let host = alloc_slice[ra](253, byte_of(0));
+                                    let secret = alloc_slice[ra](96, byte_of(0));
+                                    manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), hl, host);
+                                    manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_secret(), sl, secret);
+                                    let request = queries.create_endpoint_start(heap, host[0..hl], dv[off_mg() + manage.mg_port()], secret[0..sl]);
+                                    borrow request as &rb in {
+                                        borrow mut pl as &!qw in {
+                                            sent = pool.submit(qw, next_tag, buffer.bytes(rb));
+                                        }
+                                    }
+                                    buffer.drop(heap, request);
+                                }
+                            }
+                            if sent == 0 {
+                                var ticket = 0 - 1;
+                                borrow mut srv as &!sw in {
+                                    ticket = server.hold(sw);
+                                }
+                                dv[off_mg() + manage.mg_state()] = 2;
+                                dv[off_mg() + manage.mg_tag()] = next_tag;
+                                dv[off_mg() + manage.mg_ticket()] = ticket;
+                                dv[off_mg() + manage.mg_keep()] = keep;
+                                dv[off_mg() + manage.mg_deadline()] = clock_ms(clock) + query_wait_ms();
+                                next_tag = next_tag + 1;
+                            } else {
+                                dv[off_mg() + manage.mg_state()] = 0;
+                                out = server.failure(heap, out, 503, "the endpoint cannot be stored now", keep == 1);
+                                borrow mut srv as &!sw in {
+                                    borrow out as &ob in {
+                                        server.respond(sw, buffer.bytes(ob));
+                                    }
+                                }
+                            }
+                        } else if asked >= 0 {
                             // A request for the history: queue it on the pool and hold the connection until the answer comes, or
                             // say at once that it cannot be done (every slot taken, the pool full, no connection live).
                             var qslot = 0 - 1;
@@ -1690,7 +1825,15 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                             // every request the pool has an answer for: an insert is counted, a request for the API is answered
                             var tag = pool.next_done(qw);
                             while tag >= 0 {
-                                if tag < history.query_base() {
+                                if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
+                                    // the database has answered the insert of a new endpoint
+                                    let created = finish_create(heap, dv, blob, lg, done, window, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                    borrow created as &cb in {
+                                        server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
+                                    }
+                                    buffer.drop(heap, created);
+                                    dv[off_mg() + manage.mg_state()] = 0;
+                                } else if tag < history.query_base() {
                                     history.account(qw, dv[off_hq()..off_hq() + history.size()]);
                                 } else {
                                     var slotq = 0 - 1;
@@ -1747,6 +1890,16 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &x, &v, &i, &a](heap: &!h Heap, router: &
                                     }
                                 }
                                 q = q + 1;
+                            }
+                            if dv[off_mg() + manage.mg_state()] == 2 && now_ms >= dv[off_mg() + manage.mg_deadline()] {
+                                // The insert may still commit: the next start finds the row (section 25.2), and `GET /endpoints/:id` says what this
+                                // process believes.
+                                let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the endpoint may still have been stored", dv[off_mg() + manage.mg_keep()] == 1);
+                                borrow late as &lb in {
+                                    server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(lb));
+                                }
+                                buffer.drop(heap, late);
+                                dv[off_mg() + manage.mg_state()] = 0;
                             }
                             history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
                             pool.flush(qw, server.poller(sw));
@@ -1893,8 +2046,10 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
         return 13;
     }
     dv[c_endpoints()] = n;
+    // The slot map and the sequence number are read whether or not there are endpoints now: an endpoint can be created later (`POST
+    // /endpoints`), and it needs to know which slots the log has given and where its records go.
+    scan_slots(done, window, dv);
     if n > 0 {
-        scan_slots(done, window, dv);
         if assign_slots(done, dv) != 0 {
             return 17;
         }
@@ -2017,6 +2172,106 @@ fn digits_of[&b](n: int, buf: &!b [byte]) -> [] int {
 
 fn say[&i, &t](out: &!i Io, text: &t [byte]) -> [err_write] int {
     return io.error_all(out, text);
+}
+
+// The database has answered the insert of a new endpoint (`docs/design.md` section 25.2): give it a slot, say so in the log (flushed), start its
+// cursor at the last event so that it gets what comes after and not the log's past, add it to the table, and answer `201` with the secret,
+// which nothing answers again. Answers the whole HTTP response. Nothing is changed in memory or in the log unless the database said commit.
+fn finish_create[&h, &b, &l, &g, &d, &w, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], rep: &m [byte], status: int, keep: bool) -> [heap, file_read, file_write] buffer.Buffer {
+    let out = buffer.empty(heap, 512);
+    if status != 0 || pg.failure(rep) >= 0 {
+        return server.failure(heap, out, 503, "the database did not store the endpoint", keep);
+    }
+    let row = pg.first_row(rep);
+    if row < 0 {
+        return server.failure(heap, out, 503, "the database did not store the endpoint", keep);
+    }
+    let ident = queries.create_endpoint_id(rep, row);
+    if ident < 0 || ident > 999999 {
+        return server.failure(heap, out, 503, "the database gave an id the service cannot use", keep);
+    }
+    let mg = off_mg();
+    let hl = dv[mg + manage.mg_host_len()];
+    let sl = dv[mg + manage.mg_secret_len()];
+    let port = dv[mg + manage.mg_port()];
+    region a {
+        let host = alloc_slice[a](253, byte_of(0));
+        let secret = alloc_slice[a](96, byte_of(0));
+        let key = alloc_slice[a](96, byte_of(0));
+        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
+        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_secret(), sl, secret);
+        let klen = sign.secret_key(secret[0..sl], key);
+        if klen < 0 {
+            return server.failure(heap, out, 503, "the secret cannot be used", keep);
+        }
+        // An endpoint of this id that the log remembers is a different endpoint (an id is never given twice): its slot is freed.
+        var k = 0;
+        while k < state.max_endpoints() {
+            if dv[off_slotid() + k] == ident {
+                if note_removed(done, dv, k) == 0 {
+                    return server.failure(heap, out, 503, "the change could not be stored", keep);
+                }
+                dv[off_slotid() + k] = slot_free();
+            }
+            k = k + 1;
+        }
+        let slot = take_slot(done, dv, ident);
+        var start = log.last_ms(lg);
+        if start < 0 {
+            start = 0;
+        }
+        if slot < 0 || note_created(done, dv, slot, ident, start) == 0 || log.flush(done) != 0 {
+            return server.failure(heap, out, 503, "the change could not be stored", keep);
+        }
+        state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], slot, start);
+        set_disabled(dv, slot, false);
+        dv[off_flying() + slot] = 0;
+        dv[off_slotid() + slot] = ident;
+        let count = dv[c_endpoints()];
+        let grown = endpoints.append(dv[off_table()..off_table() + endpoints.table_size()], blob, count, slot, ident, port, host[0..hl], key[0..klen]);
+        if grown < 0 {
+            return server.failure(heap, out, 503, "the endpoint could not be added", keep);
+        }
+        dv[c_endpoints()] = grown;
+        if count == 0 {
+            // The first endpoint: delivery has not been scanning the log, so it starts where this one does.
+            dv[c_scanned()] = start;
+            dv[c_offset()] = seek_after(lg, window, start);
+        }
+        var wr = json.writer(heap, 256);
+        wr = json.begin_object(heap, wr);
+        wr = json.put_key(heap, wr, "id");
+        wr = json.put_int(heap, wr, ident);
+        wr = json.put_key(heap, wr, "host");
+        wr = json.put_string(heap, wr, host[0..hl]);
+        wr = json.put_key(heap, wr, "port");
+        wr = json.put_int(heap, wr, port);
+        wr = json.put_key(heap, wr, "secret");
+        wr = json.put_string(heap, wr, secret[0..sl]);
+        wr = json.put_key(heap, wr, "from");
+        wr = json.put_string(heap, wr, "now");
+        wr = json.put_key(heap, wr, "cursor");
+        wr = json.put_int(heap, wr, start);
+        wr = json.end_object(heap, wr);
+        let body = json.finish(wr);
+        var answer = out;
+        borrow body as &sb in {
+            answer = server.reply(heap, answer, 201, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, body);
+        return answer;
+    }
+}
+
+// The admin token into the delivery state: its length, then its bytes, one to an integer.
+fn put_token[&d, &t](dv: &!d [int], token: &t [byte]) -> [] int {
+    dv[off_token()] = len(token);
+    var i = 0;
+    while i < len(token) {
+        dv[off_token() + 1 + i] = int_of(token[i]);
+        i = i + 1;
+    }
+    return 0;
 }
 
 // Parse `text` into scratch tables, to find out whether `endpoints.parse` accepts it: the number of endpoints, or `0 - line`. The scratch
@@ -2270,6 +2525,7 @@ fn main(world: World) -> [] int {
                                                                                 borrow mut listener as &!lh in {
                                                                                     listener_nonblocking(lh);
                                                                                     let router = routes(h);
+                                                                                    put_token(contents(dvw), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
                                                                                     // The database for the history, if one was named: connect and log in here, before the loop, and go on
                                                                                     // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
                                                                                     var hpool = pool.empty(h, 1, 1, 4096, 4096);
@@ -2292,7 +2548,7 @@ fn main(world: World) -> [] int {
                                                                                     }
                                                                                     borrow router as &r in {
                                                                                         borrow clock as &c in {
-                                                                                            status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), hpool);
+                                                                                            status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), hpool);
                                                                                         }
                                                                                     }
                                                                                     route.drop(h, router);

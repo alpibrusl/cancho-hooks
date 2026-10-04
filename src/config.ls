@@ -17,6 +17,7 @@ import std.bytes;
 //     pg-port      its port                                        default 5432, 1 to 65535
 //     pg-user, pg-database, pg-password                            default `hooks`, `hooks`, none
 //     import-endpoints  `1`: copy `endpoints.conf` into the database and exit   default 0 (section 24)
+//     admin-token  the bearer token that lets a request change endpoints       default none: management is off (section 25.2)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -26,16 +27,20 @@ import std.bytes;
 //
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
-//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)
+//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it
 
 pub fn size() -> [] int {
-    return 12;
+    return 13;
 }
 
 pub fn blob_size() -> [] int {
+    return 3200;
+}
+
+pub fn token_at() -> [] int {
     return 2944;
 }
 
@@ -113,6 +118,10 @@ pub fn pg_database_len[&c](cfg: &c [int]) -> [] int {
 
 pub fn pg_password_len[&c](cfg: &c [int]) -> [] int {
     return cfg[10];
+}
+
+pub fn token_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[12];
 }
 
 pub fn import_endpoints[&c](cfg: &c [int]) -> [] bool {
@@ -225,6 +234,20 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[10] = keep(value, blob, pg_password_at());
+        }
+    } else if bytes.equal(key, "admin-token") {
+        var plain = len(value) >= 8 && len(value) <= 255;
+        var k = 0;
+        while k < len(value) {
+            if int_of(value[k]) <= 32 || int_of(value[k]) >= 127 {
+                plain = false;
+            }
+            k = k + 1;
+        }
+        if plain {
+            cfg[12] = keep(value, blob, token_at());
+        } else {
+            why = why_value();
         }
     } else if bytes.equal(key, "import-endpoints") {
         if bytes.equal(value, "1") {

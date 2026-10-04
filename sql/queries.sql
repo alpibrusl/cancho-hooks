@@ -13,3 +13,6 @@ select id, host, port, secret from endpoints order by id
 
 -- name: add_endpoint id host port secret
 insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing
+
+-- name: create_endpoint host port secret
+insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id
