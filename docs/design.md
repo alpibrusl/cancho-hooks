@@ -694,3 +694,15 @@ and the benchmark's ten-endpoint case, three runs after the fix: 50,000 attempts
 
 **What it does not fix.** Events that earlier versions failed spuriously were retried by the schedule and are not "lost", but the delay was real and nothing recorded why: a failed attempt carries no reason in the log (the history table has the status), so a spurious failure cannot be told from a refusal after the fact. Recording the cause of a failed attempt is a separate change and is listed in the README's limits.
 
+## 29. Correction: one unreachable endpoint stops every endpoint after 1,024 events
+
+**What was claimed.** The README and the product page said a slow, silent or unreachable endpoint "costs the others almost nothing" (sections 14 to 16, `tests/isolation_test.py`). **That is true for latency and false for progress**, and the second matters more.
+
+**Measured** (the binary of section 28; `python3 scripts/bench/stall_probe.py` reproduces it: two endpoints, one dead, 3,000 events posted): the healthy endpoint's cursor stopped at **1,024**; delivered 1,024 of 3,000; the dead endpoint's cursor stayed at 0 and its attempts went through the retry schedule. The healthy endpoint received nothing more for as long as the dead one stayed at 0, which with the default schedule is hours to a day.
+
+**Cause (read from `extend_scan`, `lowmark`).** The events log is scanned forward only as far as the **slowest cursor plus the window** (`lowmark(dv) + state.span()`, 1,024 events), because one ring of offsets (`offs`, indexed by `id % span`) is shared by all endpoints. An event beyond that is not scanned, so no endpoint can start an attempt for it, however healthy that endpoint is. Section 25.2 measured the same mechanism for a row added by hand and section 25.3 fixed *that entry point* (a new endpoint starts at the slowest cursor); it did not touch the general case, which is any endpoint that is down.
+
+**Why the tests did not see it.** The isolation test posts 80 events (about 20 a second) and a dead endpoint costs the others nothing within the first 1,024. The chaos and delivery tests use schedules of 100 to 250 ms, so a dead endpoint dead-letters its events in seconds and its cursor moves on. Only a long schedule and more than 1,024 events show it, which is the production case.
+
+**Consequence.** The service is not production-ready: **one customer's broken receiver halts delivery to every other customer** once about a thousand events have accumulated. The fix is the first item of `docs/production.md`.
+
