@@ -1,0 +1,14 @@
+# What the image build does not need: everything but src/, tests/*.ls (lex-sys.toml lists them), sql/, deploy/ and lex-sys.toml.
+.git
+.github
+.gitignore
+build
+docs
+scripts
+README.md
+LICENSE
+Dockerfile
+.dockerignore
+**/__pycache__
+tests/*.py
+tests/*.c
