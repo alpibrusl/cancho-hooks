@@ -239,3 +239,30 @@ fn test_import_endpoints_is_zero_or_one() -> [] int {
     }
     return 0;
 }
+
+fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.token_len(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "admin-token", "seven77"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "admin-token", "has a space"), config.why_value());
+        test.assert_eq(config.token_len(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "admin-token", "eight888"), 0);
+        test.assert_eq(config.token_len(cfg), 8);
+        test.assert_eq(int_of(blob[config.token_at()]), 'e');
+        test.assert_eq(int_of(blob[config.token_at() + 7]), '8');
+        // a refused token leaves the one that was set
+        test.assert_eq(config.set(cfg, blob, "admin-token", "tab\there1"), config.why_value());
+        test.assert_eq(config.token_len(cfg), 8);
+        let long = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        test.assert_eq(config.set(cfg, blob, "admin-token", long[0..255]), 0);
+        test.assert_eq(config.token_len(cfg), 255);
+        test.assert_eq(config.set(cfg, blob, "admin-token", long[0..256]), config.why_value());
+        // the largest token ends inside its own place: the last byte of the blob is the token's
+        test.assert_eq(int_of(blob[config.token_at() + 254]), int_of(long[254]));
+        test.assert_eq(len(blob), config.token_at() + 256);
+    }
+    return 0;
+}

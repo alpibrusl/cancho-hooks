@@ -254,11 +254,20 @@ def main():
           svc.exited and svc.proc.wait() == 13 and any("row 2" in l for l in svc.lines), str(svc.lines))
     stop(svc)
     psql("truncate endpoints")
+    try:
+        psql(f"insert into endpoints values (1000000, '127.0.0.1', 80, '{s1}')")
+        refused_by_table = False
+    except RuntimeError:
+        refused_by_table = True
+    check("5. the table itself refuses an id of seven digits (its check constraint)", refused_by_table)
+    # a table made before that constraint could hold one: the service refuses it too
+    psql("alter table endpoints drop constraint endpoints_id_check")
     psql(f"insert into endpoints values (1, '127.0.0.1', 80, '{s1}'), (1000000, '127.0.0.1', 80, '{s1}')")
     svc = start(d, pg_flags())
     check("5. an id of seven digits: status 13, row 2", svc.exited and svc.proc.wait() == 13 and any("row 2" in l for l in svc.lines), str(svc.lines))
     stop(svc)
     psql("truncate endpoints")
+    psql("alter table endpoints add constraint endpoints_id_check check (id between 0 and 999999)")
     psql(f"insert into endpoints values (1, 'bad host', 80, '{s1}')")
     svc = start(d, pg_flags())
     check("5. a host with a space in it: status 20 and the reason", svc.exited and svc.proc.wait() == 20 and any("not printable" in l for l in svc.lines), str(svc.lines))

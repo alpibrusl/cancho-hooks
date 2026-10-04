@@ -198,6 +198,44 @@ pub fn add_endpoint[&h, &c, &a2, &a4](heap: &!h Heap, conn: &!c Conn, id: int, h
     return (reply, status);
 }
 
+// create_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn create_endpoint_start[&h, &a1, &a3](heap: &!h Heap, host: &a1 [byte], port: int, secret: &a3 [byte]) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "create_endpoint", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// create_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn create_endpoint[&h, &c, &a1, &a3](heap: &!h Heap, conn: &!c Conn, host: &a1 [byte], port: int, secret: &a3 [byte]) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param(heap, ps, host);
+    ps = pg.param_int(heap, ps, port);
+    ps = pg.param(heap, ps, secret);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "create_endpoint", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
+pub fn create_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
+    let (from, to) = pg.value(m, row, 0);
+    return pg.int_text(m, from, to);
+}
+
 // Parse every query above on this connection, once, after login: PostgreSQL then parses and plans each
 // one once instead of on every call. Answers the reply of the first refusal (`pg.failure` says what the
 // server objected to) or an empty one, and a status; the queries are not to be run unless both are clean.
@@ -216,5 +254,8 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret) values ($1, $2, $3, $4) on conflict do nothing");
     reply = r3;
     status = s3;
+    let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text returning id");
+    reply = r4;
+    status = s4;
     return (reply, status);
 }

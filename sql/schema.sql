@@ -31,8 +31,12 @@ alter table attempts alter column endpoint type bigint;
 -- Webhooks one (`whsec_` and base64), exactly as it is given to the receiver. It has to be kept in a form the service can sign
 -- with, so anyone who can read this table can sign as the service: give the table the permissions of a secret.
 create table if not exists endpoints (
-    id integer primary key check (id >= 0),
+    id integer primary key check (id between 0 and 999999),
     host text not null,
     port int not null check (port between 1 and 65535),
     secret text not null
 );
+
+-- The ids `POST /endpoints` gives (docs/design.md section 25.2): a sequence, so that an id is never given twice even after its endpoint is
+-- deleted. An id somebody inserted by hand is skipped: the new id is the larger of the sequence and one more than the largest in the table.
+create sequence if not exists endpoint_ids minvalue 0 start 0;

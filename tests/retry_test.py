@@ -88,7 +88,9 @@ def durable_outcomes(datadir):
     side = path + ".synced"
     if os.path.exists(side):
         data = data[: struct.unpack("<q", open(side, "rb").read(8))[0]]
-    return len(chaos.read_log(data)[0])
+    # The slot records (kinds 10 and 11: an endpoint was given a slot) are written when the service first sees an endpoint, before any
+    # attempt: they are not outcomes, and counting them made this return early and the test kill the service before the failure was durable.
+    return len([1 for _, pairs in chaos.read_log(data)[0] if struct.unpack("<5q", dict(pairs)[b"o"])[0] not in (10, 11)])
 
 
 def wait_for(cond, secs):

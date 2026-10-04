@@ -84,6 +84,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/layout_test.py build/hooks
 
+      - name: POST /endpoints and GET /endpoints/:id (the token, the request, the database first, from now)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/manage_test.py build/hooks
+
       - name: Endpoint ids and slots (the log says which endpoint has which slot)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/slots_test.py build/hooks
