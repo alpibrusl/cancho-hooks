@@ -211,7 +211,7 @@ def main():
     attacks = [
         ({"X-A": "v\r\nInjected: 1"}, "CRLF in a value"), ({"X-A": "v\nInjected: 1"}, "LF in a value"), ({"X-A": "v\rInjected: 1"}, "CR in a value"),
         ({"X-A": "v\u0000w"}, "NUL in a value"), ({"X-A": "\r\n\r\nGET / HTTP/1.1"}, "a whole request in a value"), ({"X-A": "v\u000d\u000aInjected: 1"}, "a JSON escape of CRLF"),
-        ({"X-A": "v\tw"}, "a tab"), ({"X-A": "v\u007fw"}, "DEL"), ({"X-A": "café"}, "a non-ASCII character"), ({"X-A": " "}, "a line separator"),
+        ({"X-A": "v\tw"}, "a tab"), ({"X-A": "v\u0001w"}, "SOH"), ({"X-A": "v\u001fw"}, "US"), ({"X-A": "v\u007fw"}, "DEL"), ({"X-A": "café"}, "a non-ASCII character"), ({"X-A": " "}, "a line separator"),
         ({"X-A\r\nInjected": "1"}, "CRLF in a name"), ({"X-A\nInjected": "1"}, "LF in a name"), ({"X-A\u0000": "1"}, "NUL in a name"), ({"X-A:B": "1"}, "a colon in a name"),
         ({"X A": "1"}, "a space in a name"), ({" X-A": "1"}, "a leading space in a name"), ({"X-A ": "1"}, "a trailing space in a name"), ({"X-A,B": "1"}, "a comma in a name"),
         ({"": "1"}, "an empty name"), ({"X-é": "1"}, "a non-ASCII name"),
@@ -238,7 +238,7 @@ def main():
     check("5. and no header called Injected ever arrived", all(k != "Injected" for r in rc.seen for k, _ in r["headers"]))
     stop(svc)
     # a row of the table with a CR or LF (by percent-encoding) is not read
-    for spec in ("A:x%0d%0aInjected:1", "A:x%0A", "A:%00", "A:%7f", "A:x%", "A:%zz", "A", "A:b,", ",A:b", "A:b,,C:d", "A: b", "A:b c"):
+    for spec in ("A:x%0d%0aInjected:1", "A:x%0A", "A:%00", "A:x%01", "A:x%08", "A:x%1f", "A:%7f", "A:x%", "A:%zz", "A", "A:b,", ",A:b", "A:b,,C:d", "A: b", "A:b c"):
         psql("truncate endpoints")
         add_endpoint(1, rc.port, secret(), headers=spec)
         out = subprocess.run([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", *pg_flags()], capture_output=True, text=True, timeout=20)
@@ -318,29 +318,40 @@ def main():
     ib = out["id"]
     st, out = create(svc, rcc.port)
     ic = out["id"]
+    def of(r, n):
+        """The last request the receiver saw for event n (an attempt repeated at a kill is another request of the same event), or None."""
+        with r.lock:
+            hits = [x for x in r.seen if x["n"] == n]
+        return hits[-1] if hits else None
+
+    def sent(r, n):
+        return wait_for(lambda: of(r, n) is not None, 5)
+
     post_event(svc, 1)
-    check("8. each endpoint is sent its own headers", wait_for(lambda: ra.count() == 1 and rb.count() == 1 and rcc.count() == 1, 5)
-          and {k: v for k, v in custom(ra.seen[0])} == {"X-Who": "a"} and {k: v for k, v in custom(rb.seen[0])} == {"X-Who": "b", "X-More": "bb"} and custom(rcc.seen[0]) == [],
-          str([custom(r.seen[0]) for r in (ra, rb, rcc)]))
+    check("8. each endpoint is sent its own headers", all(sent(r, 1) for r in (ra, rb, rcc))
+          and {k: v for k, v in custom(of(ra, 1))} == {"X-Who": "a"} and {k: v for k, v in custom(of(rb, 1))} == {"X-Who": "b", "X-More": "bb"} and custom(of(rcc, 1)) == [],
+          str([custom(of(r, 1)) for r in (ra, rb, rcc) if of(r, 1)]))
     kill9(svc)
     svc = start(d)
     post_event(svc, 2)
-    check("8. after kill -9 they are the database's", wait_for(lambda: ra.count() == 2 and rb.count() == 2 and rcc.count() == 2, 5)
-          and {k: v for k, v in custom(ra.seen[1])} == {"X-Who": "a"} and {k: v for k, v in custom(rb.seen[1])} == {"X-Who": "b", "X-More": "bb"} and custom(rcc.seen[1]) == [],
-          str([custom(r.seen[-1]) for r in (ra, rb, rcc)]))
+    check("8. after kill -9 they are the database's", all(sent(r, 2) for r in (ra, rb, rcc))
+          and {k: v for k, v in custom(of(ra, 2))} == {"X-Who": "a"} and {k: v for k, v in custom(of(rb, 2))} == {"X-Who": "b", "X-More": "bb"} and custom(of(rcc, 2)) == [],
+          str([custom(of(r, 2)) for r in (ra, rb, rcc) if of(r, 2)]))
     st, out = req(svc, "DELETE", f"/endpoints/{ia}")
     check("8. DELETE the first endpoint", st == 200, str((st, out)))
     post_event(svc, 3)
-    check("8. the rows shift: the others keep their own headers", wait_for(lambda: rb.count() == 3 and rcc.count() == 3, 5)
-          and {k: v for k, v in custom(rb.seen[2])} == {"X-Who": "b", "X-More": "bb"} and custom(rcc.seen[2]) == [] and ra.count() == 2, str([custom(r.seen[-1]) for r in (rb, rcc)]))
+    check("8. the rows shift: the others keep their own headers", sent(rb, 3) and sent(rcc, 3)
+          and {k: v for k, v in custom(of(rb, 3))} == {"X-Who": "b", "X-More": "bb"} and custom(of(rcc, 3)) == [], str([custom(of(r, 3)) for r in (rb, rcc) if of(r, 3)]))
+    time.sleep(0.2)
+    check("8. ... and the deleted one is sent nothing more", of(ra, 3) is None)
     rd = Receiver()
     st, out = create(svc, rd.port)
     idd = out["id"]
     post_event(svc, 4)
-    check("8. a new endpoint, made in the row that was freed, has none of the deleted one's", wait_for(lambda: rd.count() == 1, 5) and custom(rd.seen[0]) == [] and get(svc, f"/endpoints/{idd}")["headers"] == [], str(custom(rd.seen[0])))
+    check("8. a new endpoint, made in the row that was freed, has none of the deleted one's", sent(rd, 4) and custom(of(rd, 4)) == [] and get(svc, f"/endpoints/{idd}")["headers"] == [], str(of(rd, 4)))
     st, out = req(svc, "DELETE", f"/endpoints/{ib}")
     post_event(svc, 5)
-    check("8. delete the one with two: the last keeps none and sends none", wait_for(lambda: rcc.count() == 5 or rcc.count() == 4, 5) and wait_for(lambda: rd.count() == 2, 5) and custom(rd.seen[-1]) == [] and custom(rcc.seen[-1]) == [], str((custom(rd.seen[-1]), custom(rcc.seen[-1]))))
+    check("8. delete the one with two: the others keep none and send none", sent(rd, 5) and sent(rcc, 5) and custom(of(rd, 5)) == [] and custom(of(rcc, 5)) == [], str((of(rd, 5), of(rcc, 5))))
     stop(svc)
     shutil.rmtree(d)
     for r in (ra, rb, rcc, rd):

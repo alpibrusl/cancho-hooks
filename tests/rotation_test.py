@@ -67,6 +67,12 @@ def until_of(svc, ident):
     return get(svc, f"/endpoints/{ident}")["secret_old_until"]
 
 
+def of_event(rc, n):
+    """The last request the receiver saw for event n (a kill can repeat an attempt, and that is another request of the same event)."""
+    with rc.lock:
+        return [r for r in rc.seen if r["n"] == n][-1]
+
+
 def now_ms():
     return int(time.time() * 1000)
 
@@ -107,8 +113,7 @@ def main():
     check("2. a receiver that knows only the old secret verifies it", verifies(r, s1))
     check("2. a receiver that knows only the new secret verifies it", verifies(r, s2))
     check("2. a receiver that knows another secret does not", not verifies(r, s3))
-    check("2. the id and the timestamp are the same for both (one message)", len({k.lower() for k, _ in r["headers"] if k.lower() == "webhook-signature"}) == 1 and len([1 for k, _ in r["headers"] if k.lower() == "webhook-signature"]) == 1,
-          str(r["headers"]))
+    check("2. both are in one webhook-signature header (one message, one id, one timestamp), not two headers", len([1 for k, _ in r["headers"] if k.lower() == "webhook-signature"]) == 1, str(r["headers"]))
 
     ok = wait_for(lambda: until_of(svc, 1) == 0, 10)
     check("3. when the period is over GET says so", ok and now_ms() >= until)
@@ -152,14 +157,14 @@ def main():
     svc = start(d)
     check("5. after kill -9 the period is the one the row has", until_of(svc, 1) == until, str((until_of(svc, 1), until)))
     post_event(svc, 2)
-    check("5. ... and the next event carries both signatures", wait_for(lambda: rc.count() == 2, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s1) and verifies(last(rc), s2), str([sigs(r) for r in rc.seen]))
+    check("5. ... and the next event carries both signatures", wait_for(lambda: 2 in rc.events(), 5) and len(sigs(of_event(rc, 2))) == 2 and verifies(of_event(rc, 2), s1) and verifies(of_event(rc, 2), s2), str([sigs(r) for r in rc.seen]))
     stop(svc)
     # the period ends while the service is down
     psql(f"update endpoints set secret_old_until = {now_ms() - 1000} where id = 1")
     svc = start(d)
     check("5. a row whose period ran out while the service was down is read as no overlap", until_of(svc, 1) == 0, str(get(svc, "/endpoints/1")))
     post_event(svc, 3)
-    check("5. ... and signs with the new secret only", wait_for(lambda: rc.count() == 3, 5) and len(sigs(last(rc))) == 1 and verifies(last(rc), s2) and not verifies(last(rc), s1), str([sigs(r) for r in rc.seen]))
+    check("5. ... and signs with the new secret only", wait_for(lambda: 3 in rc.events(), 5) and len(sigs(of_event(rc, 3))) == 1 and verifies(of_event(rc, 3), s2) and not verifies(of_event(rc, 3), s1), str([sigs(r) for r in rc.seen]))
     # the period set from the other side of a restart: a short one that ends with the service stopped
     st, out = patch(svc, 1, {"secret": secret(), "keep_old_ms": 1500})
     stop(svc)
@@ -300,13 +305,32 @@ def main():
     out = subprocess.run([BIN, "--port", "1", "--dir", d, "--import-endpoints", "1", "--allow-private-hosts", "1", *pg_flags()], capture_output=True, text=True, timeout=30)
     rows = psql("select id, secret_old = '" + s1 + "', secret_old_until > 0 from endpoints order by id")
     check("9. --import-endpoints copies it into the table", out.returncode == 0 and rows == [("1", "t", "t"), ("2", "t", "t")], str((out.returncode, out.stderr, rows)))
-    for bad_line in ("old=" + s1, "old=" + s1 + "@", "old=" + s1 + "@12x", "old=@5", "old=" + s1 + "@0"):
+    for bad_line in ("old=" + s1, "old=" + s1 + "@", "old=" + s1 + "@12x", "old=@5", "old=" + s1 + "@0", "old=not*base64@100"):
         with open(os.path.join(d, "endpoints.conf"), "w") as f:
             f.write(f"1 127.0.0.1 {rc.port} {s2} {bad_line}\n")
         out = subprocess.run([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1"], capture_output=True, text=True, timeout=20)
-        check(f"9. a bad old= ({bad_line[:22]}) is a refusal to start naming the line", out.returncode == 13 and "line 1" in out.stderr, str((out.returncode, out.stderr)))
+        check(f"9. a bad old= ({bad_line[:12]}...{bad_line[-6:]}) is a refusal to start naming the line", out.returncode == 13 and "line 1" in out.stderr, str((out.returncode, out.stderr)))
     shutil.rmtree(d)
     rc.close()
+    # ---- 10. a previous secret belongs to its endpoint ------------------------------------------------------------
+    reset_db()
+    s1, s2 = secret(), secret()
+    ra, rb, rn = Receiver(), Receiver(), Receiver()
+    add_endpoint(1, ra.port, s2, old=s1, until=now_ms() + 600000)
+    add_endpoint(2, rb.port, s2, old=s1, until=now_ms() + 600000)
+    d = tmp()
+    svc = start(d)
+    st, out = req(svc, "DELETE", "/endpoints/1")
+    st2, made = req(svc, "POST", "/endpoints", {"host": "127.0.0.1", "port": rn.port, "secret": s2})
+    post_event(svc, 1)
+    check("10. after a DELETE shifts the rows and a new endpoint takes the last: the new one signs once, the survivor still twice",
+          st == 200 and st2 == 201 and wait_for(lambda: ra.count() == 0 and rb.count() == 1 and rn.count() == 1, 5) and len(sigs(last(rb))) == 2 and len(sigs(last(rn))) == 1 and verifies(last(rn), s2) and not verifies(last(rn), s1),
+          str((st, st2, [sigs(r) for r in rb.seen], [sigs(r) for r in rn.seen])))
+    check("10. ... GET agrees", until_of(svc, 2) > now_ms() and get(svc, f"/endpoints/{made['id']}")["secret_old_until"] == 0, str(get(svc, "/endpoints")))
+    stop(svc)
+    shutil.rmtree(d)
+    for r in (ra, rb, rn):
+        r.close()
     finish("rotation")
 
 

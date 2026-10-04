@@ -74,6 +74,13 @@ fn test_values() -> [] int {
         test.assert_eq(hdrs.check_value(v[0..10]), hdrs.bad_byte());
         v[3] = byte_of(127);
         test.assert_eq(hdrs.check_value(v[0..10]), hdrs.bad_byte());
+        // every control character is refused, not only CR, LF and NUL
+        var c = 1;
+        while c < 32 {
+            v[3] = byte_of(c);
+            test.assert_eq(hdrs.check_value(v[0..10]), hdrs.bad_byte());
+            c = c + 1;
+        }
     }
     return 0;
 }
@@ -129,6 +136,10 @@ fn test_bad_specs_each_with_its_reason() -> [] int {
     test.assert_eq(spec_code("A:x%0a"), hdrs.bad_byte());
     test.assert_eq(spec_code("A:%00"), hdrs.bad_byte());
     test.assert_eq(spec_code("A:%7f"), hdrs.bad_byte());
+    test.assert_eq(spec_code("A:x%01"), hdrs.bad_byte());
+    test.assert_eq(spec_code("A:x%08"), hdrs.bad_byte());
+    test.assert_eq(spec_code("A:x%09"), hdrs.bad_byte());
+    test.assert_eq(spec_code("A:x%1f"), hdrs.bad_byte());
     test.assert_eq(spec_code("A:%80"), hdrs.bad_byte());
     test.assert_eq(spec_code("A:%zz"), hdrs.malformed());
     test.assert_eq(spec_code("A:%2"), hdrs.malformed());

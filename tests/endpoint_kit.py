@@ -28,6 +28,7 @@ PSQL_ENV = dict(os.environ, PGPASSWORD=PG_PASSWORD) if PG_PASSWORD else dict(os.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOKEN = "correct-horse-battery-staple"
 FAILS = []
+STARTED = []
 
 
 def secret():
@@ -35,9 +36,15 @@ def secret():
 
 
 def check(name, ok, detail=""):
-    print(("ok   " if ok else "FAIL ") + name + ("" if ok else f"  {detail}"))
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else f"  {detail}"), flush=True)
     if not ok:
         FAILS.append(name)
+        if os.environ.get("FAIL_FAST"):
+            # for running mutants: the first check that fails is the verdict (and no service is left running against the database)
+            for svc in STARTED:
+                if svc.proc.poll() is None:
+                    svc.proc.kill()
+            os._exit(1)
 
 
 def finish(what):
@@ -137,6 +144,7 @@ def start(d, extra=None, schedule="100", deadline="5000", private=True, env=None
             break
     svc = Svc()
     svc.port, svc.proc, svc.lines, svc.exited, svc.dir = port, proc, lines, line != "listening", d
+    STARTED.append(svc)
     return svc
 
 
