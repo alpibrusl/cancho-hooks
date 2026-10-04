@@ -27,6 +27,8 @@ here restarts or stops the server.
      and a connection lost in the middle of the read is asked again, and the endpoints load
  13. (with HOOKS_PG_PASSWORD, i.e. a server that wants SCRAM-SHA-256) the logins of the reconnects are SCRAM: backends ended six times in a row, the
      longest wait of a probe on /healthz, no attempt failed; a wrong password at the start is refused at once, status 20, `cannot log in`
+ 15. retention (design 38) waits for the endpoints: with the database away and retention at 1 ms no segment and no event is dropped, every event is delivered
+     once after the table is read and only then are segments dropped; `compact-now` with a database named refuses (44) and changes nothing
  14. (with HOOKS_PG_STOP and HOOKS_PG_START, shell commands that stop and start the server under test) a server that really goes away and comes back: events
      flowing, every one delivered once, ready again with no restart, the history accounted. Never run against a server that others use
 """
@@ -828,8 +830,56 @@ def stage14():
     shutil.rmtree(svc.dir, ignore_errors=True)
 
 
+# ---- 15 ---------------------------------------------------------------------------------------------------------------
+
+def segments(d):
+    return sorted(n for n in os.listdir(d) if n.startswith("events") and n.endswith(".seg"))
+
+
+def stage15():
+    print("== 15. retention waits for the endpoints", flush=True)
+    peer = L.Peer("ok")
+    reset([(0, peer.port)])
+    proxy = PgProxy(L.PG_HOST, int(L.PG_PORT))
+    proxy.cut()
+    knobs = ["--retention-ms", "1", "--window-ms", "1", "--segment-bytes", "262144", "--pg-start-wait-ms", "120000"]
+    svc = make(proxy, extra=knobs)
+    svc.start(loaded=False)
+    ids = []
+    for n in range(1, 9):
+        ids.append(json.loads(svc.post_event(n)[1])["id"])
+        time.sleep(0.7)
+    time.sleep(1.5)
+    s = svc.stats()
+    first = segments(svc.dir)
+    check("15. the database is away, retention is 1 ms and a segment is sealed every turn of its clock: segments were sealed (%d files), none was dropped, no event was dropped" % len(first),
+          len(first) >= 3 and s["segments_dropped"] == 0 and s["events_dropped"] == 0 and s["events_first_id"] == 1, str((first, s)))
+    proxy.restore()
+    check("15. the database comes: the endpoints load", L.wait_for(lambda: svc.has_line("endpoints loaded: 1"), 20), svc.stderr())
+    check("15. ... every event that was taken is delivered, once (nothing was dropped before the cursors were known)", L.wait_for(lambda: peer.distinct() == set(ids), 20) and peer.count() == len(ids), str((peer.events(), ids)))
+    check("15. ... and then retention does its work: segments are dropped", L.wait_for(lambda: svc.stats()["segments_dropped"] >= 1, 20), str(svc.stats()))
+    svc.stop()
+    shutil.rmtree(svc.dir, ignore_errors=True)
+    # compact-now with a database named does not read the table: it refuses, and changes nothing
+    d = L.free_dir("hooks-pgre-")
+    proxy.cut()
+    sv2 = make(proxy, extra=knobs, d=d)
+    sv2.start(loaded=False)
+    for n in range(1, 5):
+        sv2.post_event(n)
+        time.sleep(0.5)
+    sv2.stop()
+    before = {n: os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".seg")}
+    proc = subprocess.run([BIN, "--port", str(L.chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", *L.pg_flags(proxy.port)], capture_output=True, text=True, timeout=30)
+    after = {n: os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".seg")}
+    check("15. compact-now with a database named: status 44, says why, and every file is as it was", proc.returncode == 44 and "does not know which events are final" in proc.stderr and before == after, f"{proc.returncode} {proc.stderr!r} {before} {after}")
+    proxy.close()
+    peer.close()
+    shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    stages = {"1": stage1, "2": stage2, "3": stage3, "4": stage4, "5": stage5, "6": stage6, "7": stage7, "8": stage8, "9": stage9, "10": stage10, "11": stage11, "12": stage12, "13": stage13, "14": stage14}
+    stages = {"1": stage1, "2": stage2, "3": stage3, "4": stage4, "5": stage5, "6": stage6, "7": stage7, "8": stage8, "9": stage9, "10": stage10, "11": stage11, "12": stage12, "13": stage13, "14": stage14, "15": stage15}
     for name, fn in stages.items():
         if not STAGES or name in STAGES:
             fn()

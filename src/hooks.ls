@@ -4275,7 +4275,7 @@ fn main(world: World) -> [] int {
                                                                             contents(dvw)[c_production()] = 1;
                                                                         }
                                                                         contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
-                                                                                                                                                // The database, if one was named (section 37): the pool is told how to log in and how to come back, and the loop makes its
+                                                                        // The database, if one was named (section 37): the pool is told how to log in and how to come back, and the loop makes its
                                                                         // connections in the background, without waiting; nothing is dialed here. The history, the endpoints, the schedules and the management
                                                                         // routes all use it (`history.ls`, `dbup.ls`).
                                                                         var hpool = pool.empty(h, 1, 1, 4096, 4096);
