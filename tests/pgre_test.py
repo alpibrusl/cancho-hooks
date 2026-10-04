@@ -646,7 +646,7 @@ def stage9():
     time.sleep(1.5)
     n = proxy.kill_backends(L.psql)
     t = time.time()
-    check("9. two backends of the proxy's connections ended", n == 2, str(n))
+    check("9. the backends of the proxy's two connections ended (a backend the test's own psql left a moment ago may be among them)", n >= 2, str(n))
     went = L.wait_for(lambda: svc.stats()["database_losses"] == 2, 5)
     check("9. both losses are noticed (a FATAL message arrives with no traffic)", went, str(svc.stats()))
     back = L.wait_for(lambda: svc.stats()["history_live"] == 2, 10)

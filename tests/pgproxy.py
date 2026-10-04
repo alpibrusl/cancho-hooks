@@ -22,6 +22,7 @@ class PgProxy:
         self.mode = "pass"
         self.conns = []
         self.upstream = []
+        self.upstream_at = []
         self.accepted = 0
         self.lock = threading.Lock()
         self.accepting = threading.Event()
@@ -61,6 +62,7 @@ class PgProxy:
             with self.lock:
                 self.conns += [c, u]
                 self.upstream.append(u)
+                self.upstream_at.append(time.time())
             threading.Thread(target=self._pipe, args=(c, u), daemon=True).start()
             threading.Thread(target=self._pipe, args=(u, c), daemon=True).start()
 
@@ -97,6 +99,7 @@ class PgProxy:
                     pass
             self.conns = []
             self.upstream = []
+            self.upstream_at = []
 
     def restore(self):
         """Back to forwarding; and, after `blackhole`, accepting again."""
@@ -139,12 +142,25 @@ class PgProxy:
             return out
 
     def kill_backends(self, psql):
-        """`pg_terminate_backend` for the backends this proxy's connections are on, and only those. `psql(sql)` runs SQL. Answers how many were ended."""
-        ports = self.upstream_ports()
+        """`pg_terminate_backend` for the backends this proxy's connections are on, and only those. `psql(sql)` runs SQL. Answers how many were ended.
+
+        They are found by the source port the server sees (`client_port`). Behind something that makes new connections (a container's port mapping, a pooler)
+        that port is not ours, so a backend is also taken if it is in this database, comes from the address the test's own psql comes from, is not that psql,
+        and was started within a quarter of a second of a connection this proxy made: the test runs one psql at a time, so nothing else of its own is alive."""
+        with self.lock:
+            socks = [(u, t) for u, t in zip(self.upstream, self.upstream_at)]
+        ports, times = [], []
+        for u, t in socks:
+            try:
+                ports.append(u.getsockname()[1])
+                times.append(t)
+            except OSError:
+                pass
         if not ports:
             return 0
-        rows = psql("select count(pg_terminate_backend(pid)) from pg_stat_activity where client_addr = inet_client_addr() and client_port in ("
-                    + ",".join(str(p) for p in ports) + ")")
+        rows = psql("select count(pg_terminate_backend(pid)) from pg_stat_activity where pid <> pg_backend_pid() and datname = current_database() "
+                    "and client_addr = inet_client_addr() and (client_port in (" + ",".join(str(p) for p in ports) + ") or exists (select 1 from unnest(array["
+                    + ",".join(repr(t) for t in times) + "]::float8[]) as at(t) where abs(extract(epoch from backend_start) - at.t) < 0.25))")
         return int(rows[0][0])
 
     def close(self):
