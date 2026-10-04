@@ -173,6 +173,13 @@ def start(d, flags):
     return svc
 
 
+def only_listening_and_the_stop(err):
+    """stderr is `listening`, and then (the test ends the service with SIGTERM) the two lines of the drain (docs/design.md section 34.4)."""
+    lines = err.strip().splitlines()
+    return bool(lines) and lines[0] == "listening" and all(
+        l.startswith("hooks: stopping on SIGTERM:") or l.startswith("hooks: stopped:") for l in lines[1:]) and len(lines) <= 3
+
+
 ANSWERS = []  # every (status, headers, body) any request of this test got: stage 4 looks for the tokens in them
 
 
@@ -312,7 +319,7 @@ def stage_matrix():
                 pass
         err = "".join(svc.stderr)
         check(f"4. [{name}] stderr after the whole matrix is `listening` and nothing else, and holds no token",
-              err.strip() == "listening" and not any(t in err for t in toks.values()), err[:200])
+              only_listening_and_the_stop(err) and not any(t in err for t in toks.values()), err[:200])
 
 
 # ---- 4: nothing leaks ---------------------------------------------------------------------------------------------------------------------
@@ -360,7 +367,7 @@ def stage_stderr_and_refusals():
         svc.stop()
         shutil.rmtree(d, ignore_errors=True)
     err = "".join(svc.stderr)
-    check("4. stderr of a service that was asked everything: only `listening`", err.strip() == "listening", err[:200])
+    check("4. stderr of a service that was asked everything: only `listening`, and the drain's two lines at the stop", only_listening_and_the_stop(err), err[:200])
     for secret in (toks["admin"], toks["ingest"], toks["read"], toks["wrong"]):
         check("4. no token is on stderr", secret not in err)
     # a setting that is refused: the message names the argument and must not repeat a token
