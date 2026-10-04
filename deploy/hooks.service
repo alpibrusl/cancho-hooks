@@ -38,15 +38,16 @@ TimeoutStopSec=15
 # Restart when it died or was killed, and when a start was refused for a reason that can pass (status 11: the port was taken;
 # 20: the database was not there yet; 3 and 4 are not expected). Do NOT restart on a refusal that a restart cannot fix: 2 the
 # settings, 10 and 12 a log that cannot be opened, 13 endpoints that are not valid, 14 a bad schedule, 15 to 17 a log the service does
-# not understand, 18 a delivery log ahead of its events log, 19 damage in the middle of a log (a person has to look: docs/runbook.md section 4.7).
-# (docs/runbook.md section 1 lists every status.)
+# not understand, 18 a delivery log ahead of its events log, 19 damage in the middle of a log (a person has to look: docs/runbook.md
+# section 4.7), 30 to 35 the production profile refusing an unsafe setting or mode. (docs/runbook.md section 1 lists every status.)
 Restart=on-failure
 RestartSec=3
-RestartPreventExitStatus=2 10 12 13 14 15 16 17 18 19
+RestartPreventExitStatus=2 10 12 13 14 15 16 17 18 19 30 31 32 33 34 35
 
-# The data directory: /var/lib/hooks, created and owned by User, mode 0750. The two logs and endpoints.conf live there.
+# The data directory: /var/lib/hooks, created and owned by User, mode 0700 (`production = 1` refuses a directory or a log that the group or
+# others can read or write). The two logs and endpoints.conf live there, made under the umask below.
 StateDirectory=hooks
-StateDirectoryMode=0750
+StateDirectoryMode=0700
 UMask=0077
 
 # Hardening. The service reads its settings, appends to two files in its state directory and talks TCP (clients, receivers,

@@ -1,7 +1,7 @@
 # /etc/hooks/hooks.conf: the settings of lexsys-hooks (docs/design.md section 20, README "Settings", docs/runbook.md).
 # One `key = value` a line; `#` only on a line of its own. The flags of the command line are applied after this file and win.
 #
-# THIS FILE HOLDS SECRETS (admin-token, pg-password): install it root:hooks, mode 0640, and keep it out of version control.
+# THIS FILE HOLDS SECRETS (the tokens, pg-password): install it root:hooks, mode 0640, and keep it out of version control.
 # There are no environment variables: the service reads none. `GET /config` shows what is in force (never the secrets).
 
 # The TCP port, 1 to 65535. Below 1024 needs a capability the unit does not grant: put a reverse proxy in front instead.
@@ -18,9 +18,29 @@ dir = /var/lib/hooks
 #pg-database = hooks
 #pg-password = change-me
 
-# --- Endpoint management (POST, PATCH, DELETE /endpoints). Without a token these answer 403. 8 to 255 visible characters.
-# --- Whoever has it chooses where the service sends requests (within allow-private-hosts): keep it secret.
+# --- Tokens (docs/design.md section 33). Three scopes, each a bearer token of 8 to 255 visible characters:
+# ---   admin    everything that changes configuration or state: POST, PATCH and DELETE /endpoints, enable, replay, the schedules.
+# ---            It also does what the other two do. Whoever has it chooses where the service sends requests (within allow-private-hosts).
+# ---   ingest   POST /events (and so its idempotent retries): give it to the services that send events.
+# ---   read     GET /events/:id, /events/:id/attempts, /endpoints, /endpoints/:id, /stats, /config: give it to dashboards and monitors.
+# --- GET /healthz needs no token. A scope with no token configured leaves its routes open (a development service needs none), except that
+# --- without an admin-token POST, PATCH and DELETE /endpoints and the schedules answer 403. Make the three different and long and random:
+# --- `head -c 32 /dev/urandom | base64 | tr -d '/+=\n'`. They are compared in constant time and are never in /config, /stats, a log or an error.
 #admin-token = change-me-to-a-long-random-string
+#ingest-token = change-me-to-another-long-random-string
+#read-token = change-me-to-a-third-long-random-string
+
+# --- The production profile. `production = 1` makes the service REFUSE TO START (exit status and a line on stderr naming the setting) unless:
+# ---   admin-token and ingest-token are set (status 30, 31), and all the tokens are different (34);
+# ---   allow-private-hosts is 0 (32);
+# ---   the data directory, and events.seg, delivery.seg and endpoints.conf in it, cannot be read or written by the group or by others
+# ---   (33; 35 if the mode cannot be read). Make the directory 0700 and start the service with umask 077 (the systemd unit and the container
+# ---   image do); the logs the service makes itself are 0666 less the umask.
+# --- read-token may be left out: the read routes then need the admin token. A database is not required.
+# --- Secrets at rest: the endpoints' signing secrets are stored in the clear in the `endpoints` table (or endpoints.conf), because the
+# --- service signs with them. The database is the trust boundary: give the service's role only what it needs (select, insert, update and
+# --- delete on its tables), keep the database off the network, and treat a backup of it as a secret.
+#production = 1
 
 # --- Delivery. The defaults are Standard Webhooks' schedule (5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 14 h, 20 h, 24 h), a 2 s deadline
 # --- for one attempt, and idempotency keys remembered for a day.

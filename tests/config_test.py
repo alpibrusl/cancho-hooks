@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
 
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
-            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "cron-catchup": 1, "cron-seconds": 0,
+            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
             "stop-deadline-ms": 5000, "repair-logs": 0}
     base.update(kw)
     return base
@@ -217,6 +217,9 @@ def stage4():
     refused("repair-logs that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--repair-logs", "yes"], expect=["`--repair-logs` has a value"])
     refused("breaker-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--breaker-days", "soon"], expect=["`--breaker-days` has a value"])
     refused("breaker-days over 100 years", ["--port", "@PORT", "--dir", "@", "--breaker-days=36501"], expect=["`--breaker-days=36501` has a value"])
+    refused("ingest-token that is too short", ["--port", "@PORT", "--dir", "@", "--ingest-token", "short"], expect=["`--ingest-token` has a value"])
+    refused("read-token with a space in it", ["--port", "@PORT", "--dir", "@", "--read-token", "has a space"], expect=["`--read-token` has a value"])
+    refused("production that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--production", "yes"], expect=["`--production` has a value"])
     refused("a bad flag after a good file", ["--config", "@/hooks.conf", "--port", "0"],
             {"hooks.conf": "dir = /tmp\nport = 5\n"}, expect=["`--port` has a value"])
 

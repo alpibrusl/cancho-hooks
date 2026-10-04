@@ -74,6 +74,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/config_test.py build/hooks
 
+      - name: Credentials on every route (every route against no token, a wrong one, and each scope's, in five ways of configuring them; no token leaks)
+        working-directory: hooks
+        run: python3 tests/authz_test.py build/hooks
+
       - name: The history of attempts in PostgreSQL (a database that is slow, gone, wrong)
         working-directory: hooks
         run: |
@@ -83,6 +87,10 @@ jobs:
       - name: The endpoints in PostgreSQL (import, read at start, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/roster_test.py build/hooks
+
+      - name: The production profile (each unsafe setting or mode is a refusal of its own; all safe starts)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/production_test.py build/hooks
 
       - name: The delivery state's regions do not overlap (an event that fails in the same place of each window)
         working-directory: hooks

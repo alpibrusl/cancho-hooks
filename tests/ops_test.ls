@@ -193,11 +193,6 @@ fn test_stopping_has_a_deadline() -> [] int {
     return 0;
 }
 
-fn test_the_metrics_scope_is_open_until_tokens_land() -> [] int {
-    test.assert_eq(ops.scope_metrics(), 0);
-    return 0;
-}
-
 // ---- the text of /metrics
 
 fn has[&t, &n](text: &t [byte], needle: &n [byte]) -> [] bool {

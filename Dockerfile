@@ -71,21 +71,23 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --user-group --home-dir /var/lib/hooks --no-create-home --shell /usr/sbin/nologin hooks \
- && install -d -o hooks -g hooks -m 0750 /var/lib/hooks \
+ && install -d -o hooks -g hooks -m 0700 /var/lib/hooks \
  && install -d -o root -g root -m 0755 /etc/hooks /usr/share/hooks
 COPY --from=build /hooks /usr/local/bin/hooks
 COPY --from=build /lex-sys.version /ldd.txt /hooks.sha256 /usr/share/hooks/
 COPY sql/schema.sql /usr/share/hooks/schema.sql
 COPY deploy/hooks.docker.conf /etc/hooks/hooks.conf
 COPY deploy/hooks-healthcheck.sh /usr/local/bin/hooks-healthcheck
-RUN chmod 0755 /usr/local/bin/hooks /usr/local/bin/hooks-healthcheck
+COPY deploy/hooks-entrypoint.sh /usr/local/bin/hooks-entrypoint
+RUN chmod 0755 /usr/local/bin/hooks /usr/local/bin/hooks-healthcheck /usr/local/bin/hooks-entrypoint
 
 LABEL org.opencontainers.image.title="lexsys-hooks" \
       org.opencontainers.image.description="Webhook delivery service written in lex-sys: signed, at least once, retried" \
       org.opencontainers.image.source="https://github.com/alpibrusl/lexsys-hooks" \
       org.opencontainers.image.licenses="EUPL-1.2"
 
-# The data directory: events.seg, delivery.seg and endpoints.conf. A bind mount must be owned by uid 10001.
+# The data directory: events.seg, delivery.seg and endpoints.conf, mode 0700 and made under a umask of 077 (hooks-entrypoint), which is
+# what `production = 1` insists on. A bind mount must be owned by uid 10001, and be 0700 too if the service is to run in production.
 VOLUME /var/lib/hooks
 WORKDIR /var/lib/hooks
 EXPOSE 8080
@@ -94,5 +96,5 @@ USER 10001:10001
 # Each of those is something a restart repairs, which is what an unhealthy container gets. `docker stop` sends SIGTERM and waits 10 s by default; the drain takes at most
 # stop-deadline-ms (5 s unless set), so the default is enough; with a longer stop-deadline-ms use `docker stop -t`.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/hooks-healthcheck"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hooks"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hooks-entrypoint"]
 CMD ["--config", "/etc/hooks/hooks.conf"]
