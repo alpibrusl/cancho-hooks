@@ -1,4 +1,4 @@
-edition 5;
+edition 6;
 
 // `hooks` -- a webhook delivery service (`docs/design.md`).
 //
@@ -2482,11 +2482,17 @@ fn tick_start[&h, &q, &s](heap: &!h Heap, qw: &!q pool.Pool, sg: &!s [int], unix
 // The loop
 // ---------------------------------------------------------------------
 
+// The poller token of the claim on `SIGINT` and `SIGTERM`, counted from `server.first_token`: the attempts' tokens come first (`attempt.slots()` of them),
+// the database's pool after them (its lanes, 2 at most), and the claim's is clear of both. The delivery and history code ignore a token that is not theirs.
+fn signal_token() -> [] int {
+    return attempt.slots() + 16;
+}
+
 // Serve until killed. Each turn: `wait`, then every request that is ready. An accepted event is appended and its request
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &c, &y](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, libc: &c Ffi("libc"), dir: &y [byte], stop_ms: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libc"), err_write] int {
+fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
@@ -2519,22 +2525,26 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &c, &y](heap:
             let ids = box_slice(heap, most_held(), 0);
             let keeps = box_slice(heap, most_held(), 0);
             var out = buffer.empty(heap, 4096);
-            // Stopping (`docs/design.md` section 34.4): SIGTERM and SIGINT are held back until the loop looks at them once a turn.
-            let sigset = box_slice(heap, 128, byte_of(0));
-            ops.hold_signals(libc);
+            // Stopping (`docs/design.md` section 34.4): `SIGTERM` and `SIGINT` are claimed (`main` did it), and the claim is watched in the same poller as
+            // everything else, so a stop wakes the wait at once. The token is above the attempts', the pool's and the connections'.
+            var watched = claim;
+            borrow mut srv as &!sw in {
+                borrow watched as &wr in {
+                    ops.wake_on(server.poller(sw), wr, server.first_token(sw) + signal_token());
+                }
+            }
+            var held = ops.Held::Live(watched);
             ops.begin(ops_of_mut(dv), clock_unix_ms(clock), log.synced(lg), log.synced(done));
             var running = true;
             while running {
                 srv = server.wait(heap, srv, clock, listener, 50);
                 if !ops.stopping(ops_of(dv)) {
-                    var caught = 0;
-                    borrow mut sigset as &!sw0 in {
-                        caught = ops.pending_signal(libc, contents(sw0));
-                    }
+                    let (kept, caught) = ops.look(held);
+                    held = kept;
                     if caught != 0 {
                         // The first signal: from here the next one ends the process at once, nothing new is started, and the loop runs until what
-                        // is on the wire has ended or `stop-deadline-ms` has passed.
-                        ops.second_signal_kills(libc);
+                        // is on the wire has ended or `stop-deadline-ms` has passed. (`ops.look` has closed the claim: the signals have their default
+                        // action again, so the next one ends the process at once.)
                         ops.begin_stop(ops_of_mut(dv), caught, clock_ms(clock), stop_ms);
                         say(io, "hooks: stopping on ");
                         if caught == ops.sigint() {
@@ -2972,6 +2982,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &c, &y](heap:
                     }
                 }
             }
+            ops.release_claim(held);
             // Whatever the loop ended on, what the logs hold is made durable once more before they are closed.
             log.flush(done);
             log.flush(lg);
@@ -3008,10 +3019,10 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &c, &y](heap:
             unbox_slice(heap, tickets);
             unbox_slice(heap, ids);
             unbox_slice(heap, keeps);
-            unbox_slice(heap, sigset);
             return 0;
         }
         Polling::Failed(e) => {
+            ops.release_claim(ops.Held::Live(claim));
             pool.close(heap, pl0);
             return 4;
         }
@@ -3741,10 +3752,11 @@ fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte], open: bool) -> [heap] in
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    // The only foreign authority the service holds: five libc functions, four to learn that it was asked to stop (`src/ops.ls`) and
-    // one for the modes of the data directory (`src/perm.ls`; the production profile only).
+    let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
+    // The only foreign authority the service holds: one libc function, `statx`, for the modes of the data directory (`src/perm.ls`; the production
+    // profile only). How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
     let libc = narrow(ffi, "libc");
+    let stop = narrow(signals, "INT,TERM");
     var port = 0 - 1;
     var status = 2;
     region a {
@@ -4104,8 +4116,21 @@ fn main(world: World) -> [] int {
                                                                                         borrow router as &r in {
                                                                                             borrow clock as &c in {
                                                                                                 borrow mut io as &!iw in {
-                                                                                                    borrow libc as &lb in {
-                                                                                                        status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, lb, dir_buf[0..dir_len], config.stop_deadline_ms(cfg));
+                                                                                                    // The claim on the two signals is made here, after the recovery (a stop during it is the default action, as it
+                                                                                                    // always was) and before anything else could start a thread (nothing does).
+                                                                                                    borrow stop as &sr in {
+                                                                                                        match signals_watch(sr) {
+                                                                                                            Watching::Ok(claim) => {
+                                                                                                                status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg));
+                                                                                                            }
+                                                                                                            Watching::Failed(e) => {
+                                                                                                                say(iw, "hooks: SIGINT and SIGTERM cannot be claimed (errno ");
+                                                                                                                ops.say_number(iw, e);
+                                                                                                                say(iw, "): the service would not hear a request to stop\n");
+                                                                                                                pool.close(h, hpool);
+                                                                                                                status = 5;
+                                                                                                            }
+                                                                                                        }
                                                                                                     }
                                                                                                 }
                                                                                             }
@@ -4145,6 +4170,7 @@ fn main(world: World) -> [] int {
         }
     }
     release(libc);
+    release(stop);
     release(fs);
     release(net);
     release(clock);

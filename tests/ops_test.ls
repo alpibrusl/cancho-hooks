@@ -193,6 +193,18 @@ fn test_stopping_has_a_deadline() -> [] int {
     return 0;
 }
 
+// The bits of `signals_pending` (`std.signals`: INT 2, TERM 8) become the signal that asked: TERM wins over INT, and a bit that is not a stop asks for nothing.
+fn test_the_signal_that_asked_is_read_from_the_bits() -> [] int {
+    test.assert_eq(ops.asked_by(0), 0);
+    test.assert_eq(ops.asked_by(2), 2);
+    test.assert_eq(ops.asked_by(8), 15);
+    test.assert_eq(ops.asked_by(2 | 8), 15);
+    // HUP (1), QUIT (4), USR1 (16) and the rest are not claimed by the service, and would not mean "stop" if they were
+    test.assert_eq(ops.asked_by(1 | 4 | 16 | 32 | 64 | 128), 0);
+    test.assert_eq(ops.asked_by(255), 15);
+    return 0;
+}
+
 // ---- the text of /metrics
 
 fn has[&t, &n](text: &t [byte], needle: &n [byte]) -> [] bool {

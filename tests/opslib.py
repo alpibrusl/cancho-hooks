@@ -95,6 +95,7 @@ class Service:
         self.port = port or chaos.free_port()
         self.lines, self.proc, self.power_loss, self.extra_env = [], None, power_loss, env or {}
         self.lock = threading.Lock()
+        self.reader = None
 
     def start(self, timeout=15.0):
         env = dict(os.environ, **self.extra_env)
@@ -105,7 +106,8 @@ class Service:
         # test is of the service's handling of the signal, so it starts it with the default disposition, as systemd and a terminal do.
         self.proc = subprocess.Popen([self.bin, "--port", str(self.port), "--dir", self.dir, "--allow-private-hosts", "1", *self.args],
                                      stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+        self.reader = threading.Thread(target=self._read, args=(self.proc,), daemon=True)
+        self.reader.start()
         wait_for(lambda: "listening" in self.lines or self.proc.poll() is not None, timeout)
         return "listening" in self.lines
 
@@ -127,9 +129,14 @@ class Service:
 
     def wait_exit(self, secs):
         try:
-            return self.proc.wait(timeout=secs)
+            code = self.proc.wait(timeout=secs)
         except subprocess.TimeoutExpired:
             return None
+        # The process has exited, so its end of the pipe is closed: let the thread that reads stderr take what is left in it before anyone looks at the lines.
+        # (A service that stops in a fraction of a millisecond is gone before the thread has read what it said last.)
+        if self.reader is not None:
+            self.reader.join(5)
+        return code
 
     def kill(self):
         if self.alive():
