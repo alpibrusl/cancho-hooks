@@ -105,13 +105,13 @@ def pg_flags(port=None, user=None, password=None):
 
 def run_once(datadir, extra, timeout=10):
     """Run the service to its end (an import, or a refusal to start): (exit status, stderr lines)."""
-    p = subprocess.run([BIN, "--dir", datadir, *extra], capture_output=True, timeout=timeout)
+    p = subprocess.run([BIN, "--dir", datadir, "--allow-private-hosts", "1", *extra], capture_output=True, timeout=timeout)
     return p.returncode, p.stderr.decode().splitlines()
 
 
 def start(datadir, extra):
     port = chaos.free_port()
-    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", datadir, "--schedule", "100", "--deadline-ms", "800", *extra],
+    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", datadir, "--allow-private-hosts", "1", "--schedule", "100", "--deadline-ms", "800", *extra],
                             stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     lines = []
     while True:
@@ -327,7 +327,7 @@ def main():
     # 8. a database that accepts and never answers
     proxy = PgProxy(PG_HOST, PG_PORT)
     proxy.mode = "hold"
-    proc = subprocess.Popen([BIN, "--port", str(chaos.free_port()), "--dir", d, *pg_flags(port=proxy.port)], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    proc = subprocess.Popen([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", *pg_flags(port=proxy.port)], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     time.sleep(2)
     check("8. while the database is silent the start waits (it does not start without its endpoints)", proc.poll() is None)
     proc.kill()

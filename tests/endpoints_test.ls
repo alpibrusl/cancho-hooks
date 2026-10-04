@@ -13,7 +13,7 @@ fn test_a_file_gives_its_endpoints() -> [] int {
         let blob = alloc_slice[a](512, byte_of(0));
         // whsec_ + base64("0123456789abcdef") and base64("secret!!")
         let text = "# endpoints\n\n3 127.0.0.1 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n  7\tlocalhost  9002 c2VjcmV0ISE=  \r\n";
-        let n = endpoints.parse(text, table, blob);
+        let n = endpoints.parse(text, table, blob, true);
         test.assert_eq(n, 2);
         test.assert_eq(endpoints.slot_of(table, 0), 3);
         test.assert_eq(endpoints.ident_of(table, 0), 3);
@@ -37,7 +37,7 @@ fn refused[&t](text: &t [byte]) -> [] int {
     region a {
         let table = alloc_slice[a](endpoints.table_size(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
-        return endpoints.parse(text, table, blob);
+        return endpoints.parse(text, table, blob, true);
     }
 }
 
@@ -66,7 +66,7 @@ fn test_the_id_is_kept_beside_the_slot_and_the_slot_can_change() -> [] int {
     region a {
         let table = alloc_slice[a](endpoints.table_size(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
-        test.assert_eq(endpoints.parse("20 h 80 c2VjcmV0ISE=\n999999 g 81 c2VjcmV0ISE=\n", table, blob), 2);
+        test.assert_eq(endpoints.parse("20 h 80 c2VjcmV0ISE=\n999999 g 81 c2VjcmV0ISE=\n", table, blob, true), 2);
         // `parse` cannot know the slot: it writes the id there, for the caller to replace.
         test.assert_eq(endpoints.slot_of(table, 0), 20);
         test.assert_eq(endpoints.set_slot(table, 0, 5), 0);
@@ -98,8 +98,8 @@ fn test_at_most_max_endpoints_are_accepted() -> [] int {
             at = at + 2 + len(tail);
             n = n + 1;
         }
-        test.assert_eq(endpoints.parse(text[0..at - 21], table, blob), 62);
-        test.assert_eq(endpoints.parse(text[0..at], table, blob), 0 - 63);
+        test.assert_eq(endpoints.parse(text[0..at - 21], table, blob, true), 62);
+        test.assert_eq(endpoints.parse(text[0..at], table, blob, true), 0 - 63);
     }
     return 0;
 }

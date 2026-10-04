@@ -35,7 +35,12 @@ std = true
 
 [[test]]
 name = "endpoints"
-sources = ["tests/endpoints_test.ls", "src/endpoints.ls", "src/sign.ls", "src/state.ls"]
+sources = ["tests/endpoints_test.ls", "src/endpoints.ls", "src/destination.ls", "src/sign.ls", "src/state.ls"]
+std = true
+
+[[test]]
+name = "destination"
+sources = ["tests/destination_test.ls", "src/destination.ls", "src/endpoints.ls", "src/sign.ls", "src/state.ls"]
 std = true
 
 [[test]]

@@ -62,7 +62,7 @@ def main():
     with open(os.path.join(d, "endpoints.conf"), "w") as f:
         f.write(f"0 127.0.0.1 {srv.server_address[1]} {secret}\n")
     port = chaos.free_port()
-    p = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--schedule", "300,300,300", "--deadline-ms", "800"],
+    p = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--allow-private-hosts", "1", "--schedule", "300,300,300", "--deadline-ms", "800"],
                          stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     p.stderr.readline()
     total = 2300

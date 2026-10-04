@@ -107,7 +107,7 @@ def read_log(data):
 
 def flags(port, datadir, extra=()):
     """The command line for a service: `extra` is the optional settings in the order they were once positional."""
-    out = ["--port", str(port), "--dir", datadir]
+    out = ["--port", str(port), "--dir", datadir, "--allow-private-hosts", "1"]
     for name, value in zip(("schedule", "deadline-ms", "window-ms"), extra):
         out += [f"--{name}", str(value)]
     return out

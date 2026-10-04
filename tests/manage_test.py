@@ -102,7 +102,7 @@ def pg_flags():
 def start(d, extra=None):
     port = chaos.free_port()
     flags = pg_flags() + ["--admin-token", TOKEN] if extra is None else extra
-    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--schedule", "100", "--deadline-ms", "800", *flags], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--allow-private-hosts", "1", "--schedule", "100", "--deadline-ms", "800", *flags], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     lines = []
     while True:
         line = proc.stderr.readline().decode().strip()

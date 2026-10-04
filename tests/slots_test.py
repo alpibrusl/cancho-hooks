@@ -118,7 +118,7 @@ def conf(d, rows):
 
 def start(d, extra=(), schedule="100"):
     port = chaos.free_port()
-    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--schedule", schedule, "--deadline-ms", "800", *extra],
+    proc = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--allow-private-hosts", "1", "--schedule", schedule, "--deadline-ms", "800", *extra],
                             stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     lines = []
     while True:

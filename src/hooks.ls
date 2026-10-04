@@ -399,6 +399,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, stats[c_deadline()]);
         w = json.put_key(heap, w, "window-ms");
         w = json.put_int(heap, w, idem.window_ms(ix));
+        w = json.put_key(heap, w, "allow-private-hosts");
+        w = json.put_int(heap, w, stats[c_private()]);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -475,7 +477,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         if stats[c_endpoints()] >= state.max_endpoints() {
             return server.failure(heap, out, 409, "the service has as many endpoints as it can (62)", keep);
         }
-        let parsed = manage.parse_create(heap, body, scratch, stats[off_mg()..off_mg() + manage.mg_size()]);
+        let parsed = manage.parse_create(heap, body, scratch, stats[off_mg()..off_mg() + manage.mg_size()], stats[c_private()] == 1);
         if parsed.0 != 0 {
             return server.failure(heap, out, 400, manage.why(parsed.0), keep);
         }
@@ -702,6 +704,11 @@ fn c_deadline() -> [] int {
 // A bit per endpoint id (0 to 15): set while the endpoint is disabled and gets no new attempts (`docs/design.md` section 22).
 fn c_disabled() -> [] int {
     return 10;
+}
+
+// 1 if endpoints may be names and non-public addresses (`allow-private-hosts`, section 26), else 0.
+fn c_private() -> [] int {
+    return 11;
 }
 
 fn is_disabled[&d](dv: &d [int], e: int) -> [] bool {
@@ -1988,13 +1995,13 @@ fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte
 
 // Read `<dir>/endpoints.conf` into the delivery state. Answers the number of endpoints, 0 if there is no such file (the service
 // then only ingests), or a negative number: `0 - line` for the first bad line, -1000 if the file cannot be read or is too large.
-fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], dv: &!v [int], blob: &!b [byte]) -> [heap, fs_read(""), file_read] int {
+fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], dv: &!v [int], blob: &!b [byte], open: bool) -> [heap, fs_read(""), file_read] int {
     let text = box_slice(heap, endpoints.text_limit(), byte_of(0));
     var result = 0 - 1000;
     borrow mut text as &!tw in {
         let got = read_endpoints_file(fs, dir, contents(tw));
         if got >= 0 {
-            result = endpoints.parse(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob);
+            result = endpoints.parse(contents(tw)[0..got], dv[off_table()..off_table() + endpoints.table_size()], blob, open);
         }
     }
     unbox_slice(heap, text);
@@ -2038,8 +2045,12 @@ fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], a
 
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // scan of the events log positioned at the slowest endpoint. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool) -> [heap, fs_read(""), file_read, file_write] int {
+fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool, open: bool) -> [heap, fs_read(""), file_read, file_write] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
+    dv[c_private()] = 0;
+    if open {
+        dv[c_private()] = 1;
+    }
     dv[c_deadline()] = default_deadline_ms();
     if deadline_ms > 0 {
         dv[c_deadline()] = deadline_ms;
@@ -2054,9 +2065,9 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
     // The endpoints: the database's, as `roster.fetch` wrote them, or `endpoints.conf`.
     var n = 0;
     if from_db {
-        n = endpoints.parse(etext, dv[off_table()..off_table() + endpoints.table_size()], blob);
+        n = endpoints.parse(etext, dv[off_table()..off_table() + endpoints.table_size()], blob, open);
     } else {
-        n = load_endpoints(heap, fs, dir, dv, blob);
+        n = load_endpoints(heap, fs, dir, dv, blob, open);
     }
     if n < 0 {
         return 13;
@@ -2293,13 +2304,13 @@ fn put_token[&d, &t](dv: &!d [int], token: &t [byte]) -> [] int {
 
 // Parse `text` into scratch tables, to find out whether `endpoints.parse` accepts it: the number of endpoints, or `0 - line`. The scratch
 // is on the heap because it is as large as the text, and a region of `main` has room for the text and not for a second copy of it.
-fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte]) -> [heap] int {
+fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte], open: bool) -> [heap] int {
     let table = box_slice(heap, endpoints.table_size(), 0);
     let blob = box_slice(heap, endpoints.text_limit(), byte_of(0));
     var count = 0;
     borrow mut table as &!tw in {
         borrow mut blob as &!bw in {
-            count = endpoints.parse(text, contents(tw), contents(bw));
+            count = endpoints.parse(text, contents(tw), contents(bw), open);
         }
     }
     unbox_slice(heap, table);
@@ -2423,14 +2434,14 @@ fn main(world: World) -> [] int {
                 } else {
                     var count = 0;
                     borrow mut heap as &!h0 in {
-                        count = parse_check(h0, etext[0..text_len]);
+                        count = parse_check(h0, etext[0..text_len], config.allow_private_hosts(cfg));
                     }
                     if count < 0 {
                         borrow mut io as &!i in {
                             let nb = alloc_slice[a](12, byte_of(0));
                             say(i, "hooks: endpoints.conf: line ");
                             say(i, nb[0..digits_of(0 - count, nb)]);
-                            say(i, " is not valid; nothing was imported\n");
+                            say(i, " is not valid (see --allow-private-hosts for hosts); nothing was imported\n");
                         }
                         status = 13;
                     } else {
@@ -2490,7 +2501,7 @@ fn main(world: World) -> [] int {
                 from_db = true;
                 var count = 0;
                 borrow mut heap as &!h0 in {
-                    count = parse_check(h0, etext[0..etext_n]);
+                    count = parse_check(h0, etext[0..etext_n], config.allow_private_hosts(cfg));
                 }
                 if count < 0 {
                     go = false;
@@ -2499,7 +2510,30 @@ fn main(world: World) -> [] int {
                         let nb = alloc_slice[a](12, byte_of(0));
                         say(i, "hooks: the endpoints table: row ");
                         say(i, nb[0..digits_of(0 - count, nb)]);
-                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
+                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
+                    }
+                }
+            }
+        }
+        // `endpoints.conf` is judged here as well, so that a refusal says which line (`prepare` reads it again and answers only 13).
+        if go && !from_db && dir_len > 0 {
+            var flen = 0;
+            borrow fs as &fs0 in {
+                flen = read_endpoints_file(fs0, cblob[0..dir_len], etext);
+            }
+            if flen > 0 {
+                var count = 0;
+                borrow mut heap as &!h0 in {
+                    count = parse_check(h0, etext[0..flen], config.allow_private_hosts(cfg));
+                }
+                if count < 0 {
+                    go = false;
+                    status = 13;
+                    borrow mut io as &!i in {
+                        let nb = alloc_slice[a](12, byte_of(0));
+                        say(i, "hooks: endpoints.conf: line ");
+                        say(i, nb[0..digits_of(0 - count, nb)]);
+                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
                     }
                 }
             }
@@ -2533,7 +2567,7 @@ fn main(world: World) -> [] int {
                                                         borrow mut lg as &!lw in {
                                                             borrow mut dl as &!dw in {
                                                                 contents(ixw)[1] = window_ms;
-                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db);
+                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db, config.allow_private_hosts(cfg));
                                                                 if status == 0 {
                                                                     borrow net as &nn in {
                                                                         match tcp_listen(nn, port, 1024, 0) {

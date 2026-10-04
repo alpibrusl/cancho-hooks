@@ -40,7 +40,7 @@ mkdir -p /tmp/hooks-data
 echo "0 127.0.0.1 9000 whsec_$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(24)).decode())')" \
   > /tmp/hooks-data/endpoints.conf
 
-build/hooks --port 8080 --dir /tmp/hooks-data &
+build/hooks --port 8080 --dir /tmp/hooks-data --allow-private-hosts 1 &   # the receiver is on 127.0.0.1: see `allow-private-hosts`
 curl -XPOST -d '{"type":"user.created","id":7}' localhost:8080/events      # {"id":1}, after the flush
 ```
 
@@ -140,7 +140,8 @@ ignored; at most 62 endpoints, each with an id of up to six digits, written and 
 | `window-ms` | `86400000` | how long an idempotency key is remembered |
 | `pg-host` | (none) | a PostgreSQL: the endpoints are read from it and the attempt history written to it; without it the endpoints are `endpoints.conf` and there is no history (design.md section 24) |
 | `pg-port`, `pg-user`, `pg-database`, `pg-password` | `5432`, `hooks`, `hooks`, none | how to reach it. Put a password in the settings file, not on the command line |
-| `admin-token` | (none) | the bearer token that lets a request create endpoints, 8 to 255 visible characters; without it `POST /endpoints` is a `403`. Anyone who has it can make the service send requests to any host it can reach, so keep it secret and put it in the settings file, not on the command line |
+| `allow-private-hosts` | `0` | `1`: an endpoint's host may be a name, or an address in a private, loopback, link-local or reserved range. With `0` (the default) it must be a public IPv4 literal, in `endpoints.conf`, in the table and in `POST /endpoints` (design.md section 26) |
+| `admin-token` | (none) | the bearer token that lets a request create endpoints, 8 to 255 visible characters; without it `POST /endpoints` is a `403`. Anyone who has it can choose where the service sends requests, within what `allow-private-hosts` allows (by default public addresses only), so keep it secret and put it in the settings file, not on the command line |
 | `import-endpoints` | `0` | `1`: copy `endpoints.conf` into the database and exit (needs `pg-host`; no `port` needed) |
 
 ```sh
@@ -185,7 +186,7 @@ $ curl -XPOST -H 'Idempotency-Key: order-77' -d '{"type":"order.paid","id":78}' 
 | `GET /endpoints/:id` | one endpoint, as `GET /endpoints` lists it; `404` for an unknown id, `400` for one that is not a number |
 | `POST /endpoints` | create an endpoint (needs a database and an `admin-token`): `{"host","port"}` and optionally `"secret"` (`whsec_` and base64; the service makes one if it is left out) and `"from":"now"`. `201 {"id","host","port","secret","from","cursor"}`: **the secret is in this answer and in no other**. The endpoint gets the events from now on, not the log's past. `403` if the service has no `admin-token`, `401` without `Authorization: Bearer <token>`, `400` with the reason for a bad request, `409` if another change waits or 62 exist, `503` if no database is named or it refused, `504` after five seconds (the row may still have been stored: it is an endpoint at the next start) |
 | `POST /endpoints/:id/enable` | enable an endpoint a `410` disabled; `200` whether or not it was, `404` for an unknown id |
-| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms"}` (not the endpoints, not their secrets) |
+| `GET /config` | the settings in force: `{"schedule":[ms,...],"deadline-ms","window-ms","allow-private-hosts"}` (not the endpoints, not their secrets) |
 | `GET /healthz` | `{"ok":true}` |
 
 A delivery is `POST /hook` to the endpoint, with the event as the body and three headers: `webhook-id` (`evt_<id>`, the same on
@@ -209,6 +210,7 @@ HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/history_test.py build/hooks
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/roster_test.py build/hooks    # the endpoints in PostgreSQL: import, read at start, every refusal
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/manage_test.py build/hooks    # POST /endpoints and GET /endpoints/:id: the token, the request, from now
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/slots_test.py build/hooks     # endpoint ids and slots: the legacy log, ids above 15, dormant, reclaimed
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/ssrf_test.py build/hooks      # where a delivery may go: 41 refused hosts, 23 public ones, a redirect not followed
 python3 tests/layout_test.py build/hooks           # the delivery state's regions do not overlap (2,300 events, two fail once)
 python3 tests/replay_test.py build/hooks           # replay: one endpoint or all, restarts, capacity, an event far behind the cursor
 python3 tests/gone_test.py build/hooks             # 410 Gone disables an endpoint, restarts keep it, enable undoes it
@@ -252,7 +254,7 @@ docs/design.md     the design and what building it found
 
 ## Limitations
 
-One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, or from the `endpoints` table (read at start, and added to with `POST /endpoints`); an endpoint the log has not seen (a row added by hand, a new line in the file) starts at the slowest cursor of the others, 0 if there are none, and one created with `POST /endpoints` starts from now; they cannot yet be changed or removed without a restart; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. At most 62 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
+One process, one thread, one core: the loop does everything, and up to 64 delivery attempts are in flight at once (8 per endpoint). Endpoints come from a file read at start, or from the `endpoints` table (read at start, and added to with `POST /endpoints`); an endpoint the log has not seen (a row added by hand, a new line in the file) starts at the slowest cursor of the others, 0 if there are none, and one created with `POST /endpoints` starts from now; they cannot yet be changed or removed without a restart; a host *name* is resolved by a blocking call that stalls the loop for as long as the resolver takes (use IP addresses); no `https`. By default only public IPv4 addresses are allowed as destinations (no names, no ports limited, no per-host allow-list: `docs/design.md` section 26). At most 62 endpoints, and an endpoint more than 1,024 events behind is not served until it catches up. Events over 65,500 bytes are refused (`413`). `delivery.seg` is never compacted. At most 65,536 idempotency keys; the index is rebuilt by reading the whole events log at start. Not for production.
 
 ## Contributing
 
