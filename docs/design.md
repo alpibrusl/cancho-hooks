@@ -776,3 +776,151 @@ and the benchmark's ten-endpoint case, three runs after the fix: 50,000 attempts
 *Existing tests that had to change, and why.* `tests/delete_test.py` stage 14 asserted that the fast endpoint **was held to the slow one's window** (events 1 to 1,024 and no more) until the slow one was deleted: the defect of section 29, pinned as if it were a design. It now asserts that the fast endpoint is sent all 1,300 events while the slow one is dead and 1,024 behind, and that deleting the slow one changes nothing for it. Four assertions compared `GET /endpoints/:id` or `GET /endpoints` entries as whole objects (`manage_test` twice, `delete_test` twice) and `config_test.py` compared `GET /config`; they name the new members now (`paused`, `failing_since`, `breaker-days`). The docstrings of `slots_test.py` and `layout_test.py` say what changed about the rule and the offsets table.
 
 **Not verified.** The five real days: the breaker is tested with a `streak` record written five days and an hour back (and one, 25 hours and 23 hours back, with `breaker-days` 1) and the rule's arithmetic by unit test at its millisecond; no test has a service run for days or sets the clock. The kills in `scan_test` are `SIGKILL` without the `fsync` shim, so what they show is the bound of what was in flight; the shim's power cuts are exercised through the new scan by `chaos.py` and `delivery.py` only (and `delivery.py` has no endpoint more than a window behind). Nothing was run with a events log of millions of records: `seek_slots` reads the log at start up to the record after the largest cursor, once for all endpoints (the idempotency rebuild next to it reads all of it anyway, 0.24 s for 65,537 records). The compiler used is lex-sys `ab332d3` (`main` on this machine), two commits past the pin `052e623`; `lex-sys build` did not refuse it, and `git diff 052e623 ab332d3` touches no compiler source (scripts, docs, examples, a release workflow and conformance tests only), but the binary is whatever was built on this machine and I did not rebuild it, CI builds the pinned commit, and this was not run on that. A clock that is wrong (set forward) by days pauses an endpoint at its next failed attempt; that is the breaker's rule and it is not guarded. A paused endpoint's events stay in the log: nothing here bounds that log (production.md 0.2).
+
+
+## 32. Cron: scheduled events
+
+`docs/production.md` item P1.8 decided the shape; this section is what was built and measured. A **schedule** is a row of the `schedules` table: a cron expression, the type and body of an event, and where it is. The service reads the table on a tick, and when a schedule is due it appends **an ordinary event** (the same function as `POST /events`, `store_event`) and moves the row on. Nothing about delivery, signing, retries, replay or idempotency knows an event came from a clock.
+
+### 32.1 The expression (`src/cron.ls`, pure)
+
+Five fields, `minute hour day-of-month month day-of-week`, separated by blanks, **UTC**. A field is a list of items: `*`, `a`, `a-b` (both ends included; a range does not wrap, write `22-23,0-2`), `*/n` (every n-th value from the field's first) and `a-b/n`. Numbers only: no names, no `@daily`, and no `a/n` (a step needs a `*` or a range, as in Vixie cron). A step is from 1 to the number of values the field has. Sunday is `0` and `7` (`5-7` is Friday, Saturday, Sunday).
+
+**Day of month and day of week are "or", unless one begins with `*`** (Vixie cron, which is what "standard" means in practice, and the rule that surprises people): if both are restricted a day matches when either does (`0 0 1 * 1`: the 1st, and every Monday); if either field *begins* with `*` (`*`, `*/2`) both must match (`0 0 * * 1`: Mondays; `0 0 */2 * 1`: Mondays that fall on an odd day of the month). The month always has to match. An expression that can never fire (`0 0 31 2 *`, `0 0 30 2 *`, `0 0 31 4 *`) is refused when it is made, not accepted and silent; `0 0 31 2 1` is fine (the "or" makes it every Monday of February).
+
+`parse` fills eight integers (bit sets for second, minute, hour, day of month, month, day of week, and whether each of the last two began with `*`). `next_after(spec, t)` and `prev_upto(spec, t)` answer the first scheduled second after `t`, and the last one up to and including `t`, or -1 (none within 40 years, which is longer than the longest wait between two matches of any expression that can fire: a leap day that must be a Sunday is 28 years apart, and across 2100 it is 40). They walk **days** (a month that does not match is skipped whole) and then hours, minutes and seconds inside the day, on a calendar made of `days_from_civil` and `civil_from_days` (Hinnant's algorithms), so a month's length and a leap day are arithmetic and not a table. Times are Unix seconds, years 1970 to 9999.
+
+**Tests of this module.** `tests/cron_test.ls` (18 unit tests, run by `lex-sys test`): the calendar round-trips for each of 80,000 days (1970 to 2189) and the days a person can check (1 March 2000, 29 February 2024, 1 March 2100); February has 29 days in 2000, 2024, 2096, 2104 and 2400 and 28 in 2023, 2100 and 2200, and every other month its length, all from the calendar's own arithmetic (the module has no table of month lengths and no `is_leap`); the bit sets of a dozen expressions; **every kind of wrong expression with its own refusal code** (34 wrong expressions: field counts, numbers outside a field, ranges backwards, a step of 0 or on a single number, names, a list with an empty item, `1-2-3`, `*/5/2`, a number of four digits, 101 bytes); six fields only when the seconds field is on; the never-firing ones and the nearly-never ones (a leap day is rare, not never); the next fire at the edges (the last second of a month and of a year, the 31st skipping February and April, the 30th in a leap year, `29 February` from March 2096 to 2104 because 2100 is not a leap year, `59 23 31 12 *` across the new year); the day-of-month/day-of-week rule both ways; Sunday as 0, 7, `0,7`, `7-7` and `5-7`; steps from the first value of a field (`*/10` of the days is 1, 11, 21, 31); the seconds field; and `prev_upto` at the same edges; plus a property check, for nine expressions and 2,100 times, that the next fire is after the time, is a fire, that `prev_upto` of it is itself, and that the last fire before it has it as its next. Every expected Unix second was computed with Python's `calendar.timegm`, not by the code under test.
+
+`tests/cron_test.py` is the independent check: Python's `datetime` for the calendar, sets for the fields, and a scan **day by day with a sorted list of the times of the day** for the next and the last fire, by someone else's algorithm. 620 expressions (20 edge cases asked at every edge time, 500 random five-field and 100 random six-field ones, valid and wrong: numbers outside a field, ranges backwards, a step of 0, a day that does not exist), each valid one asked at several random times between 1970 and 2096 and at edge times (leap days, the end of a year, 2096 to 2104, 28 February 2100), `next` and `prev` both, plus the first second of every month of 19 years: **415 accepted, 203 refused, 2 never fire; 7,123 checks, 0 failures**.
+
+### 32.2 The table, and why it has two columns for "where it is"
+
+```sql
+create table schedules (id bigint generated always as identity primary key, expr text not null, event_type text not null,
+    body text not null default '{}', enabled boolean not null default true, created_at bigint not null,
+    base bigint not null, last_fired bigint not null default 0, next_fire bigint not null default 0);
+create index schedules_due on schedules (next_fire) where enabled;
+```
+
+`last_fired` is the scheduled second of the last fire (0: none) and is for people. `next_fire` is the scheduled second the tick fires next, and **0 means "work it out"**; `base` is the second to work it out from (the second the schedule was created, or last had its expression changed or was enabled again: so a schedule does not fire for the time before it existed or was off). Because the tick asks the database only for `enabled and next_fire <= now`, it reads the rows that are due and no others, whatever the number of schedules, and the service does the arithmetic (the database cannot parse a cron expression). A `PATCH` that changes the expression or enables a schedule does not compute anything: it sets `next_fire = 0` and `base = now`, and the next tick does the rest, in the one place that knows how.
+
+The service moves `last_fired` and `next_fire` with one statement, `advance_schedule`, that is a **compare-and-set** on `(id, base, next_fire)` as the tick read them: a `PATCH` made between the read and the write has changed one of the two, the statement changes no row, and the next cycle reads the row again. (The compare-and-set is for that, not for two services: see 32.7.)
+
+### 32.3 The tick, and the one thing that must not block
+
+Everything the service does with the database goes through the pool (section 24): requests are queued, the poller says when a connection can be read, and an answer comes back with the tag it was sent under. The tick is a **cycle of two kinds of request, never a wait**:
+
+1. once an interval (1 s) or at once after a cycle that made progress, `schedules_due(now)` is submitted under a tag of its own;
+2. when it is answered, each row it names is judged by `sched.plan` (32.5); the rows that fire are **appended to the log, not yet flushed**; then **one flush** covers them all; and only then is `advance_schedule` submitted for each row (a row that did not fire only has its `next_fire` worked out or moved);
+3. the answers to the updates count the cycle down, and when the last arrives the cycle is over.
+
+A cycle has a deadline (5 s); one that is overdue is given up, its late answers are recognised by the cycle number in their tag and dropped, and the next cycle starts as if nothing had happened (32.4 says why that is safe). The tags of the tick (`2^40` and up, a cycle every 64) and of the requests that manage schedules (`2^41` and up) are far above the history's (1) and the attempts' queries (100 and up), so an answer says whose it is. The state is one block of integers, `sg`, allocated by `main` and lent to `handle`, so **the delivery state `dv` is not touched** by any of this. In `hooks.ls` cron is: a route group (`/schedules`, five routes), `fire_cron`, `tick_rows`, `tick_send`, `tick_answer` and `tick_start`, a branch for its tags where the loop reads the pool's answers, a call to `tick_start` before the history is drained, and `store_event`, which is `POST /events`'s own append and index update moved into a function so that both use it.
+
+### 32.4 Exactly once, by construction
+
+A fire is `{"type": <type>, "schedule": <id>, "scheduled_at": <second>, "body": <body>}`, stored under the idempotency key **`cron:<id>:<scheduled second>`**. The order is fixed: **append, flush, tell the database**. The ways it can be cut:
+
+| the service dies | what the log and the table say | what the restart does |
+|---|---|---|
+| before the append | nothing, nothing | the row is due: it fires |
+| after the append, before the flush (a power cut loses the record) | the record is gone, the table is behind | the row is due: it fires; the index is rebuilt from the log and has no such key |
+| after the flush, before the database hears (`kill -9`, or the update is lost) | **the event is in the log, the table is one behind** | the row is due: `fire_cron` finds the key in the index, **appends nothing**, and the update is sent: the fire is not made twice |
+| after the database hears | both agree | nothing is due until the next second |
+
+The third row is the whole claim, and it holds because the index is rebuilt from the log at start (section 17) and because `fire_cron` asks `idem.find` and **does not look at the key's age**: `POST /events` treats a key older than `window-ms` as a new one, and a yearly schedule whose update was lost would otherwise fire twice if the restart came after the window. A key is the same scheduled second of the same schedule forever.
+
+### 32.5 Missed fires, and what "missed" means
+
+A fire is **late** when the tick finds it due a little after its scheduled second, which is normal (the tick is once a second and the database takes a few milliseconds), and **missed** when it is more than **10 seconds** late (`grace_s`): the service was stopped, or the database did not answer. The rule, applied to each due row by `sched.plan` at `now`:
+
+* the next fire is in the future: only work it out (`next_fire = 0`) or move it;
+* it is at most 10 s old: **fire it**, on its own. A backlog of such fires is fired one per cycle, a cycle after another at once, in order;
+* it is older: the **last** scheduled second that is more than 10 s old is the one fire for the whole window (`prev_upto(now - 11)`), and with `cron-catchup 0` there is none; either way `next_fire` becomes the first one after it, which is within the grace and fires next. A stop of an hour under `*/5 * * * * *` is one event, not 720.
+
+Why 10 s, and why not "everything before the start of the process": it is one rule for a restart, a database that did not answer for a minute and a clock that jumped forward, and it needs no memory of when the process started. Its cost is a short stop being invisible (a stop shorter than 10 s misses nothing: its fires are late, not missed). `cron-catchup` is read at start and shown in `GET /config`; `cron_skipped` in `GET /stats` counts the windows skipped.
+
+### 32.6 The routes, and where they depart from the endpoints'
+
+`POST /schedules`, `GET /schedules`, `GET /schedules/:id`, `PATCH /schedules/:id` and `DELETE /schedules/:id`, judged in `handle` by `sched.judge`, sent by the loop, answered when the database answers (the connection is held, as for `POST /endpoints`), with the same `403` (no `admin-token` configured), `401` (no right token, `WWW-Authenticate: Bearer`) and `503` (no database named), and a `504` after 5 s. The differences, each on purpose:
+
+* **the reads need the token too.** `GET /endpoints` is open; a schedule's body is a payload that someone chose to send to the receivers, and there is no reason a caller who cannot create one should be able to read it;
+* **several requests may wait together** (16 slots: a request has a tag and a slot), where an endpoint change waits alone and a second is a `409`: a read should not be refused because a write is in flight, and a schedule change touches no state in memory that two could contend for;
+* **a body that is JSON is stored as JSON**, parsed and written again compactly (`copy_value`), so what is kept is what the parser understood; at most 1,024 bytes and 12 levels. The event type is 1 to 64 printable ASCII characters. At most **64** schedules (a `409`): the list answers in one reply, and 64 of the largest size (a body of 1,024 bytes and a type of 64) is a reply of 79,608 bytes of the 128 KiB a connection of the pool holds (the test builds that case);
+* **`next_fire` in an answer is computed from the expression and the time of the request**, not read from the table: the table's is where the tick will look next, which for a schedule that is a little late or has just been changed is not what a person asks.
+
+### 32.7 Settings, the test mode, and what is not covered
+
+`cron-catchup` (default 1) and **`cron-seconds`** (default 0). The second is the one setting added for a test and not for an operator: a cron expression has a resolution of a minute, a test that waits for one is a test of a minute, and the alternatives were no better (a test clock injected into the loop would be a second source of time in a service that has one, and a time-scaling flag would change what "a second" in a key means). With `cron-seconds 1` every expression has a **leading seconds field** (six fields; `*/2 * * * * *` is every other second), keys and `scheduled_at` are Unix seconds as always, and the whole path is the same code. A row of the other kind does not parse, is counted in `cron_errors` and **parked** (`next_fire` far in the future, so it is not read again until its expression or its state is changed): do not switch the setting with schedules in the table. One stage of `tests/schedules_test.py` runs the real five-field service and waits for a real minute.
+
+**Not covered, and said so:**
+
+* **One service per database.** The schedules are rows; a second service reading them would append the same fire to its own log before either's update (the compare-and-set lets one of them record it, not stop both from appending). The logs have never been shared either; there is no lease.
+* **Every fire uses an idempotency key, and the index holds 65,536 and never forgets** (section 17). A schedule of every minute uses them in 45 days; a schedule of every hour in 7 years. A full index refuses the fire (`fire_cron` answers "try later", `cron_errors` counts it, the row stays due) **rather than make it without its key**: the loud failure, not a double fire. `tests/schedules_test.py` fills the index and checks it. Bounding the index (retention, P0.2) is what removes this; until then it is the limit of cron.
+* **The clock.** Time is the machine's wall clock. A jump backwards makes nothing due until the clock is back where it was (the fires are not repeated: their keys are held); a jump forwards is a stop of that length, with the rule of 32.5.
+* **No time zones, no `@` aliases, no names, no seconds field in production, no per-schedule catch-up setting, no run history of a schedule** (the events are in the log and `GET /events/:id/attempts`). One occurrence of a schedule fires per cycle, which is at most one a second per schedule (a seconds-mode schedule of `* * * * * *` is the fastest there is).
+* **The database must have the table.** The statements are prepared on every connection at login, so a database without `schedules` makes the start fail with status 20 ("are the tables there?"), history and endpoints included: apply `sql/schema.sql` (it is idempotent) before upgrading.
+
+### 32.8 Tests and mutants
+
+**Gate and evidence.** Everything below was run on the final code against a PostgreSQL of its own, together with the whole existing suite exactly as `.github/workflows/ci.yml` runs it (24 steps, every one green).
+
+| test | what it pins | result |
+|---|---|---|
+| `lex-sys test`, set `cron` (`tests/cron_test.ls`) | the pure module: 18 tests | 18 passed |
+| `lex-sys test`, set `config` | `cron-catchup` and `cron-seconds`: default, `0`/`1`, refusals | 12 passed (one is new) |
+| `tests/cron_test.py build/cron_probe 500` | `cron.ls` against `datetime` and a day scan | 7,123 checks, 0 failures |
+| `tests/config_test.py` | the two settings from a file and from flags, `GET /config`, refusals | all pass (3 new checks) |
+| `FULL=1 tests/schedules_test.py` | the service, 11 stages (below) | 171 checks, 0 failures, about 4 minutes |
+
+The stages of `tests/schedules_test.py`: **1** the admin token on all five routes, the reads too (`403` with no token configured, `401` for a missing, wrong, shorter, longer, other-scheme, doubled or query-string token, with `WWW-Authenticate`, `503` with no database, and the token judged before the database); **2** 30 wrong requests, each a `400` that says what is wrong and creates nothing, six kinds of wrong expression in six different words, an unknown member ignored, a body 12 levels deep accepted and 13 refused, 404s, `405`, an id of 20 digits; **3** create/read/list/change/delete, `next_fire` against Python's own arithmetic (the next five minutes, the next 29 February), 64 schedules and not a 65th, the largest list answer (64 bodies of 1,024 bytes), the two modes refusing each other's expressions; **4** a fire is an ordinary event: type, schedule, `scheduled_at`, body, the key in the log, `GET /events/:id`, delivered to a receiver **with a signature the test verifies itself**, `/stats` counting it; **5** not for the time before it existed, disabled ones do not fire, enabling and changing the expression count from then, deleting stops it; **6** a database that refuses (503, nothing created) and one slower than five seconds (504, and the service answers meanwhile); **7** the real five-field service: after a stop of an hour, one event (not 60) for the last minute, `last_fired` and `next_fire` in the table, and then **the next real minute on time** (the test waits for it); and with `cron-catchup 0` none, `next_fire` moved on, `cron_skipped` 1; **8** the same in seconds mode (`*/5 * * * * *` after an hour: one event for the window, the ones within the grace period each on its own, 4 in all, not 720); **9** the deterministic kill: a TCP proxy in front of the database swallows exactly the `advance_schedule` request, the test kills the service with `kill -9` (every second round as a power cut: the logs cut back to what the last `fsync` covered) the moment it does, restarts it, and does it six times, the last after a stop of 16 s, longer than the grace period; **10** kill -9 as a power cut 37 times in 30 s under a schedule of every second, 25 of them within a few milliseconds of an event reaching the log, the others at random instants; **11** the idempotency index full (65,536 keys): no fire, `cron_errors` counted, the row untouched, the service otherwise fine.
+
+What stage 9 found, and was checked after: in each of the six rounds the log held the event and the table was one behind it (the test reads both), and after the restarts **no scheduled second had two events, every event had its key, and the only gap in the seconds was the long stop's**. With the third row of the table in 32.4 removed (mutant S1 below) the same run has every held second twice.
+
+**Mutants: 18 run, 18 killed.** Each is one edit to a saved copy of the file, built, run against the tests that should catch it, and the file restored from the copy (checked with `cmp`; no mutant was left on disk).
+
+| mutant | caught by |
+|---|---|
+| P1 day of month and day of week "and" instead of "or" | unit, `cron_test.py` |
+| P2 Sunday written 7 not folded to 0 | unit, `cron_test.py` |
+| P3 the calendar forgets that 2100 is not a leap year | unit, `cron_test.py` |
+| P4 only a bare `*` counts as a star for day of month and day of week (`*/2` does not) | unit, `cron_test.py` |
+| P5 `next_after` not strictly after | unit, `cron_test.py` |
+| P6 the skip over a month that does not match lands a month late | unit, `cron_test.py` |
+| P7 a step starts at 0, not at the field's first value | unit, `cron_test.py` |
+| P8 a range excludes its last value | unit, `cron_test.py` |
+| P9 the search looks 5 years ahead, not 40 | unit, `cron_test.py` |
+| S1 `fire_cron` does not look for its key in the index | stage 9: every held second has two events |
+| S2 a fire is stored without its idempotency key (`keyed = false`) | stage 9: every held second twice, and no key in the log |
+| S3 after a stop every missed fire is made, not the last | stage 8: the hour's fires |
+| S4 `cron-catchup 0` ignored | stage 8: `cron_skipped` and the old fire |
+| S5 the reads of `/schedules` need no token | stage 1 |
+| S6 the key has no scheduled second | stage 4: the second fire is taken for the first's repeat |
+| S7 enabling a schedule does not count from now | stage 5: fires for the seconds it was off |
+| S8 the tick does not flush before it tells the database | stage 10: the events lost to the power cuts (3 events in the log after 34 kills) |
+| S9 a disabled schedule still fires (the select ignores `enabled`) | stage 5 |
+
+(P3's first version was a mutant of dead code, `is_leap`, which nothing in the module called: the unit test killed it and the differential test could not. The helper was deleted, the mutant moved to the calendar's own arithmetic, and the differential test now asks every edge expression at every edge time, 28 February 2100 among them.) A search that could loop for ever on a wrong calendar hung the unit run for 400 s under P3: the month skips now cannot go backwards, so a bug in the calendar is a wrong answer and not a stuck service.
+
+**What the tests do not pin.** The compare-and-set (no test races a `PATCH` against a fire; the statement is read, not tested); the cycle's 5 s deadline for the tick's own requests (stage 6 times out an administrative request, not the tick); the grace period's exact edge (10 s is a constant and the tests are written around it with margins, not at it); two services on one database; that the order "flush, then update" is kept *in the code* (S8 removes the flush; a mutant that swaps the order is equivalent in the loop as written, because the update is only queued and goes out at the turn's `pool.flush`, which is after the flush; so the rule is held by the order of the calls in `tick_send` and by this paragraph); a log whose `flush` fails (the existing tests cover the log, not a fire).
+
+### 32.9 What the compiler lacked
+
+* **No `examples {}` blocks.** The task asked for them on the pure module (the convention of Lex, the other language); lex-sys has no such construct: `examples { add(1, 2) => 3 }` after a function is "expected `fn`, `extern`, `struct`, `enum` or `static`, found an identifier". The checked examples are in the header comment of `src/cron.ls`, and are asserted by `tests/cron_test.ls` and `tests/cron_test.py` instead, which is more, but not next to the function and not part of its identity.
+* **A failed `test.assert` says nothing**: it traps (`SIGILL`) with no line and no values (docs/testing.md section 5 lists it); a wrong expected constant in a test took bisection with a probe program (`tests/cron_probe.ls`) to find. Three of mine were wrong, and the unit tests found them, not the code.
+* **A local binding named like a module's function hides the qualified call.** With `var next = 0;` in scope, `m.next()` is "`next` is a local binding, not a function": a qualified path is not a name that a local can shadow. Reproducer (two files; `lex-sys check main.ls m.ls --std`):
+
+  ```
+  // m.ls                              // main.ls
+  edition 5;                           edition 5;
+  module m;                            import m;
+  pub fn next() -> [] int {            fn main(world: World) -> [] int {
+      return 1;                            let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+  }                                        release(io); release(ffi); release(fs); release(heap); release(args); release(net); release(clock);
+                                           var next = 0;
+                                           next = m.next();     // error: `next` is a local binding, not a function
+                                           return next;
+                                       }
+  ```
+
+  It hit three times (`next_tag`, `iso`, `reply` in a loop with many locals) and each was renamed; in a function as long as `run` the collisions are easy to make.

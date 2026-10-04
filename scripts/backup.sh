@@ -1,6 +1,6 @@
 #!/bin/bash
 # Back up a lexsys-hooks data directory: the two logs (events.seg, delivery.seg), endpoints.conf if there is one, and (with
-# --pg-database) a pg_dump of the tables endpoints, attempts and the sequence endpoint_ids.
+# --pg-database) a pg_dump of the tables endpoints, attempts and schedules and the sequence endpoint_ids.
 #
 #   scripts/backup.sh --dir /var/lib/hooks --out /var/backups/hooks --mode stopped|online
 #                     [--stop-cmd 'systemctl stop hooks' --start-cmd 'systemctl start hooks']      (stopped only)
@@ -118,7 +118,7 @@ fi
 # slowest cursor (a repeat, never a loss); the other way round is also a repeat. Either order is safe; this one makes the logs
 # the later (and so the more complete) of the two stores.
 if [ -n "$pg_db" ]; then
-  args=(-Fc --no-owner --no-privileges -t endpoints -t endpoint_ids)
+  args=(-Fc --no-owner --no-privileges -t endpoints -t endpoint_ids -t schedules)
   [ "$skip_attempts" = 1 ] || args+=(-t attempts)
   [ -z "$pg_host" ] || args+=(-h "$pg_host")
   [ -z "$pg_port" ] || args+=(-p "$pg_port")

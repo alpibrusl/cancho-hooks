@@ -1,0 +1,890 @@
+edition 5;
+
+module sched;
+
+import std.buffer;
+import std.json;
+import std.route;
+import http.server;
+import cron;
+import manage;
+import pg;
+import queries;
+
+// `sched` -- the schedules: the requests that manage them, the tick that fires them, and the state both keep (`docs/design.md` section 32).
+//
+// What the service does with a schedule is in `hooks.ls` (`fire_cron`, `tick_answer`, the loop): it needs the events log. What is here needs
+// neither the log nor the pool: judging a request, the statement for it, the HTTP answer for the database's reply, and deciding what a due row
+// means (`plan`). Nothing here waits for the database.
+//
+// **One block of integers, `sg`**, which the loop owns and `handle` is lent (the delivery state `dv` is not touched):
+//
+//     [0] cron-catchup (1: fire once for the time the service was stopped)     [1] cron-seconds (1: a leading seconds field)
+//     [8 ..]   the request being judged, kept for the turn that sends it to the database (`o_kind` and the offsets below)
+//     tick     [state, cycle, not before (ms), deadline (ms), updates waiting, fired this cycle, errors this cycle]
+//     totals   [events fired, errors, missed fires skipped]
+//     rows     what the due rows of this cycle decided, for the updates that follow (8 integers each)
+//     slots    the requests to the database that wait for an answer, with the connection held for each (8 integers each)
+//
+// A request waits in a *slot*; the tag it was sent under comes back with the answer. The tick's tags (`tick_base`) and the requests' (`admin_base`)
+// are far above the history's (`history.query_base`) and the attempts' queries, so a tag says whose it is.
+
+pub fn catchup_at() -> [] int {
+    return 0;
+}
+
+pub fn seconds_at() -> [] int {
+    return 1;
+}
+
+pub fn o_kind() -> [] int {
+    return 8;
+}
+
+fn o_target() -> [] int {
+    return 9;
+}
+
+fn o_fields() -> [] int {
+    return 10;
+}
+
+fn o_enabled() -> [] int {
+    return 11;
+}
+
+fn o_expr_len() -> [] int {
+    return 12;
+}
+
+fn o_type_len() -> [] int {
+    return 13;
+}
+
+fn o_body_len() -> [] int {
+    return 14;
+}
+
+fn o_now() -> [] int {
+    return 15;
+}
+
+fn o_expr() -> [] int {
+    return 16;
+}
+
+fn o_type() -> [] int {
+    return o_expr() + 100;
+}
+
+fn o_body() -> [] int {
+    return o_type() + 64;
+}
+
+fn max_body() -> [] int {
+    return 1024;
+}
+
+fn o_tick() -> [] int {
+    return o_body() + max_body() + 8;
+}
+
+fn o_totals() -> [] int {
+    return o_tick() + 8;
+}
+
+fn o_spec() -> [] int {
+    return o_totals() + 8;
+}
+
+fn o_counter() -> [] int {
+    return o_spec() + 8;
+}
+
+fn rows_cap() -> [] int {
+    return 32;
+}
+
+fn o_rows() -> [] int {
+    return o_counter() + 8;
+}
+
+fn slots_cap() -> [] int {
+    return 16;
+}
+
+fn o_slots() -> [] int {
+    return o_rows() + rows_cap() * 8;
+}
+
+pub fn size() -> [] int {
+    return o_slots() + slots_cap() * 8;
+}
+
+// How long the tick waits between asking the database what is due, and how long an answer may take (ms).
+pub fn interval_ms() -> [] int {
+    return 1000;
+}
+
+fn wait_ms() -> [] int {
+    return 5000;
+}
+
+// A fire later than this many seconds after its scheduled second is a *missed* one (the service was stopped, or the database did not answer): the missed
+// ones of a schedule are not all fired, only the last of them, once, and only with `cron-catchup 1`. Earlier than that it is just late, and fires.
+pub fn grace_s() -> [] int {
+    return 10;
+}
+
+pub fn tick_base() -> [] int {
+    return 1099511627776;
+}
+
+pub fn admin_base() -> [] int {
+    return 2199023255552;
+}
+
+// The scheduled second that stands for "never again", for a row whose next fire there is none of.
+pub fn far() -> [] int {
+    return cron.far();
+}
+
+pub fn init[&s](sg: &!s [int], catchup: int, seconds: int) -> [] int {
+    var i = 0;
+    while i < size() {
+        sg[i] = 0;
+        i = i + 1;
+    }
+    sg[catchup_at()] = catchup;
+    sg[seconds_at()] = seconds;
+    return 0;
+}
+
+// ---- the totals, for GET /stats ----------------------------------------------------------------------------------------------
+
+pub fn fired[&s](sg: &s [int]) -> [] int {
+    return sg[o_totals()];
+}
+
+pub fn errors[&s](sg: &s [int]) -> [] int {
+    return sg[o_totals() + 1];
+}
+
+pub fn skipped[&s](sg: &s [int]) -> [] int {
+    return sg[o_totals() + 2];
+}
+
+pub fn count_fired[&s](sg: &!s [int]) -> [] int {
+    sg[o_totals()] = sg[o_totals()] + 1;
+    return 0;
+}
+
+pub fn count_error[&s](sg: &!s [int]) -> [] int {
+    sg[o_totals() + 1] = sg[o_totals() + 1] + 1;
+    sg[o_tick() + 6] = sg[o_tick() + 6] + 1;
+    return 0;
+}
+
+pub fn count_skipped[&s](sg: &!s [int]) -> [] int {
+    sg[o_totals() + 2] = sg[o_totals() + 2] + 1;
+    return 0;
+}
+
+// ---- judging a request -----------------------------------------------------------------------------------------------------
+
+// What was wrong with a request to create or change a schedule, by the code `judge` found; 100 and more are the expression's (`cron.why`).
+pub fn why(code: int) -> [] &static [byte] {
+    if code >= 100 {
+        return cron.why(code - 100);
+    }
+    if code == 1 {
+        return "the body must be a JSON object";
+    }
+    if code == 2 {
+        return "the schedule needs a string \"expr\": five fields, minute hour day-of-month month day-of-week";
+    }
+    if code == 3 {
+        return "the schedule needs a string \"type\" of 1 to 64 printable ASCII characters (the type of the events it makes)";
+    }
+    if code == 4 {
+        return "\"body\" must be JSON of at most 1024 bytes and 12 levels (it is the \"body\" of every event the schedule makes)";
+    }
+    if code == 5 {
+        return "\"enabled\" must be true or false";
+    }
+    if code == 6 {
+        return "a change needs at least one of \"expr\", \"type\", \"body\" and \"enabled\"";
+    }
+    return "the request is not valid";
+}
+
+fn printable[&t](text: &t [byte]) -> [] bool {
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c < 32 || c > 126 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Write the JSON value at node `i` of `tape` to `w`, compact. Strings are decoded and written again, so what is kept is what the parser understood; numbers keep
+// their text. Answers the writer and 0, or 1 if the value is nested deeper than 12 levels. `scratch` is as long as `src`.
+fn copy_value[&h, &s, &t, &c](heap: &!h Heap, w0: json.Writer, src: &s [byte], tape: &t [int], i: int, scratch: &!c [byte], depth: int) -> [heap] (json.Writer, int) {
+    var w = w0;
+    let k = json.kind(tape, i);
+    if k == json.kind_null() {
+        return (json.put_null(heap, w), 0);
+    }
+    if k == json.kind_false() {
+        return (json.put_bool(heap, w, false), 0);
+    }
+    if k == json.kind_true() {
+        return (json.put_bool(heap, w, true), 0);
+    }
+    if k == json.kind_int() || k == json.kind_float() {
+        return (json.put_fragment(heap, w, src[tape[3 * i + 1]..tape[3 * i + 2]]), 0);
+    }
+    if k == json.kind_string() {
+        let n = json.string_into(src, tape, i, scratch[0..len(src)]);
+        return (json.put_string(heap, w, scratch[0..n]), 0);
+    }
+    if depth >= 12 {
+        return (w, 1);
+    }
+    let count = json.count(tape, i);
+    var j = i + 1;
+    var left = count;
+    var code = 0;
+    if k == json.kind_array() {
+        w = json.begin_array(heap, w);
+        while left > 0 && code == 0 {
+            let (grown, c) = copy_value(heap, w, src, tape, j, scratch, depth + 1);
+            w = grown;
+            code = c;
+            j = json.skip(tape, j);
+            left = left - 1;
+        }
+        return (json.end_array(heap, w), code);
+    }
+    w = json.begin_object(heap, w);
+    while left > 0 && code == 0 {
+        let n = json.string_into(src, tape, j, scratch[0..len(src)]);
+        w = json.put_key(heap, w, scratch[0..n]);
+        let (grown, c) = copy_value(heap, w, src, tape, j + 1, scratch, depth + 1);
+        w = grown;
+        code = c;
+        j = json.skip(tape, j + 1);
+        left = left - 1;
+    }
+    return (json.end_object(heap, w), code);
+}
+
+fn put_bytes[&s, &t](sg: &!s [int], at: int, text: &t [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        sg[at + i] = int_of(text[i]);
+        i = i + 1;
+    }
+    return len(text);
+}
+
+fn bytes_of[&s, &o](sg: &s [int], at: int, count: int, out: &!o [byte]) -> [] int {
+    var i = 0;
+    while i < count {
+        out[i] = byte_of(sg[at + i]);
+        i = i + 1;
+    }
+    return count;
+}
+
+// Read `{"expr": "...", "type": "...", "body": <JSON>, "enabled": bool}` into the request block of `sg`. A new schedule needs `expr` and `type`; a change names
+// what it changes (`o_fields`: 1 expr, 2 type, 4 body, 8 enabled). Answers 0 or a code for `why`. Other members are ignored.
+fn parse_body[&h, &b, &c, &s](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], sg: &!s [int], create: bool) -> [heap] int {
+    var code = 0;
+    var fields = 0;
+    var expr_len = 0;
+    var type_len = 0;
+    var body_len = 0;
+    var enabled = 1;
+    let tape = box_slice(heap, json.tape_len(body), 0);
+    borrow mut tape as &!tw in {
+        let t = contents(tw);
+        if json.parse(body, t) < 0 || !json.is_object(t, 0) {
+            code = 1;
+        } else {
+            let e = json.get(body, t, 0, "expr");
+            if e >= 0 {
+                fields = fields + 1;
+            }
+            if e >= 0 || create {
+                if e < 0 || !json.is_string(t, e) {
+                    code = 2;
+                } else {
+                    expr_len = json.string_length(body, t, e);
+                    if expr_len > cron.max_len() {
+                        code = 106;
+                    } else {
+                        json.string_into(body, t, e, scratch[0..expr_len]);
+                        let seconds = sg[seconds_at()] == 1;
+                        let verdict = cron.valid(scratch[0..expr_len], seconds, sg[o_spec()..o_spec() + 8]);
+                        if verdict != 0 {
+                            code = 100 + verdict;
+                        } else {
+                            put_bytes(sg, o_expr(), scratch[0..expr_len]);
+                        }
+                    }
+                }
+            }
+            if code == 0 {
+                let k = json.get(body, t, 0, "type");
+                if k >= 0 {
+                    fields = fields + 2;
+                }
+                if k >= 0 || create {
+                    if k < 0 || !json.is_string(t, k) {
+                        code = 3;
+                    } else {
+                        type_len = json.string_length(body, t, k);
+                        if type_len < 1 || type_len > 64 {
+                            code = 3;
+                        } else {
+                            json.string_into(body, t, k, scratch[0..type_len]);
+                            if !printable(scratch[0..type_len]) {
+                                code = 3;
+                            } else {
+                                put_bytes(sg, o_type(), scratch[0..type_len]);
+                            }
+                        }
+                    }
+                }
+            }
+            if code == 0 {
+                let v = json.get(body, t, 0, "body");
+                if v >= 0 {
+                    fields = fields + 4;
+                    var w = json.writer(heap, 256);
+                    let (done, c) = copy_value(heap, w, body, t, v, scratch, 0);
+                    let text = json.finish(done);
+                    if c != 0 {
+                        code = 4;
+                    } else {
+                        borrow text as &tr in {
+                            body_len = buffer.size(tr);
+                            if body_len > max_body() {
+                                code = 4;
+                            } else {
+                                put_bytes(sg, o_body(), buffer.bytes(tr));
+                            }
+                        }
+                    }
+                    buffer.drop(heap, text);
+                } else if create {
+                    body_len = put_bytes(sg, o_body(), "{}");
+                }
+            }
+            if code == 0 {
+                let en = json.get(body, t, 0, "enabled");
+                if en >= 0 {
+                    fields = fields + 8;
+                    if !json.is_bool(t, en) {
+                        code = 5;
+                    } else if json.to_bool(t, en) {
+                        enabled = 1;
+                    } else {
+                        enabled = 0;
+                    }
+                }
+            }
+            if code == 0 && !create && fields == 0 {
+                code = 6;
+            }
+        }
+    }
+    unbox_slice(heap, tape);
+    if code != 0 {
+        return code;
+    }
+    sg[o_fields()] = fields;
+    sg[o_enabled()] = enabled;
+    sg[o_expr_len()] = expr_len;
+    sg[o_type_len()] = type_len;
+    sg[o_body_len()] = body_len;
+    return 0;
+}
+
+// A request on one of the five routes (15 `POST /schedules`, 16 `GET /schedules`, 17 `GET /schedules/:id`, 18 `PATCH`, 19 `DELETE`): refused at once, or
+// judged and kept in `sg` for the turn that sends it to the database (`note[0]` is then -4, and the answer comes later). `token` is the admin token as the
+// delivery state keeps it (`manage.authorize`); `database` says whether one was named; `now` is Unix seconds.
+pub fn judge[&h, &q, &t, &p, &r, &b, &c, &s, &n, &k](heap: &!h Heap, id: int, request: &q [byte], table: &t [int], path: &p [byte], params: &r [int], body: &b [byte], scratch: &!c [byte], sg: &!s [int], note: &!n [int], token: &k [int], database: bool, now: int, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
+    let auth = manage.authorize(request, table, token);
+    if auth == 1 {
+        return server.failure(heap, out, 403, "schedule management is off: the service was not given an admin-token", keep);
+    }
+    if auth == 2 {
+        return server.failure_with(heap, out, 401, "a valid bearer token is required", keep, "WWW-Authenticate: Bearer\r\n");
+    }
+    if !database {
+        return server.failure(heap, out, 503, "schedules are kept in the database and none is named (--pg-host)", keep);
+    }
+    var target = 0;
+    if id >= 17 {
+        target = route.param_nat(path, params, 0);
+        if target < 0 || target > 999999999999 {
+            return server.failure(heap, out, 400, "the id must be a number", keep);
+        }
+    }
+    sg[o_fields()] = 0;
+    sg[o_enabled()] = 1;
+    sg[o_expr_len()] = 0;
+    sg[o_type_len()] = 0;
+    sg[o_body_len()] = 0;
+    if id == 15 || id == 18 {
+        let code = parse_body(heap, body, scratch, sg, id == 15);
+        if code != 0 {
+            return server.failure(heap, out, 400, why(code), keep);
+        }
+    }
+    sg[o_kind()] = id - 14;
+    sg[o_target()] = target;
+    sg[o_now()] = now;
+    note[0] = 0 - 4;
+    return out;
+}
+
+// ---- the statement for a request, and the answer to it -----------------------------------------------------------------------
+
+// The encoded statement for the request kept in `sg`.
+pub fn request_for[&h, &s](heap: &!h Heap, sg: &s [int]) -> [heap] buffer.Buffer {
+    let kind = sg[o_kind()];
+    if kind == 2 {
+        return queries.schedules_all_start(heap);
+    }
+    if kind == 3 {
+        return queries.schedule_by_id_start(heap, sg[o_target()]);
+    }
+    if kind == 5 {
+        return queries.delete_schedule_start(heap, sg[o_target()]);
+    }
+    let fields = sg[o_fields()];
+    region a {
+        let expr = alloc_slice[a](100, byte_of(0));
+        let kind_text = alloc_slice[a](64, byte_of(0));
+        let text = alloc_slice[a](1024, byte_of(0));
+        let el = bytes_of(sg, o_expr(), sg[o_expr_len()], expr);
+        let tl = bytes_of(sg, o_type(), sg[o_type_len()], kind_text);
+        let bl = bytes_of(sg, o_body(), sg[o_body_len()], text);
+        if kind == 1 {
+            return queries.create_schedule_start(heap, expr[0..el], kind_text[0..tl], text[0..bl], sg[o_enabled()] == 1, sg[o_now()]);
+        }
+        return queries.patch_schedule_start(heap, sg[o_target()], expr[0..el], fields & 1 != 0, kind_text[0..tl], fields & 2 != 0, text[0..bl], fields & 4 != 0, sg[o_enabled()] == 1, fields & 8 != 0, sg[o_now()]);
+    }
+}
+
+// Every statement that answers with a schedule answers with the same eight columns (id, expr, event_type, body, enabled, created_at, last_fired,
+// next_fire), so one set of accessors reads them all.
+fn put_schedule[&h, &m](heap: &!h Heap, w0: json.Writer, rep: &m [byte], row: int, now: int, seconds: bool) -> [heap] json.Writer {
+    var w = w0;
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "id");
+    w = json.put_int(heap, w, queries.schedule_by_id_id(rep, row));
+    let (ea, eb) = queries.schedule_by_id_expr(rep, row);
+    w = json.put_key(heap, w, "expr");
+    w = json.put_string(heap, w, rep[ea..eb]);
+    let (ta, tb) = queries.schedule_by_id_event_type(rep, row);
+    w = json.put_key(heap, w, "type");
+    w = json.put_string(heap, w, rep[ta..tb]);
+    let (ba, bb) = queries.schedule_by_id_body(rep, row);
+    w = json.put_key(heap, w, "body");
+    w = json.put_fragment(heap, w, rep[ba..bb]);
+    let enabled = queries.schedule_by_id_enabled(rep, row);
+    w = json.put_key(heap, w, "enabled");
+    w = json.put_bool(heap, w, enabled);
+    w = json.put_key(heap, w, "created_at");
+    w = json.put_int(heap, w, queries.schedule_by_id_created_at(rep, row));
+    let fired = queries.schedule_by_id_last_fired(rep, row);
+    w = json.put_key(heap, w, "last_fired");
+    if fired > 0 {
+        w = json.put_int(heap, w, fired);
+    } else {
+        w = json.put_null(heap, w);
+    }
+    // The next fire is worked out here from the expression and the time, not read from the table: the table's is where the tick will look next, which for
+    // a schedule that is late or just changed is not what a person asks. A schedule that is disabled has none.
+    var next = 0 - 1;
+    region a {
+        let spec = alloc_slice[a](8, 0);
+        if enabled && cron.parse(rep[ea..eb], seconds, spec) == 0 {
+            next = cron.next_after(spec, now);
+        }
+        w = json.put_key(heap, w, "next_fire");
+        if next >= 0 {
+            w = json.put_int(heap, w, next);
+            let stamp = alloc_slice[a](24, byte_of(0));
+            w = json.put_key(heap, w, "next_fire_at");
+            w = json.put_string(heap, w, stamp[0..cron.iso(next, stamp)]);
+        } else {
+            w = json.put_null(heap, w);
+            w = json.put_key(heap, w, "next_fire_at");
+            w = json.put_null(heap, w);
+        }
+    }
+    return json.end_object(heap, w);
+}
+
+// The whole HTTP answer to the database's reply `rep` (`status` is the pool's: 0 if it has the reply) for a request of this `kind` and `target`.
+pub fn answer[&h, &m](heap: &!h Heap, kind: int, target: int, rep: &m [byte], status: int, keep: bool, now: int, seconds: bool) -> [heap] buffer.Buffer {
+    let out = buffer.empty(heap, 512);
+    if status != 0 || pg.failure(rep) >= 0 {
+        return server.failure(heap, out, 503, "the database could not answer", keep);
+    }
+    let row = pg.first_row(rep);
+    if kind == 2 {
+        var w = json.writer(heap, 4096);
+        w = json.begin_array(heap, w);
+        var at = row;
+        while at >= 0 {
+            w = put_schedule(heap, w, rep, at, now, seconds);
+            at = pg.next_row(rep, at);
+        }
+        w = json.end_array(heap, w);
+        let text = json.finish(w);
+        var built = out;
+        borrow text as &tr in {
+            built = server.reply(heap, built, 200, buffer.bytes(tr), keep);
+        }
+        buffer.drop(heap, text);
+        return built;
+    }
+    if row < 0 {
+        if kind == 1 {
+            return server.failure(heap, out, 409, "the service holds as many schedules as it can (64)", keep);
+        }
+        return server.failure(heap, out, 404, "no such schedule", keep);
+    }
+    var w = json.writer(heap, 512);
+    if kind == 5 {
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "id");
+        w = json.put_int(heap, w, target);
+        w = json.put_key(heap, w, "deleted");
+        w = json.put_bool(heap, w, true);
+        w = json.end_object(heap, w);
+    } else {
+        w = put_schedule(heap, w, rep, row, now, seconds);
+    }
+    let text = json.finish(w);
+    var status_code = 200;
+    if kind == 1 {
+        status_code = 201;
+    }
+    var built = out;
+    borrow text as &tr in {
+        built = server.reply(heap, built, status_code, buffer.bytes(tr), keep);
+    }
+    buffer.drop(heap, text);
+    return built;
+}
+
+// ---- the slots of requests that wait for the database ------------------------------------------------------------------------
+
+// A free slot, or -1.
+pub fn free_slot[&s](sg: &s [int]) -> [] int {
+    var k = 0;
+    while k < slots_cap() {
+        if sg[o_slots() + 8 * k] == 0 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+// The tag for the next request to the database: `admin_base` and a count.
+pub fn fresh_tag[&s](sg: &!s [int]) -> [] int {
+    sg[o_counter()] = sg[o_counter()] + 1;
+    return admin_base() + sg[o_counter()];
+}
+
+// Remember that the request in `sg` was sent under `tag`, and that `ticket` is the connection held for it.
+pub fn hold[&s](sg: &!s [int], slot: int, tag: int, ticket: int, keep: bool, deadline: int) -> [] int {
+    let b = o_slots() + 8 * slot;
+    sg[b] = tag;
+    sg[b + 1] = ticket;
+    if keep {
+        sg[b + 2] = 1;
+    } else {
+        sg[b + 2] = 0;
+    }
+    sg[b + 3] = deadline;
+    sg[b + 4] = sg[o_kind()];
+    sg[b + 5] = sg[o_target()];
+    return 0;
+}
+
+pub fn deadline_for(now_ms: int) -> [] int {
+    return now_ms + wait_ms();
+}
+
+pub fn is_admin(tag: int) -> [] bool {
+    return tag >= admin_base();
+}
+
+pub fn is_tick(tag: int) -> [] bool {
+    return tag >= tick_base() && tag < admin_base();
+}
+
+// The slot waiting for `tag`, or -1 (a slot that timed out is free, and its late answer is not found).
+pub fn find_slot[&s](sg: &s [int], tag: int) -> [] int {
+    var k = 0;
+    while k < slots_cap() {
+        if sg[o_slots() + 8 * k] == tag {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn slot_ticket[&s](sg: &s [int], slot: int) -> [] int {
+    return sg[o_slots() + 8 * slot + 1];
+}
+
+pub fn slot_keep[&s](sg: &s [int], slot: int) -> [] bool {
+    return sg[o_slots() + 8 * slot + 2] == 1;
+}
+
+pub fn slot_kind[&s](sg: &s [int], slot: int) -> [] int {
+    return sg[o_slots() + 8 * slot + 4];
+}
+
+pub fn slot_target[&s](sg: &s [int], slot: int) -> [] int {
+    return sg[o_slots() + 8 * slot + 5];
+}
+
+pub fn slot_free[&s](sg: &!s [int], slot: int) -> [] int {
+    sg[o_slots() + 8 * slot] = 0;
+    return 0;
+}
+
+// The slot whose answer is overdue at `now_ms`, from `from` on, or -1.
+pub fn overdue[&s](sg: &s [int], now_ms: int, from: int) -> [] int {
+    var k = from;
+    while k < slots_cap() {
+        if sg[o_slots() + 8 * k] != 0 && now_ms >= sg[o_slots() + 8 * k + 3] {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
+}
+
+// ---- the tick ---------------------------------------------------------------------------------------------------------------
+
+// Is it time to ask the database what is due: nothing is waiting for it, and the wait since the last cycle is over?
+pub fn tick_due[&s](sg: &s [int], now_ms: int) -> [] bool {
+    return sg[o_tick()] == 0 && now_ms >= sg[o_tick() + 2];
+}
+
+// A cycle starts: the tag its select goes under (the updates that follow use the tags after it), and the deadline for the answer.
+pub fn tick_begin[&s](sg: &!s [int], now_ms: int) -> [] int {
+    sg[o_tick() + 1] = sg[o_tick() + 1] + 1;
+    sg[o_tick()] = 1;
+    sg[o_tick() + 3] = now_ms + wait_ms();
+    sg[o_tick() + 4] = 0;
+    sg[o_tick() + 5] = 0;
+    sg[o_tick() + 6] = 0;
+    return tick_base() + 64 * sg[o_tick() + 1];
+}
+
+// The select could not be sent: try again after the interval.
+pub fn tick_unsent[&s](sg: &!s [int], now_ms: int) -> [] int {
+    sg[o_tick()] = 0;
+    sg[o_tick() + 2] = now_ms + interval_ms();
+    return 0;
+}
+
+// 0 nothing in flight, 1 the select is, 2 the updates are.
+pub fn tick_state[&s](sg: &s [int]) -> [] int {
+    return sg[o_tick()];
+}
+
+// Which part of the current cycle `tag` is: 0 the select, 1 and more an update, -1 not this cycle's.
+pub fn tick_part[&s](sg: &s [int], tag: int) -> [] int {
+    let cycle = (tag - tick_base()) / 64;
+    if cycle != sg[o_tick() + 1] {
+        return 0 - 1;
+    }
+    return (tag - tick_base()) % 64;
+}
+
+pub fn tick_tag[&s](sg: &s [int], part: int) -> [] int {
+    return tick_base() + 64 * sg[o_tick() + 1] + part;
+}
+
+// The cycle is over: wait the interval, unless it made progress (fired, or skipped what was missed) and met no error, in which case look again at once. A
+// backlog of fires that are late but not missed takes more than one cycle (one fire per schedule per cycle), and the ones after skipped fires are judged
+// again at the same second, not an interval later, when they might have aged into the missed.
+pub fn tick_end[&s](sg: &!s [int], now_ms: int) -> [] int {
+    sg[o_tick()] = 0;
+    if sg[o_tick() + 5] > 0 && sg[o_tick() + 6] == 0 {
+        sg[o_tick() + 2] = 0;
+    } else {
+        sg[o_tick() + 2] = now_ms + interval_ms();
+    }
+    return 0;
+}
+
+pub fn tick_updates[&s](sg: &!s [int], waiting: int, now_ms: int) -> [] int {
+    sg[o_tick()] = 2;
+    sg[o_tick() + 4] = waiting;
+    sg[o_tick() + 3] = now_ms + wait_ms();
+    return 0;
+}
+
+// One update has been answered: how many are still to come.
+pub fn tick_answered[&s](sg: &!s [int]) -> [] int {
+    if sg[o_tick() + 4] > 0 {
+        sg[o_tick() + 4] = sg[o_tick() + 4] - 1;
+    }
+    return sg[o_tick() + 4];
+}
+
+// The cycle moved a schedule on (a fire, or missed ones skipped): the next cycle is not waited for.
+pub fn tick_progress[&s](sg: &!s [int]) -> [] int {
+    sg[o_tick() + 5] = sg[o_tick() + 5] + 1;
+    return 0;
+}
+
+// The cycle in flight has waited too long (a select or an update the database did not answer): give it up. Whatever was not answered is found again
+// by the next cycle (the row is still due), and a fire already in the log is not made twice (its key is in the index).
+pub fn tick_expire[&s](sg: &!s [int], now_ms: int) -> [] bool {
+    if sg[o_tick()] != 0 && now_ms >= sg[o_tick() + 3] {
+        sg[o_tick()] = 0;
+        sg[o_tick() + 2] = now_ms + interval_ms();
+        sg[o_totals() + 1] = sg[o_totals() + 1] + 1;
+        return true;
+    }
+    return false;
+}
+
+// Rows: what the cycle decided for each due row, for the updates after the fires. `action`: 0 the row is wrong (park it), 1 only work out its next fire,
+// 2 it fired `second`, 3 its missed fires were skipped.
+pub fn row_put[&s](sg: &!s [int], j: int, id: int, base: int, was_next: int, second: int, next: int) -> [] int {
+    let b = o_rows() + 8 * j;
+    sg[b] = id;
+    sg[b + 1] = base;
+    sg[b + 2] = was_next;
+    sg[b + 3] = second;
+    sg[b + 4] = next;
+    return 0;
+}
+
+pub fn row_id[&s](sg: &s [int], j: int) -> [] int {
+    return sg[o_rows() + 8 * j];
+}
+
+pub fn row_base[&s](sg: &s [int], j: int) -> [] int {
+    return sg[o_rows() + 8 * j + 1];
+}
+
+pub fn row_was_next[&s](sg: &s [int], j: int) -> [] int {
+    return sg[o_rows() + 8 * j + 2];
+}
+
+pub fn row_second[&s](sg: &s [int], j: int) -> [] int {
+    return sg[o_rows() + 8 * j + 3];
+}
+
+pub fn row_next[&s](sg: &s [int], j: int) -> [] int {
+    return sg[o_rows() + 8 * j + 4];
+}
+
+pub fn rows_most() -> [] int {
+    return rows_cap();
+}
+
+// What a due row means, as `(action, second, next)`: the row is `row` of the reply of `queries.schedules_due`, `now` is Unix seconds.
+//
+//   * its expression does not parse (a row that somebody wrote by hand, or the service switched `cron-seconds`): action 0, parked (`next` is `cron.far()`,
+//     so no query for what is due finds it again until it is changed or enabled again);
+//   * `next_fire` is 0 (a new schedule, a changed expression, a schedule enabled again): work it out from `base`, action 1;
+//   * the next fire is in the future (it was only being worked out): action 1;
+//   * the next fire is at most `grace_s()` seconds ago: it fires, action 2 with that second, and `next` is the one after;
+//   * it is further back (the service was stopped, or the database did not answer): the last of the scheduled seconds up to `grace_s()` ago is the one fire
+//     for the whole window, action 2, or with `cron-catchup 0` none, action 3; either way `next` is the first one after it, which may be inside the grace
+//     and then fires on the next cycle.
+pub fn plan[&m, &s](rep: &m [byte], row: int, now: int, sg: &!s [int]) -> [] (int, int, int) {
+    let (ea, eb) = queries.schedules_due_expr(rep, row);
+    let seconds = sg[seconds_at()] == 1;
+    if cron.parse(rep[ea..eb], seconds, sg[o_spec()..o_spec() + 8]) != 0 {
+        return (0, 0, cron.far());
+    }
+    let base = queries.schedules_due_base(rep, row);
+    var n = queries.schedules_due_next_fire(rep, row);
+    if n == 0 {
+        n = cron.next_after(sg[o_spec()..o_spec() + 8], base);
+    }
+    if n < 0 {
+        return (1, 0, cron.far());
+    }
+    if n > now {
+        return (1, 0, n);
+    }
+    if now - n > grace_s() {
+        var last = cron.prev_upto(sg[o_spec()..o_spec() + 8], now - grace_s() - 1);
+        if last < n {
+            last = n;
+        }
+        var after = cron.next_after(sg[o_spec()..o_spec() + 8], last);
+        if after < 0 {
+            after = cron.far();
+        }
+        if sg[catchup_at()] == 1 {
+            return (2, last, after);
+        }
+        return (3, 0, after);
+    }
+    var after = cron.next_after(sg[o_spec()..o_spec() + 8], n);
+    if after < 0 {
+        after = cron.far();
+    }
+    return (2, n, after);
+}
+
+// The idempotency key of a fire, `cron:<id>:<second>`, written to the front of `out`: its length.
+pub fn key_into[&o](out: &!o [byte], id: int, second: int) -> [] int {
+    var n = 0;
+    let prefix = "cron:";
+    while n < len(prefix) {
+        out[n] = byte_of(int_of(prefix[n]));
+        n = n + 1;
+    }
+    n = n + number_into(out, n, id);
+    out[n] = byte_of(':');
+    n = n + 1;
+    n = n + number_into(out, n, second);
+    return n;
+}
+
+fn number_into[&o](out: &!o [byte], at: int, value: int) -> [] int {
+    var digits = 0;
+    var k = value;
+    while k > 0 {
+        digits = digits + 1;
+        k = k / 10;
+    }
+    if digits == 0 {
+        digits = 1;
+    }
+    var m = value;
+    var j = digits;
+    while j > 0 {
+        out[at + j - 1] = byte_of('0' + m % 10);
+        m = m / 10;
+        j = j - 1;
+    }
+    return digits;
+}

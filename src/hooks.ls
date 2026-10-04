@@ -46,6 +46,7 @@ import endpoints;
 import config;
 import sign;
 import state;
+import sched;
 
 fn max_len() -> [] int {
     return 65536;
@@ -258,14 +259,42 @@ fn event_record[&c, &b, &k](scratch: &!c [byte], ms: int, body: &b [byte], key: 
     return record.seal(scratch, 0, end);
 }
 
+// Append the event `body` (already judged) to the log, under `key` if it is `keyed`, and note the key in the index. This is the whole of storing an event: `POST /events`
+// and a schedule's fire (`fire_cron`) both end here, so a fire is an ordinary event. `sum` is the CRC-32C of `body`, `entry` the index entry of a key that is
+// held (an expired one, whose entry is overwritten) or -1. Answers `(code, id)`: 0 and the event's id, or what `log.append` refused with.
+fn store_event[&c, &b, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], now: int) -> [file_write] (int, int) {
+    var ms = 1;
+    if log.last_ms(lg) >= 1 {
+        ms = log.last_ms(lg) + 1;
+    }
+    let total = event_record(scratch, ms, body, key, keyed, now);
+    let code = log.append(lg, scratch[0..total], ms, 0);
+    if code != 0 {
+        return (code, 0);
+    }
+    if keyed {
+        // Only now that the record is appended: the index never holds a key the log does not.
+        var e = entry;
+        if e < 0 {
+            e = idem.add(ix, arena, key);
+        }
+        idem.set(ix, e, ms, now, sum, len(body));
+    }
+    return (0, ms);
+}
+
 // One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
 // `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
 // `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
     let id = route.find(router, http.method(request, table), path, params);
+    if id >= 15 && id <= 19 {
+        // /schedules (`docs/design.md` section 32): judged here, sent to the database by the loop (`note[0]` is -4), the answer held.
+        return sched.judge(heap, id, request, table, path, params, body, scratch, sg, note, stats[off_token()..off_token() + manage.token_size()], history.enabled(stats[off_hq()..off_hq() + history.size()]), now / 1000, keep, out);
+    }
     if id == 1 {
         return server.reply(heap, out, 200, "{\"ok\":true}", keep);
     }
@@ -303,26 +332,14 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
                 return server.failure(heap, out, 507, "too many Idempotency-Keys are held", keep);
             }
         }
-        var ms = 1;
-        if log.last_ms(lg) >= 1 {
-            ms = log.last_ms(lg) + 1;
-        }
-        let total = event_record(scratch, ms, body, key, keyed, now);
-        let code = log.append(lg, scratch[0..total], ms, 0);
-        if code == log.too_long() {
+        let stored = store_event(scratch, body, key, keyed, sum, entry, lg, ix, arena, now);
+        if stored.0 == log.too_long() {
             return server.failure(heap, out, 413, "the event is too large", keep);
         }
-        if code != 0 {
+        if stored.0 != 0 {
             return server.failure(heap, out, 503, "the event could not be stored", keep);
         }
-        if keyed {
-            // Only now that the record is appended: the index never holds a key the log does not.
-            if entry < 0 {
-                entry = idem.add(ix, arena, key);
-            }
-            idem.set(ix, entry, ms, now, sum, len(body));
-        }
-        note[0] = ms;
+        note[0] = stored.1;
         return out;
     }
     if id == 3 {
@@ -379,6 +396,12 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, history.failed(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_dropped");
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "cron_fired");
+        w = json.put_int(heap, w, sched.fired(sg));
+        w = json.put_key(heap, w, "cron_errors");
+        w = json.put_int(heap, w, sched.errors(sg));
+        w = json.put_key(heap, w, "cron_skipped");
+        w = json.put_int(heap, w, sched.skipped(sg));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -409,6 +432,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z](heap: &!h Heap
         w = json.put_int(heap, w, stats[c_private()]);
         w = json.put_key(heap, w, "breaker-days");
         w = json.put_int(heap, w, stats[c_breaker()]);
+        w = json.put_key(heap, w, "cron-catchup");
+        w = json.put_int(heap, w, sg[sched.catchup_at()]);
+        w = json.put_key(heap, w, "cron-seconds");
+        w = json.put_int(heap, w, sg[sched.seconds_at()]);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -731,6 +758,11 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/endpoints/:id", 12);
     r = route.add(heap, r, "PATCH", "/endpoints/:id", 13);
     r = route.add(heap, r, "DELETE", "/endpoints/:id", 14);
+    r = route.add(heap, r, "POST", "/schedules", 15);
+    r = route.add(heap, r, "GET", "/schedules", 16);
+    r = route.add(heap, r, "GET", "/schedules/:id", 17);
+    r = route.add(heap, r, "PATCH", "/schedules/:id", 18);
+    r = route.add(heap, r, "DELETE", "/schedules/:id", 19);
     return r;
 }
 
@@ -1905,6 +1937,194 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 }
 
 // ---------------------------------------------------------------------
+// Schedules (`docs/design.md` section 32)
+// ---------------------------------------------------------------------
+
+// One fire of the schedule in row `row` of the reply `rep` of the query for what is due: the ordinary event
+// `{"type": <type>, "schedule": <id>, "scheduled_at": <second>, "body": <body>}`, stored by `store_event` (the path of `POST /events`) under the idempotency
+// key `cron:<id>:<second>`. A key that the index holds means the event is in the log already: a fire whose update the database never saw because the service was
+// stopped between the two, and nothing is appended (this is the whole of "exactly once"; the key is held whatever its age). Answers 0 (the event is in
+// the log, now or before), 1 (the schedule cannot make an event: its type or body is not what the service wrote, or the event is too large), or 2 (the
+// log or the key index would not take it: the row stays due).
+fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l log.Log, ix: &!x [int], arena: &!y [byte]) -> [heap, file_write] int {
+    let id = queries.schedules_due_id(rep, row);
+    var outcome = 2;
+    region a {
+        let key_buf = alloc_slice[a](64, byte_of(0));
+        let key = key_buf[0..sched.key_into(key_buf, id, second)];
+        if idem.find(ix, arena, key) >= 0 {
+            return 0;
+        }
+        if idem.count(ix) >= idem.capacity() {
+            return 2;
+        }
+        let (ta, tb) = queries.schedules_due_event_type(rep, row);
+        let (ba, bb) = queries.schedules_due_body(rep, row);
+        var w = json.writer(heap, 256);
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "type");
+        w = json.put_string(heap, w, rep[ta..tb]);
+        w = json.put_key(heap, w, "schedule");
+        w = json.put_int(heap, w, id);
+        w = json.put_key(heap, w, "scheduled_at");
+        w = json.put_int(heap, w, second);
+        w = json.put_key(heap, w, "body");
+        w = json.put_fragment(heap, w, rep[ba..bb]);
+        w = json.end_object(heap, w);
+        let event = json.finish(w);
+        borrow event as &er in {
+            let text = buffer.bytes(er);
+            if len(invalid_event(heap, text)) > 0 {
+                outcome = 1;
+            } else {
+                let stored = store_event(scratch, text, key, true, crc.of(text), 0 - 1, lg, ix, arena, now);
+                if stored.0 == 0 {
+                    outcome = 0;
+                } else if stored.0 == log.too_long() {
+                    outcome = 1;
+                }
+            }
+        }
+        buffer.drop(heap, event);
+    }
+    return outcome;
+}
+
+// The rows of the tick's select (`rep`): each is judged (`sched.plan`), the ones that fire are appended to the log (not yet flushed), and what each decided is kept
+// in `sg` for `tick_send`. Answers how many rows are kept and how many events are in the log for them. A row whose event the log would not take is left as it
+// is, and so is due again at the next cycle.
+fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms: int, scratch: &!c [byte], lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], sg: &!s [int]) -> [heap, file_write] (int, int) {
+    var kept = 0;
+    var appended = 0;
+    var row = pg.first_row(rep);
+    while row >= 0 && kept < sched.rows_most() {
+        let id = queries.schedules_due_id(rep, row);
+        let base = queries.schedules_due_base(rep, row);
+        let was = queries.schedules_due_next_fire(rep, row);
+        let (action, second, after) = sched.plan(rep, row, unix_ms / 1000, sg);
+        var keep_row = true;
+        var fired = 0;
+        var next = after;
+        if action == 2 {
+            let done = fire_cron(heap, rep, row, second, unix_ms, scratch, lg, ix, arena);
+            if done == 0 {
+                fired = second;
+                appended = appended + 1;
+                sched.tick_progress(sg);
+            } else if done == 1 {
+                // An event that cannot be made is parked, as a row that does not parse is.
+                sched.count_error(sg);
+                next = sched.far();
+            } else {
+                sched.count_error(sg);
+                keep_row = false;
+            }
+        } else if action == 0 {
+            sched.count_error(sg);
+        } else if action == 3 {
+            sched.count_skipped(sg);
+            sched.tick_progress(sg);
+        }
+        if keep_row {
+            sched.row_put(sg, kept, id, base, was, fired, next);
+            kept = kept + 1;
+        }
+        row = pg.next_row(rep, row);
+    }
+    return (kept, appended);
+}
+
+// One flush for every event the cycle appended, and only after it the updates that say so (`advance_schedule`: a compare-and-set on the row as it was read,
+// so a change made meanwhile is not overwritten). If the flush fails the fires are not recorded and the rows stay due; the keys are in the index, so the
+// next cycle will not append them again.
+fn tick_send[&h, &q, &l, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l log.Log, sg: &!s [int], kept: int, appended: int, mono_ms: int) -> [heap, file_write] int {
+    var flushed = true;
+    if appended > 0 && log.flush(lg) != 0 {
+        flushed = false;
+        sched.count_error(sg);
+    }
+    var waiting = 0;
+    var j = 0;
+    while j < kept {
+        let second = sched.row_second(sg, j);
+        if second == 0 || flushed {
+            let request = queries.advance_schedule_start(heap, sched.row_id(sg, j), sched.row_base(sg, j), sched.row_was_next(sg, j), second, sched.row_next(sg, j));
+            var sent = 0 - 1;
+            borrow request as &rb in {
+                sent = pool.submit(qw, sched.tick_tag(sg, 1 + j), buffer.bytes(rb));
+            }
+            buffer.drop(heap, request);
+            if sent == 0 {
+                waiting = waiting + 1;
+                if second > 0 {
+                    sched.count_fired(sg);
+                }
+            } else {
+                sched.count_error(sg);
+            }
+        }
+        j = j + 1;
+    }
+    if waiting == 0 {
+        sched.tick_end(sg, mono_ms);
+    } else {
+        sched.tick_updates(sg, waiting, mono_ms);
+    }
+    return 0;
+}
+
+// The pool has answered a request the tick sent: the select (part 0) names what is due, an update (part 1 and up) only counts the cycle down. An answer to a
+// cycle that was given up (it took too long) is not this cycle's and is dropped.
+fn tick_answer[&h, &q, &l, &x, &y, &c, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], scratch: &!c [byte], sg: &!s [int], tag: int, unix_ms: int, mono_ms: int) -> [heap, file_write] int {
+    let part = sched.tick_part(sg, tag);
+    if part < 0 {
+        return 0;
+    }
+    var failed = pool.status(qw) != 0 || pg.failure(pool.reply(qw)) >= 0;
+    if part > 0 {
+        if sched.tick_state(sg) == 2 {
+            if failed {
+                sched.count_error(sg);
+            }
+            if sched.tick_answered(sg) == 0 {
+                sched.tick_end(sg, mono_ms);
+            }
+        }
+        return 0;
+    }
+    if sched.tick_state(sg) != 1 {
+        return 0;
+    }
+    if failed {
+        sched.count_error(sg);
+        sched.tick_end(sg, mono_ms);
+        return 0;
+    }
+    let (kept, appended) = tick_rows(heap, pool.reply(qw), unix_ms, scratch, lg, ix, arena, sg);
+    return tick_send(heap, qw, lg, sg, kept, appended, mono_ms);
+}
+
+// Start a cycle if it is time: ask the database for the schedules that are due. A cycle that is overdue is given up first.
+fn tick_start[&h, &q, &s](heap: &!h Heap, qw: &!q pool.Pool, sg: &!s [int], unix_ms: int, mono_ms: int) -> [heap] int {
+    sched.tick_expire(sg, mono_ms);
+    if !sched.tick_due(sg, mono_ms) {
+        return 0;
+    }
+    let tag = sched.tick_begin(sg, mono_ms);
+    let request = queries.schedules_due_start(heap, unix_ms / 1000);
+    var sent = 0 - 1;
+    borrow request as &rb in {
+        sent = pool.submit(qw, tag, buffer.bytes(rb));
+    }
+    buffer.drop(heap, request);
+    if sent != 0 {
+        sched.count_error(sg);
+        sched.tick_unsent(sg, mono_ms);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------
 
@@ -1912,7 +2132,7 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], io: &!o Io, pl0: pool.Pool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), net_out(""), err_write] int {
+fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), net_out(""), err_write] int {
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
@@ -1965,7 +2185,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..dv_size()], ix, arena, clock_unix_ms(clock), out);
+                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..dv_size()], ix, arena, sg, clock_unix_ms(clock), out);
                                     }
                                 }
                             }
@@ -1976,6 +2196,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                         var accepted = 0 - 1;
                         var asked = 0 - 1;
                         var creating = false;
+                        var scheduling = false;
                         borrow note as &nr in {
                             accepted = contents(nr)[0];
                             if contents(nr)[0] == 0 - 2 {
@@ -1983,6 +2204,9 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                             }
                             if contents(nr)[0] == 0 - 3 {
                                 creating = true;
+                            }
+                            if contents(nr)[0] == 0 - 4 {
+                                scheduling = true;
                             }
                         }
                         if creating {
@@ -2070,6 +2294,35 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                                 next_tag = next_tag + 1;
                             } else {
                                 out = server.failure(heap, out, 503, "the history cannot be read now", keep == 1);
+                                borrow mut srv as &!sw in {
+                                    borrow out as &ob in {
+                                        server.respond(sw, buffer.bytes(ob));
+                                    }
+                                }
+                            }
+                        } else if scheduling {
+                            // A request about schedules (`sched.judge` kept it in `sg`): send it to the database and hold the connection until the answer
+                            // comes (`sched.answer`), or say at once that it cannot be done (every slot taken, the pool full, no connection live).
+                            var sent = 0 - 1;
+                            let slot = sched.free_slot(sg);
+                            let tag = sched.fresh_tag(sg);
+                            if slot >= 0 {
+                                let request = sched.request_for(heap, sg);
+                                borrow request as &rb in {
+                                    borrow mut pl as &!qw in {
+                                        sent = pool.submit(qw, tag, buffer.bytes(rb));
+                                    }
+                                }
+                                buffer.drop(heap, request);
+                            }
+                            if sent == 0 {
+                                var ticket = 0 - 1;
+                                borrow mut srv as &!sw in {
+                                    ticket = server.hold(sw);
+                                }
+                                sched.hold(sg, slot, tag, ticket, keep == 1, sched.deadline_for(clock_ms(clock)));
+                            } else {
+                                out = server.failure(heap, out, 503, "the schedule cannot be stored now", keep == 1);
                                 borrow mut srv as &!sw in {
                                     borrow out as &ob in {
                                         server.respond(sw, buffer.bytes(ob));
@@ -2196,6 +2449,22 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                                     }
                                     buffer.drop(heap, created);
                                     dv[off_mg() + manage.mg_state()] = 0;
+                                } else if sched.is_tick(tag) {
+                                    // the answer to what the tick asked the database: what is due, or that an update was made
+                                    borrow mut scratch as &!cw in {
+                                        tick_answer(heap, qw, lg, ix, arena, contents(cw), sg, tag, clock_unix_ms(clock), clock_ms(clock));
+                                    }
+                                } else if sched.is_admin(tag) {
+                                    // the database has answered a request about schedules: the held connection gets the answer
+                                    let slots = sched.find_slot(sg, tag);
+                                    if slots >= 0 {
+                                        let reply = sched.answer(heap, sched.slot_kind(sg, slots), sched.slot_target(sg, slots), pool.reply(qw), pool.status(qw), sched.slot_keep(sg, slots), clock_unix_ms(clock) / 1000, sg[sched.seconds_at()] == 1);
+                                        borrow reply as &rb in {
+                                            server.answer(sw, sched.slot_ticket(sg, slots), buffer.bytes(rb));
+                                        }
+                                        buffer.drop(heap, reply);
+                                        sched.slot_free(sg, slots);
+                                    }
                                 } else if tag < history.query_base() {
                                     history.account(qw, dv[off_hq()..off_hq() + history.size()]);
                                 } else {
@@ -2264,6 +2533,19 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &o](heap: &!h Heap, r
                                 buffer.drop(heap, late);
                                 dv[off_mg() + manage.mg_state()] = 0;
                             }
+                            // the requests about schedules that the database has not answered in time are answered now, and forgotten
+                            var stale = sched.overdue(sg, now_ms, 0);
+                            while stale >= 0 {
+                                let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the change may still have been stored", sched.slot_keep(sg, stale));
+                                borrow late as &lb in {
+                                    server.answer(sw, sched.slot_ticket(sg, stale), buffer.bytes(lb));
+                                }
+                                buffer.drop(heap, late);
+                                sched.slot_free(sg, stale);
+                                stale = sched.overdue(sg, now_ms, stale);
+                            }
+                            // the schedules (`docs/design.md` section 32): ask the database what is due, if it is time
+                            tick_start(heap, qw, sg, clock_unix_ms(clock), now_ms);
                             history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
                             pool.flush(qw, server.poller(sw));
                         }
@@ -3085,7 +3367,7 @@ fn main(world: World) -> [] int {
                     } else if got == 0 - 2 {
                         say(i, "cannot log in\n");
                     } else if got == 0 - 3 {
-                        say(i, "the query failed (is the endpoints table there? sql/schema.sql)\n");
+                        say(i, "the query failed (are the tables there? apply sql/schema.sql: endpoints, attempts and schedules)\n");
                     } else if got == 0 - 4 {
                         say(i, "a row has an empty field or a byte that is not printable\n");
                     } else {
@@ -3142,6 +3424,7 @@ fn main(world: World) -> [] int {
                 let blob = box_slice(h, endpoints.text_limit(), byte_of(0));
                 let ixb = box_slice(h, idem.ix_size(), 0);
                 let arenab = box_slice(h, idem.arena_size(), byte_of(0));
+                let sgb = box_slice(h, sched.size(), 0);
                 borrow mut wbuf as &!wb in {
                     borrow fs as &fsr in {
                         match open_log(fsr, dir_buf[0..dir_len], "events.seg", buffer.room(wb)) {
@@ -3194,10 +3477,13 @@ fn main(world: World) -> [] int {
                                                                                     borrow mut io as &!i in {
                                                                                         io.error_all(i, "listening\n");
                                                                                     }
-                                                                                    borrow router as &r in {
-                                                                                        borrow clock as &c in {
-                                                                                            borrow mut io as &!iw in {
-                                                                                                status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), iw, hpool);
+                                                                                    borrow mut sgb as &!sgw in {
+                                                                                        sched.init(contents(sgw), config.cron_catchup(cfg), config.cron_seconds(cfg));
+                                                                                        borrow router as &r in {
+                                                                                            borrow clock as &c in {
+                                                                                                borrow mut io as &!iw in {
+                                                                                                    status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool);
+                                                                                                }
                                                                                             }
                                                                                         }
                                                                                     }
@@ -3230,6 +3516,7 @@ fn main(world: World) -> [] int {
                 unbox_slice(h, blob);
                 unbox_slice(h, ixb);
                 unbox_slice(h, arenab);
+                unbox_slice(h, sgb);
             }
         }
     }
