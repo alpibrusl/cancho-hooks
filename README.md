@@ -6,9 +6,9 @@ A webhook delivery service, written in [lex-sys](https://github.com/alpibrusl/le
 event durably, and it delivers the event, **signed**, to every subscribed endpoint, **at least once**, retrying on a schedule
 and keeping what it could not deliver as a dead letter.
 
-It is also the realistic program that uses the whole stack ([`lexsys-log`](https://github.com/alpibrusl/lexsys-log) today;
-`lexsys-web`, `lexsys-schema`, `lexsys-pg` and `lexsys-cache` as it grows) so that what is missing shows up as a failing test
-rather than a guess. No `Ffi`, no `unsafe`; the authority report names what the program can do.
+It keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and talks to PostgreSQL through
+[`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `Ffi`, no `unsafe`: the authority report (`lex-sys authority`) names what
+the program can do.
 
 ## Status
 
@@ -227,6 +227,7 @@ python3 tests/isolation_test.py build/hooks        # what a silent, slow or unre
 python3 tests/chaos.py build/hooks 2000 8 50       # kill -9 as a power cut: no acknowledged event may be lost
 python3 tests/delivery.py build/hooks 300 4 150    # three endpoints, signed, retried and dead-lettered, with the service killed
 FULL=1 python3 tests/idempotency_test.py build/hooks   # idempotency keys: the contract, restarts, chaos, a broken log, a full index
+HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/backup_test.py build/hooks    # backup and restore: total loss, kill -9 under online backups, every refusal (docs/runbook.md section 4)
 ```
 
 The crash tests emulate a power cut with a small `LD_PRELOAD` shim (`tests/fsync_shim.c`): a plain `kill -9` cannot show a
@@ -234,6 +235,8 @@ missing flush, because the kernel keeps every byte the process wrote. `tests/sta
 
 ## Documentation
 
+- [`docs/runbook.md`](docs/runbook.md): running it: start and stop, the settings, what every log line and `/stats` field means, backup and restore (and whether the online variant is safe), upgrading, what to do when it goes wrong, the known limits. Parts that depend on work that is not built are marked planned.
+- [`docs/production.md`](docs/production.md): what "production" means here, the plan to get there, and the status of each item.
 - [`docs/design.md`](docs/design.md): what this is for, which store owns which fact, the delivery semantics, the test scenario
   fixed before the build, the gaps predicted, and sections 13 to 25 on what building each step showed. (Its first sections are the plan; where a later section says otherwise, the later one is what was built.)
 
@@ -254,6 +257,9 @@ src/view.ls        what the database says, as an HTTP answer
 src/sign.ls        HMAC-SHA256, base64 and the Standard Webhooks signature
 lex-sys.toml       the project file: the compiler, the two libraries (each pinned to a commit) and the programs
 scripts/build.sh   `lex-sys build`, and the fsync shim the crash tests preload
+scripts/backup.sh, restore.sh, logcheck.py   backup and restore of the two logs (and the tables), and the checker that refuses an inconsistent pair
+scripts/release.sh a tarball, SHA256SUMS and an SBOM stub
+Dockerfile, deploy/   the container image; the systemd unit, a settings sample and the container's health check
 tests/             unit tests (lex-sys) and harnesses (Python)
 docs/design.md     the design and what building it found
 ```

@@ -1,0 +1,94 @@
+# lexsys-hooks under systemd.
+#
+#   useradd --system --home-dir /var/lib/hooks --shell /usr/sbin/nologin hooks
+#   install -d -o root -g root /opt/hooks/bin && install -m 0755 hooks /opt/hooks/bin/hooks      # from the release tarball
+#   install -d -o root -g hooks -m 0750 /etc/hooks
+#   install -o root -g hooks -m 0640 deploy/hooks.conf.example /etc/hooks/hooks.conf              # edit it: it holds secrets
+#   install -m 0644 deploy/hooks.service /etc/systemd/system/hooks.service
+#   systemctl daemon-reload && systemctl enable --now hooks
+#
+# What was checked and what was not (docs/runbook.md, "Hardening"): `systemd-analyze verify` and `systemd-analyze security
+# --offline` pass on this file; the syscalls the service makes (a workload with PostgreSQL, a config file, POST /endpoints) were
+# recorded with strace and are all inside @system-service; the binary maps no anonymous executable memory. The unit has NOT been
+# run under a systemd here (no systemd in the build sandbox): the first start on a real host is the test.
+[Unit]
+Description=lexsys-hooks webhook delivery service
+Documentation=https://github.com/alpibrusl/lexsys-hooks
+After=network-online.target postgresql.service
+Wants=network-online.target
+# A service that keeps failing to start is stopped after 10 tries in 5 minutes, not restarted for ever.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=hooks
+Group=hooks
+# The settings file holds the admin token and the database password: root:hooks 0640, never world-readable. (To keep it out of the
+# service user's reach altogether, `LoadCredential=hooks.conf:/etc/hooks/hooks.conf` and `--config %d/hooks.conf` work too.)
+ExecStart=/opt/hooks/bin/hooks --config /etc/hooks/hooks.conf
+
+# There is no graceful stop today: SIGTERM ends the process at once, which is safe (an acknowledgement is only ever sent after the
+# flush that covers it, and an attempt on the wire is repeated at the next start: at least once) and is what `kill -9` tests prove.
+# docs/production.md 0.4 plans a drain; when it exists, TimeoutStopSec is its deadline.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Restart when it died or was killed, and when a start was refused for a reason that can pass (status 11: the port was taken;
+# 20: the database was not there yet; 3 and 4 are not expected). Do NOT restart on a refusal that a restart cannot fix: 2 the
+# settings, 10 and 12 a log that cannot be opened, 13 endpoints that are not valid, 14 a bad schedule, 15 to 17 a log the service does
+# not understand. (docs/runbook.md section 1 lists every status.)
+Restart=on-failure
+RestartSec=3
+RestartPreventExitStatus=2 10 12 13 14 15 16 17
+
+# The data directory: /var/lib/hooks, created and owned by User, mode 0750. The two logs and endpoints.conf live there.
+StateDirectory=hooks
+StateDirectoryMode=0750
+UMask=0077
+
+# Hardening. The service reads its settings, appends to two files in its state directory and talks TCP (clients, receivers,
+# PostgreSQL); it needs nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+# Port 1024 or above only: put a reverse proxy in front for 80 and 443 rather than give the service a capability.
+
+# Limits. One thread, at most 64 delivery attempts and a few hundred client connections.
+LimitNOFILE=8192
+TasksMax=64
+
+# Optional, for a host where the service has no business reaching the cloud metadata address (it only ever connects to the receivers
+# you configure, and `allow-private-hosts 0` already refuses link-local ones): uncomment.
+#IPAddressDeny=169.254.0.0/16
+
+# Logs go to the journal: `journalctl -u hooks`. The service writes a line at start and when it refuses to start, and nothing else.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hooks
+
+[Install]
+WantedBy=multi-user.target

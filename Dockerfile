@@ -1,0 +1,96 @@
+# lexsys-hooks: the service as a container image.
+#
+#   docker build -t lexsys-hooks .
+#   docker volume create hooks-data
+#   docker run -d --name hooks -p 8080:8080 -v hooks-data:/var/lib/hooks lexsys-hooks
+#   docker run --rm --entrypoint cat lexsys-hooks /usr/share/hooks/schema.sql | psql ...     # the tables, if you use PostgreSQL
+#
+# TWO STAGES, and what is pinned in each:
+#   compiler  the lex-sys compiler at the commit `lex-sys.toml` names ([package] lex-sys: one place, which `lex-sys build` itself
+#             checks), built with the Rust toolchain that commit's rust-toolchain.toml pins, from its Cargo.lock (--locked).
+#   build     `lex-sys build` of this repository: it fetches the two libraries lex-sys.toml pins by commit and checks them.
+#   runtime   the binary, tini, a non-root user, a volume and a health check. Nothing else: no shell tools beyond the base image's,
+#             no compiler, no git.
+#
+# NOT pinned, and the honest limit of "reproducible" here: the base image is a tag (ubuntu:24.04), not a digest; apt packages are
+# whatever the archive has that day (clang 18 in noble: the compiler's LLVM backend shells out to `clang`); rustup-init is a fixed
+# version but its checksum comes from the same server. To pin the base: `--build-arg BASE=ubuntu:24.04@sha256:<digest>`.
+# The runtime base must be the build base (the binary links the glibc of the image it was built in).
+#
+# THIS IMAGE HAS NOT BEEN BUILT BY CI. See docs/runbook.md "Container" for what was verified by hand and what was not.
+ARG BASE=ubuntu:24.04
+
+FROM ${BASE} AS compiler
+ARG RUSTUP_VERSION=1.28.2
+ENV DEBIAN_FRONTEND=noninteractive RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && curl -fsSL -o /tmp/rustup-init.sha256 "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init.sha256" \
+ && (cd /tmp && echo "$(cut -d' ' -f1 rustup-init.sha256)  rustup-init" | sha256sum -c -) \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
+ && rm /tmp/rustup-init /tmp/rustup-init.sha256
+# The pin lives in lex-sys.toml and nowhere else.
+COPY lex-sys.toml /src/hooks/lex-sys.toml
+RUN set -eu; \
+    REV=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' /src/hooks/lex-sys.toml); \
+    test -n "$REV"; \
+    git clone --quiet https://github.com/alpibrusl/lex-sys /src/lex-sys; \
+    git -C /src/lex-sys checkout --quiet "$REV"; \
+    CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /src/lex-sys/rust-toolchain.toml); \
+    test -n "$CHANNEL"; \
+    rustup toolchain install "$CHANNEL" --profile minimal; \
+    cd /src/lex-sys; \
+    RUSTUP_TOOLCHAIN="$CHANNEL" cargo build --release --locked -p lex-sys; \
+    cp target/release/lex-sys /usr/local/bin/lex-sys; \
+    lex-sys --version | tee /lex-sys.version; \
+    echo "rust $CHANNEL" >> /lex-sys.version; \
+    echo "clang $(clang --version | head -n 1)" >> /lex-sys.version
+
+FROM compiler AS build
+WORKDIR /src/hooks
+COPY src ./src
+COPY tests ./tests
+COPY sql ./sql
+# The binary is normalized as scripts/release.sh does (no symbols, no build-id: the only bytes that differ between two builds of
+# the same sources), so the image holds the same bytes as bin/hooks in the release tarball when the toolchain is the same.
+RUN lex-sys build \
+ && test -x build/hooks \
+ && ldd build/hooks > /ldd.txt \
+ && strip --strip-all --remove-section=.note.gnu.build-id -o /hooks build/hooks \
+ && sha256sum /hooks | tee /hooks.sha256
+
+FROM ${BASE} AS runtime
+ENV DEBIAN_FRONTEND=noninteractive
+# tini: the service is PID 1 in a container, and a PID 1 without a SIGTERM handler ignores SIGTERM (measured here with
+# `unshare --pid`: it survives), so `docker stop` would wait ten seconds and SIGKILL. With tini the signal reaches the service,
+# which then ends at once, as it does under systemd.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --user-group --home-dir /var/lib/hooks --no-create-home --shell /usr/sbin/nologin hooks \
+ && install -d -o hooks -g hooks -m 0750 /var/lib/hooks \
+ && install -d -o root -g root -m 0755 /etc/hooks /usr/share/hooks
+COPY --from=build /hooks /usr/local/bin/hooks
+COPY --from=build /lex-sys.version /ldd.txt /hooks.sha256 /usr/share/hooks/
+COPY sql/schema.sql /usr/share/hooks/schema.sql
+COPY deploy/hooks.docker.conf /etc/hooks/hooks.conf
+COPY deploy/hooks-healthcheck.sh /usr/local/bin/hooks-healthcheck
+RUN chmod 0755 /usr/local/bin/hooks /usr/local/bin/hooks-healthcheck
+
+LABEL org.opencontainers.image.title="lexsys-hooks" \
+      org.opencontainers.image.description="Webhook delivery service written in lex-sys: signed, at least once, retried" \
+      org.opencontainers.image.source="https://github.com/alpibrusl/lexsys-hooks" \
+      org.opencontainers.image.licenses="EUPL-1.2"
+
+# The data directory: events.seg, delivery.seg and endpoints.conf. A bind mount must be owned by uid 10001.
+VOLUME /var/lib/hooks
+WORKDIR /var/lib/hooks
+EXPOSE 8080
+USER 10001:10001
+# GET /healthz: the process is up and its loop turns. Not readiness (planned, docs/production.md 0.4).
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/hooks-healthcheck"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hooks"]
+CMD ["--config", "/etc/hooks/hooks.conf"]

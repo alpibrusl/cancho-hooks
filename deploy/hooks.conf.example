@@ -1,0 +1,33 @@
+# /etc/hooks/hooks.conf: the settings of lexsys-hooks (docs/design.md section 20, README "Settings", docs/runbook.md).
+# One `key = value` a line; `#` only on a line of its own. The flags of the command line are applied after this file and win.
+#
+# THIS FILE HOLDS SECRETS (admin-token, pg-password): install it root:hooks, mode 0640, and keep it out of version control.
+# There are no environment variables: the service reads none. `GET /config` shows what is in force (never the secrets).
+
+# The TCP port, 1 to 65535. Below 1024 needs a capability the unit does not grant: put a reverse proxy in front instead.
+port = 8080
+
+# The data directory: events.seg, delivery.seg and (without a database) endpoints.conf. The unit's StateDirectory.
+dir = /var/lib/hooks
+
+# --- PostgreSQL: the endpoints are its `endpoints` table and the attempt history is written to it. Without pg-host there is no
+# --- history, no /events/:id/attempts, and the endpoints are the file `endpoints.conf` in `dir`. Apply sql/schema.sql first.
+#pg-host = 127.0.0.1
+#pg-port = 5432
+#pg-user = hooks
+#pg-database = hooks
+#pg-password = change-me
+
+# --- Endpoint management (POST, PATCH, DELETE /endpoints). Without a token these answer 403. 8 to 255 visible characters.
+# --- Whoever has it chooses where the service sends requests (within allow-private-hosts): keep it secret.
+#admin-token = change-me-to-a-long-random-string
+
+# --- Delivery. The defaults are Standard Webhooks' schedule (5 s, 5 min, 30 min, 2 h, 5 h, 10 h, 14 h, 20 h, 24 h), a 2 s deadline
+# --- for one attempt, and idempotency keys remembered for a day.
+#schedule = 5000,300000,1800000,7200000,18000000,36000000,50400000,72000000,86400000
+#deadline-ms = 2000
+#window-ms = 86400000
+
+# --- Where deliveries may go. 0 (the default): an endpoint's host must be a public IPv4 literal. Set 1 only for a receiver on a
+# --- private network, knowing that then anyone with the admin token can aim the service at that network.
+#allow-private-hosts = 0
