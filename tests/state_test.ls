@@ -261,3 +261,19 @@ fn test_reset_empties_one_slot_and_only_that_one() -> [] int {
     }
     return 0;
 }
+
+fn test_a_turn_starts_no_more_than_the_free_connections() -> [] int {
+    // 64 connections, 16 starts a turn: the whole turn while 16 or more are free, then what is free, then none
+    test.assert_eq(state.starts_allowed(0, 64, 16), 16);
+    test.assert_eq(state.starts_allowed(47, 64, 16), 16);
+    test.assert_eq(state.starts_allowed(48, 64, 16), 16);
+    test.assert_eq(state.starts_allowed(49, 64, 16), 15);
+    test.assert_eq(state.starts_allowed(50, 64, 16), 14);
+    test.assert_eq(state.starts_allowed(51, 64, 16), 13);
+    test.assert_eq(state.starts_allowed(63, 64, 16), 1);
+    test.assert_eq(state.starts_allowed(64, 64, 16), 0);
+    // more in use than there are (it must not be), and fewer starts allowed than are free
+    test.assert_eq(state.starts_allowed(70, 64, 16), 0);
+    test.assert_eq(state.starts_allowed(10, 64, 4), 4);
+    return 0;
+}

@@ -1,2 +1,4 @@
 build/
 __pycache__/
+scripts/bench/loadgen
+scripts/bench/sink

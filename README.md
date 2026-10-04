@@ -214,6 +214,7 @@ HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/manage_test.py build/hooks 
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/slots_test.py build/hooks     # endpoint ids and slots: the legacy log, ids above 15, dormant, reclaimed
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/patch_test.py build/hooks     # PATCH /endpoints/:id: address on the next attempt, secret rotation, a database that refuses, compaction
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/delete_test.py build/hooks    # DELETE /endpoints/:id: nothing new after it, an attempt on the wire finishes, replays dropped, the slot reused clean across a restart, 62 endpoints churned
+python3 tests/saturation_test.py build/hooks                                       # ten endpoints beside 64 connections: no start beyond them is a failed attempt
 HOOKS_PG=127.0.0.1:5432:postgres:hooks python3 tests/ssrf_test.py build/hooks      # where a delivery may go: 41 refused hosts, 23 public ones, a redirect not followed
 python3 tests/layout_test.py build/hooks           # the delivery state's regions do not overlap (2,300 events, two fail once)
 python3 tests/replay_test.py build/hooks           # replay: one endpoint or all, restarts, capacity, an event far behind the cursor

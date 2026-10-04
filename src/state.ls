@@ -196,3 +196,17 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));
 }
+
+// How many attempts one turn may start: at most `most`, and no more than the `slots - held` connections that are free, never a negative
+// number. A start beyond the free connections is answered "no connection" by `attempt.begin`, which was recorded as a failed attempt
+// (`docs/design.md` section 28).
+pub fn starts_allowed(held: int, slots: int, most: int) -> [] int {
+    var free = slots - held;
+    if free < 0 {
+        free = 0;
+    }
+    if free < most {
+        return free;
+    }
+    return most;
+}
