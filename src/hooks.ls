@@ -682,7 +682,7 @@ fn off_offs() -> [] int {
 }
 
 fn off_cells() -> [] int {
-    return 145 + state.span();
+    return off_offs() + state.span();
 }
 
 // One flag per cell: is an attempt at this (endpoint, event) in flight? (An event with one is not started again.)
