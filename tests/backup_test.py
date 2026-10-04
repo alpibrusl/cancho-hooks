@@ -30,7 +30,8 @@ files, read with the reader of tests/chaos.py (not the one in scripts/logcheck.p
         restore.sh (exit 4) and nothing is written; a non-empty --dir is refused (exit 3) unless --force, which moves the old files
         aside; the online mode refuses --stop-cmd; a log that ends in a torn record (a copy caught mid-write, a power cut) is cut by
         backup.sh and restores; a log with damage in the middle is refused rather than silently shortened
-     9. (information, not a gate) what a service does with the refused pair if it is given it anyway
+     9. the two hazards restore.sh refuses, given to the service itself: it refuses both before it listens, with a status of its own (18 for the pair, 19 for damage in the
+        middle), a message, and the files exactly as they were. (They were information here: the service silently stalled, or silently cut 500 events to 250.)
 """
 import base64
 import http.server
@@ -602,27 +603,29 @@ def stage_c(backups, a_backup, a_data):
     out = run([RESTORE, "--backup", last, "--dir", live.datadir, "--force"])
     check("8. a --dir the service has open is refused (exit 3)", out.returncode == 3 and "open" in out.stderr, f"{out.returncode} {out.stderr}")
     live.stop()
-    # 9. information: the refused pair, given to a service anyway
-    r0 = Receiver()
+    # 9. the hazards restore.sh refuses, given to the service anyway: it refuses them too (docs/production.md 0.5), each with its own status, before it listens
+    #    and with the files exactly as they were. (They used to be information: "the service silently stalls", "250 of 500 events, nothing printed".)
+    def service_on(directory, label):
+        port = chaos.free_port()
+        before = {n: open(os.path.join(directory, n), "rb").read() for n in sorted(os.listdir(directory))}
+        p = subprocess.run([BIN, "--port", str(port), "--dir", directory, "--allow-private-hosts", "1"], capture_output=True, text=True, timeout=30)
+        after = {n: open(os.path.join(directory, n), "rb").read() for n in sorted(os.listdir(directory))}
+        return p, before == after
+
     d = os.path.join(WORK, "c-hazard")
     os.makedirs(d)
     for n in ("events.seg", "delivery.seg"):
         shutil.copy(os.path.join(mix, n), os.path.join(d, n))
-    with open(os.path.join(d, "endpoints.conf"), "w") as f:
-        f.write(f"0 127.0.0.1 {r0.port} {secret()}\n")
-    hz = Svc(d, ["--schedule", "100,200"])
-    try:
-        hz.start()
-        status, body = post_event(hz, 424242)
-        new_id = json.loads(body)["id"] if status == 202 else None
-        got = wait_for(lambda: new_id in r0.delivered(), 3)
-        print(f"INFO 9. the refused pair given to a service anyway: it acknowledged event {new_id} and "
-              f"{'DELIVERED it' if got else 'NEVER DELIVERED it (the hazard restore.sh refuses to create)'}", flush=True)
-    except RuntimeError as e:
-        print(f"INFO 9. the refused pair given to a service anyway: it refused to start ({e}): the service has a guard now", flush=True)
-    finally:
-        hz.stop()
-        r0.close()
+    p, untouched = service_on(d, "pair")
+    check("9. the refused pair (an events.seg older than its delivery.seg), given to the service: it refuses, status 18, says which event, never says listening, and changes nothing",
+          p.returncode == 18 and "delivery.seg refers to event" in p.stderr and "listening" not in p.stderr and untouched, f"{p.returncode} {p.stderr!r}")
+    d = os.path.join(WORK, "c-hazard2")
+    shutil.copytree(dmg_dir, d)
+    events_before = open(os.path.join(d, "events.seg"), "rb").read()
+    p, untouched = service_on(d, "damage")
+    check("9. a log with one flipped byte in the middle (the 500 events that became 250 with nothing printed), given to the service: status 19, and it says where, how many bytes and how many intact records; nothing is cut",
+          p.returncode == 19 and "damage in the middle" in p.stderr and "intact record" in p.stderr and "listening" not in p.stderr and untouched and
+          open(os.path.join(d, "events.seg"), "rb").read() == events_before, f"{p.returncode} {p.stderr!r}")
 
 
 def main():

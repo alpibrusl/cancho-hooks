@@ -93,6 +93,19 @@ pub fn paused() -> [] int {
     return 13;
 }
 
+// A record about *why* an attempt failed, not about its outcome (`docs/design.md` section 34.3): written right after the `failed`, `dead` or
+// `replay_failed`/`replay_dead` record of the attempt it explains, in the same flush. `endpoint` and `event` are the attempt's, `attempts` is its
+// number, and `next_at` (the fifth field) holds the reason (`reason.ls`), plus `reason_replay()` if the attempt was a replay's. `apply` does
+// nothing with it; recovery keeps the last reason of each endpoint.
+pub fn reason() -> [] int {
+    return 14;
+}
+
+// Added to the reason in a kind-14 record when the attempt was made for a replay.
+pub fn reason_replay() -> [] int {
+    return 256;
+}
+
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
 pub fn day_ms() -> [] int {
     return 86400000;
@@ -218,7 +231,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 13 {
+    if kind < 1 || kind > 14 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

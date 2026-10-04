@@ -90,7 +90,9 @@ VOLUME /var/lib/hooks
 WORKDIR /var/lib/hooks
 EXPOSE 8080
 USER 10001:10001
-# GET /healthz: the process is up and its loop turns. Not readiness (planned, docs/production.md 0.4).
+# GET /readyz: the logs are open and take a write, a named database has a live connection, and the service is not stopping (docs/design.md section 34.1).
+# Each of those is something a restart repairs, which is what an unhealthy container gets. `docker stop` sends SIGTERM and waits 10 s by default; the drain takes at most
+# stop-deadline-ms (5 s unless set), so the default is enough; with a longer stop-deadline-ms use `docker stop -t`.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/hooks-healthcheck"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/hooks"]
 CMD ["--config", "/etc/hooks/hooks.conf"]

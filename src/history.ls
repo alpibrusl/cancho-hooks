@@ -20,14 +20,14 @@ import queries;
 //     [0] head: where the next row goes     [1] tail: where the next row to send is      [2] live connections
 //     [3] enabled (a database was given)    [4] rows written   [5] rows the database refused or lost   [6] rows dropped
 //     [7] requests submitted and not answered yet
-//     [16 ...] the ring: `cap()` rows of eight integers: endpoint, event, replay, attempt, outcome, status, at (ms), latency (ms)
+//     [16 ...] the ring: `cap()` rows of nine integers: endpoint, event, replay, attempt, outcome, status, at (ms), latency (ms), reason (`reason.ls`)
 
 pub fn cap() -> [] int {
     return 256;
 }
 
 pub fn size() -> [] int {
-    return 16 + cap() * 8;
+    return 16 + cap() * 9;
 }
 
 pub fn enabled[&s](h: &s [int]) -> [] bool {
@@ -63,7 +63,7 @@ pub fn enable[&s](h: &!s [int], live: int) -> [] int {
 
 // An attempt ended: remember it, to be written. Does nothing when no database was given. When the ring is full the row is
 // dropped, and counted.
-pub fn push[&s](h: &!s [int], endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int) -> [] int {
+pub fn push[&s](h: &!s [int], endpoint: int, event: int, replay: int, attempt: int, outcome: int, status: int, at_ms: int, latency_ms: int, why: int) -> [] int {
     if h[3] != 1 {
         return 0;
     }
@@ -71,7 +71,7 @@ pub fn push[&s](h: &!s [int], endpoint: int, event: int, replay: int, attempt: i
         h[6] = h[6] + 1;
         return 0;
     }
-    let base = 16 + h[0] % cap() * 8;
+    let base = 16 + h[0] % cap() * 9;
     h[base] = endpoint;
     h[base + 1] = event;
     h[base + 2] = replay;
@@ -80,6 +80,7 @@ pub fn push[&s](h: &!s [int], endpoint: int, event: int, replay: int, attempt: i
     h[base + 5] = status;
     h[base + 6] = at_ms;
     h[base + 7] = latency_ms;
+    h[base + 8] = why;
     h[0] = h[0] + 1;
     return 1;
 }
@@ -91,8 +92,8 @@ pub fn drain[&h, &q, &s](heap: &!h Heap, pl: &!q pool.Pool, hs: &!s [int], most:
     var sent = 0;
     var going = true;
     while going && sent < most && hs[0] > hs[1] {
-        let base = 16 + hs[1] % cap() * 8;
-        let request = queries.add_attempt_start(heap, hs[base], hs[base + 1], hs[base + 2], hs[base + 3], hs[base + 4], hs[base + 5], hs[base + 6], hs[base + 7]);
+        let base = 16 + hs[1] % cap() * 9;
+        let request = queries.add_attempt_start(heap, hs[base], hs[base + 1], hs[base + 2], hs[base + 3], hs[base + 4], hs[base + 5], hs[base + 6], hs[base + 7], hs[base + 8]);
         var code = 0 - 1;
         borrow request as &rb in {
             code = pool.submit(pl, 1, buffer.bytes(rb));

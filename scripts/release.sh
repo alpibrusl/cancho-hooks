@@ -166,7 +166,7 @@ sbom = {
         "from": "ldd on the build host; the target host supplies its own copies, which must be this glibc or newer",
         "entries": libc,
     },
-    "statically_linked_native_code": "none known: the program uses no Ffi (the compiler's authority report is the check); not verified by this script",
+    "statically_linked_native_code": "none known: the program's only foreign calls are four libc signal functions (src/ops.ls; the compiler's authority report lists them); not verified by this script",
     "not_listed": [
         "the Rust toolchain that built the compiler (named by the compiler repository's rust-toolchain.toml at the pinned commit)",
         "the crates the compiler was built from (its Cargo.lock at the pinned commit)",

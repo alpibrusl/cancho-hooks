@@ -47,7 +47,9 @@ pub fn resp_size() -> [] int {
     return slots() * 16;
 }
 
-// The answers an attempt ends with: an HTTP status (100 and up), or one of these.
+// The answers an attempt ends with: an HTTP status (100 and up), or one of these. The first four are the coarse reasons that `attempts.status`
+// has always held; the others say more and are what `reason.ls` turns into the reason an attempt failed (`docs/design.md` section 34). Each of them
+// has its coarse one (`reason.legacy_status`), so that the history table's `status` column means what it did.
 pub fn pending() -> [] int {
     return 0 - 100;
 }
@@ -66,6 +68,60 @@ pub fn timed_out() -> [] int {
 
 pub fn no_answer() -> [] int {
     return 0 - 4;
+}
+
+// The connection was refused (`ECONNREFUSED`): nothing listens there.
+pub fn refused() -> [] int {
+    return 0 - 5;
+}
+
+// The deadline passed while the connection was being made (a host that does not answer the SYN), or the kernel gave up (`ETIMEDOUT`).
+pub fn connect_timed_out() -> [] int {
+    return 0 - 6;
+}
+
+// The deadline passed while the request was being written: the receiver does not read.
+pub fn send_timed_out() -> [] int {
+    return 0 - 7;
+}
+
+// The deadline passed after the request was sent and before a status line came: the receiver is silent.
+pub fn response_timed_out() -> [] int {
+    return 0 - 8;
+}
+
+// The connection was reset (or failed) while the status line was awaited.
+pub fn reset() -> [] int {
+    return 0 - 9;
+}
+
+// The receiver closed the connection without a status line.
+pub fn closed_early() -> [] int {
+    return 0 - 10;
+}
+
+// Twelve bytes that are not `HTTP/1.x NNN`.
+pub fn bad_response() -> [] int {
+    return 0 - 11;
+}
+
+// All `slots()` connections were in use: the attempt was not made.
+pub fn no_slot() -> [] int {
+    return 0 - 12;
+}
+
+// The request does not fit the slot's buffer: the attempt was not made.
+pub fn too_large() -> [] int {
+    return 0 - 13;
+}
+
+// `ECONNREFUSED` and `ETIMEDOUT` on Linux and macOS alike are not the same number on both; the two programs this runs on say Linux.
+fn econnrefused() -> [] int {
+    return 111;
+}
+
+fn etimedout() -> [] int {
+    return 110;
 }
 
 fn connecting() -> [] int {
@@ -102,6 +158,18 @@ pub fn expired[&a](at: &a [int], slot: int, now: int) -> [] bool {
     return busy(at, slot) && now >= at[slot * stride() + 3];
 }
 
+// The reason the attempt in `slot` ended at its deadline, by where it was when the deadline passed. (Asked before `finish`.)
+pub fn timeout_of[&a](at: &a [int], slot: int) -> [] int {
+    let state = at[slot * stride()];
+    if state == connecting() {
+        return connect_timed_out();
+    }
+    if state == sending() {
+        return send_timed_out();
+    }
+    return response_timed_out();
+}
+
 // The status code from `HTTP/1.x NNN ...` in the first `n` bytes of `head`, or -1.
 pub fn status_of[&h](head: &h [byte], n: int) -> [] int {
     if n < 12 || int_of(head[0]) != 'H' || int_of(head[1]) != 'T' || int_of(head[2]) != 'T' || int_of(head[3]) != 'P' || int_of(head[4]) != '/' || int_of(head[5]) != '1' || int_of(head[6]) != '.' || int_of(head[8]) != ' ' {
@@ -131,10 +199,10 @@ pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab: conns.Table, polle
         held = conns.live(tt);
     }
     if held >= slots() {
-        return (tab, 0 - 1, no_connect());
+        return (tab, 0 - 1, no_slot());
     }
     if len(request) > req_max() {
-        return (tab, 0 - 1, no_send());
+        return (tab, 0 - 1, too_large());
     }
     match tcp_connect_start(net, host, port) {
         Dialed::Failed(err) => {
@@ -189,7 +257,14 @@ pub fn advance[&t, &p, &a, &r, &s](tab: &!t conns.Table, poller: &!p Poller, at:
     while progress {
         progress = false;
         if at[b] == connecting() {
-            if conns.connect_status(tab, slot) != 0 {
+            let failed = conns.connect_status(tab, slot);
+            if failed == econnrefused() {
+                return refused();
+            }
+            if failed == etimedout() {
+                return connect_timed_out();
+            }
+            if failed != 0 {
                 return no_connect();
             }
             at[b] = sending();
@@ -225,18 +300,18 @@ pub fn advance[&t, &p, &a, &r, &s](tab: &!t conns.Table, poller: &!p Poller, at:
                         return code;
                     }
                     if at[b + 5] >= 12 {
-                        return no_answer();
+                        return bad_response();
                     }
                     progress = true;
                 }
                 Received::End => {
-                    return no_answer();
+                    return closed_early();
                 }
                 Received::Again => {
                     return pending();
                 }
                 Received::Failed(err) => {
-                    return no_answer();
+                    return reset();
                 }
             }
         }

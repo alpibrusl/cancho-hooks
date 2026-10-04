@@ -7,6 +7,7 @@ import std.json;
 import http.server;
 import pg;
 import queries;
+import reason;
 
 // `view` -- what the database says, as an HTTP answer (`docs/design.md` section 24).
 
@@ -41,6 +42,13 @@ pub fn attempts_reply[&h, &m](heap: &!h Heap, rep: &m [byte], status: int, keep:
         w = json.put_string(heap, w, outcome_name(queries.attempts_of_outcome(rep, at)));
         w = json.put_key(heap, w, "status");
         w = json.put_int(heap, w, queries.attempts_of_status(rep, at));
+        w = json.put_key(heap, w, "reason");
+        if queries.attempts_of_reason(rep, at) == 0 && queries.attempts_of_outcome(rep, at) != 1 {
+            // A row written before the reason was recorded.
+            w = json.put_string(heap, w, "unrecorded");
+        } else {
+            w = json.put_string(heap, w, reason.name(queries.attempts_of_reason(rep, at)));
+        }
         w = json.put_key(heap, w, "at");
         w = json.put_int(heap, w, queries.attempts_of_at_ms(rep, at));
         w = json.put_key(heap, w, "latency_ms");

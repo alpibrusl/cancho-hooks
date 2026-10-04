@@ -63,6 +63,7 @@ FAILS = []
 
 DELIVERED, FAILED, DEAD, DISABLED, ENABLED = 1, 2, 3, 4, 5
 REPLAY, REPLAY_FAILED, REPLAY_DELIVERED, REPLAY_DEAD, CREATED, REMOVED = 6, 7, 8, 9, 10, 11
+REASON = 14      # why an attempt failed (docs/design.md section 34.3): written right after the outcome it explains
 
 
 def secret():
@@ -497,8 +498,8 @@ def main():
     wait_for(lambda: ra.events() == [1, 1], 5)
     st, out = delete(svc, 100)
     check("3e. deleted while a replay is on the wire", st == 200 and out["draining"] is True and stats(svc)["replays"] == 1, str((st, out, stats(svc))))
-    check("3e. the failure is recorded (replay_failed), the replay is dropped (replay_dead), then the slot is freed, in that order",
-          wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0][-3:] == [REPLAY_FAILED, REPLAY_DEAD, REMOVED], str(outcomes(d)))
+    check("3e. the failure is recorded (replay_failed, and why), the replay is dropped (replay_dead), then the slot is freed, in that order",
+          wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0][-4:] == [REPLAY_FAILED, REASON, REPLAY_DEAD, REMOVED], str(outcomes(d)))
     check("3e. no replay waits, and it is not tried again", stats(svc)["replays"] == 0, str(stats(svc)))
     time.sleep(0.8)
     check("3e. ... (the receiver saw the event twice: the delivery and the replay)", ra.events() == [1, 1], str(ra.seen))
@@ -516,8 +517,8 @@ def main():
     post_event(svc, 1)
     wait_for(lambda: ra.events() == [1], 5)
     delete(svc, 100)
-    check("3f. the 410 is recorded as dead, with no `disabled` record, then the slot is freed",
-          wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0] == [CREATED, DEAD, REMOVED], str(outcomes(d)))
+    check("3f. the 410 is recorded as dead (and why), with no `disabled` record, then the slot is freed",
+          wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0] == [CREATED, DEAD, REASON, REMOVED], str(outcomes(d)))
     stop(svc)
     shutil.rmtree(d)
 

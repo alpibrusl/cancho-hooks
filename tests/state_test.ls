@@ -292,8 +292,8 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(state.outcome_at(buf, 0).0, state.paused());
         test.assert_eq(state.outcome_at(buf, 0).1, 4);
         // one past the last kind is still not an outcome
-        state.put_outcome(buf, 0, 11, state.paused(), 4, 0, 0, 0);
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 14);
+        state.put_outcome(buf, 0, 11, state.reason(), 4, 7, 2, 11);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 15);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);
@@ -326,5 +326,33 @@ fn test_the_breaker_trips_after_n_days_of_failures_and_not_before() -> [] int {
     test.assert(!state.breaker_trips(0, t0, t0 + 500 * day));
     test.assert(!state.breaker_trips(5, 0, t0 + 500 * day));
     test.assert(!state.breaker_trips(5, t0, t0 - 10 * day));
+    return 0;
+}
+
+// The record of why an attempt failed (`docs/design.md` section 34.3): kind 14, the attempt's endpoint, event and number, and the reason in the fifth field; with the
+// replay marker added when the attempt was a replay's. It changes no cell, and a replay marker leaves the reason readable with `% reason_replay()`.
+fn test_the_reason_record_reads_back_and_changes_no_cell() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        test.assert_eq(state.reason(), 14);
+        state.put_outcome(buf, 0, 5, state.reason(), 3, 41, 2, 12);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, 14);
+        test.assert_eq(o.1, 3);
+        test.assert_eq(o.2, 41);
+        test.assert_eq(o.3, 2);
+        test.assert_eq(o.4, 12);
+        state.put_outcome(buf, 0, 6, state.reason(), 3, 41, 3, 12 + state.reason_replay());
+        let r = state.outcome_at(buf, 0);
+        test.assert_eq(r.4 % state.reason_replay(), 12);
+        test.assert(r.4 >= state.reason_replay());
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.reason(), 1, 1, 12), 0);
+        test.assert_eq(c[0], 0);
+        test.assert_eq(state.attempts(w, 0, 1), 0);
+        test.assert_eq(state.next_at(w, 0, 1), 0);
+        test.assert(!state.is_final(w, c, 0, 1));
+    }
     return 0;
 }

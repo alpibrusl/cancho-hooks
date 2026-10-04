@@ -325,3 +325,34 @@ fn test_breaker_days_default_off_and_limits() -> [] int {
     }
     return 0;
 }
+
+// `stop-deadline-ms` (5000 unless set, 0 is a setting, an hour is the most) and `repair-logs` (0 or 1, off unless set): `docs/design.md` sections 34.4 and 34.5.
+fn test_stop_deadline_and_repair_logs() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.stop_deadline_ms(cfg), 5000);
+        test.assert(!config.repair_logs(cfg));
+        test.assert_eq(config.set(cfg, blob, "stop-deadline-ms", "0"), 0);
+        test.assert_eq(config.stop_deadline_ms(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "stop-deadline-ms", "3600000"), 0);
+        test.assert_eq(config.stop_deadline_ms(cfg), 3600000);
+        test.assert(config.set(cfg, blob, "stop-deadline-ms", "3600001") != 0);
+        test.assert(config.set(cfg, blob, "stop-deadline-ms", "-1") != 0);
+        test.assert(config.set(cfg, blob, "stop-deadline-ms", "soon") != 0);
+        test.assert(config.set(cfg, blob, "stop-deadline-ms", "") != 0);
+        test.assert_eq(config.stop_deadline_ms(cfg), 3600000);
+        test.assert_eq(config.set(cfg, blob, "repair-logs", "1"), 0);
+        test.assert(config.repair_logs(cfg));
+        test.assert(config.set(cfg, blob, "repair-logs", "2") != 0);
+        test.assert(config.set(cfg, blob, "repair-logs", "yes") != 0);
+        test.assert(config.repair_logs(cfg));
+        test.assert_eq(config.set(cfg, blob, "repair-logs", "0"), 0);
+        test.assert(!config.repair_logs(cfg));
+        test.assert_eq(config.parse_file("stop-deadline-ms = 1200\nrepair-logs = 1\n", cfg, blob), 0);
+        test.assert_eq(config.stop_deadline_ms(cfg), 1200);
+        test.assert(config.repair_logs(cfg));
+    }
+    return 0;
+}

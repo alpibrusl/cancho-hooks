@@ -28,19 +28,21 @@ Group=hooks
 # service user's reach altogether, `LoadCredential=hooks.conf:/etc/hooks/hooks.conf` and `--config %d/hooks.conf` work too.)
 ExecStart=/opt/hooks/bin/hooks --config /etc/hooks/hooks.conf
 
-# There is no graceful stop today: SIGTERM ends the process at once, which is safe (an acknowledgement is only ever sent after the
-# flush that covers it, and an attempt on the wire is repeated at the next start: at least once) and is what `kill -9` tests prove.
-# docs/production.md 0.4 plans a drain; when it exists, TimeoutStopSec is its deadline.
+# SIGTERM (what `systemctl stop` sends) drains: the service stops taking requests and starting attempts, lets the attempts on the wire finish for at most
+# `stop-deadline-ms` (5000 unless the settings file says otherwise), flushes, closes the logs and exits 0 (docs/design.md section 34.4). TimeoutStopSec is when
+# systemd gives up and sends SIGKILL, which is safe too (what was on the wire is made again at the next start, at least once) but loses the clean exit; it must be longer
+# than stop-deadline-ms with room for the flush: 15 s for the default 5 s. Raise both together. A second `systemctl kill -s TERM hooks` ends the process at once.
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=15
 
 # Restart when it died or was killed, and when a start was refused for a reason that can pass (status 11: the port was taken;
 # 20: the database was not there yet; 3 and 4 are not expected). Do NOT restart on a refusal that a restart cannot fix: 2 the
 # settings, 10 and 12 a log that cannot be opened, 13 endpoints that are not valid, 14 a bad schedule, 15 to 17 a log the service does
-# not understand. (docs/runbook.md section 1 lists every status.)
+# not understand, 18 a delivery log ahead of its events log, 19 damage in the middle of a log (a person has to look: docs/runbook.md section 4.7).
+# (docs/runbook.md section 1 lists every status.)
 Restart=on-failure
 RestartSec=3
-RestartPreventExitStatus=2 10 12 13 14 15 16 17
+RestartPreventExitStatus=2 10 12 13 14 15 16 17 18 19
 
 # The data directory: /var/lib/hooks, created and owned by User, mode 0750. The two logs and endpoints.conf live there.
 StateDirectory=hooks
@@ -85,7 +87,8 @@ TasksMax=64
 # you configure, and `allow-private-hosts 0` already refuses link-local ones): uncomment.
 #IPAddressDeny=169.254.0.0/16
 
-# Logs go to the journal: `journalctl -u hooks`. The service writes a line at start and when it refuses to start, and nothing else.
+# Logs go to the journal: `journalctl -u hooks`. The service writes a line at start, when it refuses to start, when it cuts a torn tail or a damaged log, when the circuit
+# breaker pauses an endpoint and when it stops; nothing else (docs/runbook.md section 3.1).
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hooks

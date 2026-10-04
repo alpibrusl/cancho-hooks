@@ -58,7 +58,7 @@ jobs:
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks
 
-      - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings)
+      - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings, the reasons, the counters and the text of /metrics)
         working-directory: hooks
         run: ../lex-sys/target/release/lex-sys test
 
@@ -163,6 +163,24 @@ jobs:
       - name: Schedules (the admin token, every refusal, a fire is an ordinary event, missed fires, kill -9 between the event and the database, a real minute)
         working-directory: hooks
         run: FULL=1 HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/schedules_test.py build/hooks
+
+      - name: Stopping (SIGTERM and SIGINT drain, a second signal ends it at once, under load nothing is lost or repeated)
+        working-directory: hooks
+        run: python3 tests/stop_test.py build/hooks
+
+      - name: Refuse corruption (a delivery log ahead of its events log, damage in the middle of a log, a torn tail still recovered, --repair-logs)
+        working-directory: hooks
+        run: python3 tests/corrupt_test.py build/hooks
+
+      - name: /metrics against a known workload (ingest, group commits, attempts by outcome and reason, lag, history), /readyz
+        working-directory: hooks
+        run: |
+          HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/metrics_test.py build/hooks
+          HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ready_test.py build/hooks
+
+      - name: Why an attempt failed (a receiver for each reason; in /attempts, /metrics, the history table and the delivery log)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/reason_test.py build/hooks
 
       # Only a binary that passed every step above is kept. It is the service as built by the compiler this commit pins, linked
       # against the runner's glibc (ubuntu-latest) and so for a Linux x86-64 host with that glibc or newer. A zip loses the

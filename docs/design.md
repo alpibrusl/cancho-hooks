@@ -16,7 +16,7 @@ It is chosen because the properties that make it hard are exactly the properties
 | the signature is checkable by anyone | an independent implementation verifies every delivery | `std.crypto` (plus HMAC, which is missing) |
 | the authority is small and visible | the service touches one data directory, one listening port, and outbound network | `lex-sys authority`, `lex-os` grants |
 
-The claim, in one sentence: **a single-node webhook service in lex-sys, with no `Ffi`, that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one.
+The claim, in one sentence: **a single-node webhook service in lex-sys, with no `Ffi` (section 34.4 added four libc signal functions), that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one.
 
 ## 2. What is built from what
 
@@ -86,7 +86,7 @@ A harness drives the service with a **receiver** it controls (it records every r
 3. **A stalled receiver does not stall the others.** One endpoint that never answers; a hundred others healthy. The healthy ones' p99 delivery latency with the stalled one present is within a stated factor of without it.
 4. **Idempotency survives a crash.** The same key sent before and after a kill gets the same answer and one delivery.
 5. **Signatures verify** against an independent implementation (Python's `hmac` and `base64`), for every delivery in the run.
-6. **The authority report** has no `ffi`, names one filesystem prefix, one bound port, and outbound network only. Pinned by a test.
+6. **The authority report** has no `ffi` (until section 34.4: four libc signal functions), names one filesystem prefix, one bound port, and outbound network only. Pinned by a test.
 7. **Reported, not gated:** events accepted per second with the flush policy `always`; p50 and p99 of time from `202` to first delivery; memory and descriptors at 1,000 endpoints. The comparison is a Python service (FastAPI, Redis Streams, one worker) built to the same specification; its numbers are measured before ours and the method is written down before either.
 
 If a criterion cannot be met because a component is missing, the result says which component and what the failure looked like. That is a finding, and the purpose.
@@ -924,3 +924,165 @@ What stage 9 found, and was checked after: in each of the six rounds the log hel
   ```
 
   It hit three times (`next_tag`, `iso`, `reply` in a loop with many locals) and each was renamed; in a function as long as `run` the collisions are easy to make.
+
+
+## 34. Operating it: ready, watched, stopped, and not repaired in silence (`docs/production.md` 0.4 and 0.5)
+
+*Written with the code, like sections 20 and 31: the rules were taken from production.md, each gate became a test file before its mutants were run, and what the compiler and the libraries lacked is at the end (34.9), with reproducers.*
+
+The service could be run, but not operated: `GET /healthz` answered `200` with the disk full, nothing counted anything but `/stats`, a failed attempt kept only `-1`, `-3` or `-4`, `SIGTERM` ended the process in mid-turn, and two measured hazards of the packaging slice (runbook 4.7) were open: a `delivery.seg` that outran its `events.seg` was started on and **acknowledged events it never delivered**, and one flipped byte made the next start **cut 500 events to 250 without a word**. This section is what was built for each, why this way, and what it does not do. New code is in new modules (`src/ops.ls`, `src/metrics.ls`, `src/reason.ls`, `src/logguard.ls`); `hooks.ls` has small call sites.
+
+### 34.1 `GET /readyz`
+
+200 `{"ready":true}` only when **none** of these holds, checked in this order; otherwise 503 `{"ready":false,"check":<name>,"reason":<sentence>}` for the first that does:
+
+| check | when | clears |
+|---|---|---|
+| `stopping` | the service was asked to stop (34.4) | never |
+| `events_log`, `delivery_log` | `log.broken`: a write or a flush failed, and by `lexsys-log`'s design it is never retried | a restart |
+| `data_dir` | a 1-byte file could not be written in the data directory at the last probe (once a second) | by itself, when space is back |
+| `database` | a database is named and neither of its two connections is live | a restart (34.9) |
+
+It reads three flags and the last probe: it waits for nothing and writes nothing, so it can be asked as often as a load balancer likes. `/healthz` is unchanged (and still `200` with the disk full: it is the liveness question). Both are open; `GET /metrics` is open too and carries its scope in one place, `ops.scope_metrics()` (0, open), which the scoped tokens of 0.3 turn into a read scope; the handler is `id == 41` in `hooks.ls`.
+
+**Why the probe, and why two files.** A log whose handle is open keeps taking writes after the directory's permissions change, and a full disk shows in a log only as the *first failed write*, which breaks the log until a restart. If `/readyz` already says 503 `data_dir` when the disk fills, a balancer stops sending events, no write fails, and when space returns the service is ready again without a restart. The probe must therefore be able to fail on a full disk, and a file rewritten in place cannot: truncating it frees the block the rewrite needs (measured on a 64 KiB tmpfs with a script: on the full disk a truncate-and-write of the same file succeeds, and a new file fails with `ENOSPC`). The probe writes `.writable-0` and `.writable-1` by turns, and removes the other after the write succeeds, so the new file needs a block of its own while the old one still holds its. A clean stop removes both. (A read-only remount would be the same; a tmpfs cannot be remounted read-only while the service holds its logs open for writing, `EBUSY`, so the test fills the disk instead.)
+
+**Why the container's health check is `/readyz`.** Every way it can be 503 is one a restart repairs (a broken log, a lost database connection) or a stop in progress. `HEALTHCHECK` in the `Dockerfile` and `deploy/hooks-healthcheck.sh` were changed; **the image was not rebuilt here.**
+
+### 34.2 `GET /metrics`
+
+The Prometheus text exposition format 0.0.4 (`text/plain; version=0.0.4`), about 100 series for the service and 7 for each endpoint, none labelled by anything that grows: `endpoint` (an id, at most 62), `reason` (16), `outcome` (3), `result`, `log` and `status` (a handful each). A strict parser in `tests/opslib.py` reads the answer (HELP and TYPE once and before the samples, a family's samples together, no series twice, counters named `_total`). 62 endpoints answer in 24.9 KB, under the server's 64 KiB output buffer (a unit test pins the bound); the cost of a scrape is one walk over each endpoint's 1,024 cells (for the events waiting for a retry): 0.46 ms a scrape against 0.26 ms for `/healthz`, 62 endpoints, 200 scrapes from a Python client.
+
+* **Where the numbers live.** The counters of `ops.ls` are the last 112 integers of the delivery state (`off_ops()`), so no signature of `handle` or `run` grew for them. The *formatting* is `metrics.ls`, pure: `hooks.ls` fills two arrays (`gather`: the service in one, a row per endpoint in the other) and `metrics.render` writes text from them. That is why it is unit-tested on its own (`tests/ops_test.ls`, 13 tests, including the 62-endpoint size).
+* **Ingest.** `accepted` is counted when the `202` is sent, after the flush (a flush that fails makes it a `503` and counts `refused` under 503 for each request held); `duplicate` is an `Idempotency-Key` repeat that was acknowledged; `refused` is what the handler refused, by status (400, 413, 422, 503, 507, other). Requests the HTTP layer refuses before the handler (a malformed head, a head over 16 KiB) are not counted: they never reach it.
+* **Group commits, not flushes.** `hooks_log_commits_total{log}` counts the turns of the loop in which a log's *durable size moved* (`log.synced`), looked at once a turn. It is not the number of `fsync` calls (a turn can make two, a handler's and the turn's), because counting calls would have meant touching a dozen call sites in `hooks.ls`, and what an operator reads from it is how many commits the events log made for how many events: with one request a turn it equals the events (the test asserts 43 of 43), under load it is far fewer. A repeat of a key flushes nothing and counts nothing.
+* **Attempts.** `hooks_attempts_total{outcome}` is `c_delivered`/`c_failed`/`c_dead`, the same cells `/stats` reads; `dead` is a dead letter. `hooks_attempt_failures_total{reason}` counts failed and dead attempts by reason (34.3). Neither survives a restart (`rate` and `increase` expect that); the per-endpoint last failure does.
+* **Lag** is the newest event's id minus the endpoint's cursor (never negative). **Retries waiting** is the events in the endpoint's window that failed at least once and are not final. **In flight** is the cell the loop already kept. **Uptime** is on the Unix clock (`clock_unix_ms` at the start of the loop), so a clock set during the run moves it.
+* **Not there.** Latency histograms (the history table has `latency_ms`; a histogram needs buckets chosen by someone who knows the receivers), connections open to the server (the server library does not export a count the handler can reach), and a dead-letter *total* across restarts (it would take a pass over the log; `hooks_attempts_total{outcome="dead"}` since the start is what there is, and `delivery.seg` has the rest).
+
+### 34.3 The reason an attempt failed
+
+`attempt.ls` ended an attempt with an HTTP status or one of four negative numbers (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). It now ends with one of seventeen codes, and `reason.ls` maps a code to a **reason**:
+
+| reason (number, name) | how an attempt gets it |
+|---|---|
+| 1 `connect_refused` | the connection failed with `ECONNREFUSED` |
+| 2 `connect_timeout` | the deadline passed while connecting (a blackholed address), or `ETIMEDOUT` |
+| 3 `connect_error` | any other connect failure: unreachable, reset, no route |
+| 4 `send_timeout`, 5 `send_error` | the deadline passed while the request was written; the write failed |
+| 6 `no_response` | the request was sent and no status line came before the deadline |
+| 7 `reset`, 8 `closed_early`, 9 `bad_response` | a read failed; the receiver closed without a status line; twelve bytes that are not `HTTP/1.x NNN` |
+| 10 `status_3xx`, 11 `status_4xx`, 12 `status_5xx`, 13 `gone`, 14 `status_other` | the HTTP status (410 is `gone`; 1xx and 6xx and up are `status_other`) |
+| 15 `busy`, 16 `too_large` | not made: all 64 connections were in use; the request does not fit its slot |
+
+The deadline case needed the state the attempt was in when the sweep ended it (`attempt.timeout_of`: connecting, sending or reading), which the sweep used to throw away. **There is no `ssrf-refused`:** the destination rule is applied when an endpoint is created or read (section 26), never to an attempt, so no attempt can end that way today; when names and the rule move to attempt time (production P1.7, T2) it takes number 17. `send_timeout` could not be reproduced in a test: a request is at most 64 KiB and loopback buffers swallow that, so it is covered by the unit test of the mapping only.
+
+**Where it is recorded, and why in both places.** Production.md allowed a new `delivery.seg` kind or the history column. Both, because they answer different questions:
+
+* **A record of kind 14 in `delivery.seg`** (`state.reason()`): the endpoint, the event, the attempt's number, and the reason in the fifth field (plus 256 for a replay's attempt), written *right after* the `failed`, `dead`, `replay_failed` or `replay_dead` record it explains and in the same flush. The 40-byte outcome record is unchanged (kind 14 is a sixth value of its first field, as 12 and 13 were). The log is the truth about delivery and is there without a database: it is what survives a restart (the last reason of each endpoint is read back at start, `hooks_endpoint_last_failure`), what `scripts/logcheck.py` counts by reason, and what a post-mortem has when the history has holes. A crash between the two records loses the reason and keeps the outcome, never the reverse.
+* **The column `attempts.reason`** (`smallint not null default 0`, `sql/schema.sql`, the queries regenerated by `pgen`): `GET /events/:id/attempts` answers `"reason":"connect_refused"` and the like (`none` for a delivery, `unrecorded` for a failed row written before the column). The `status` column keeps its coarse values (`reason.legacy_status` maps every new code to the -1, -2, -3 or -4 it would have been), so `history_test.py` passes as it was.
+
+**Compatibility.** A `delivery.seg` with a kind-14 record is refused by the previous version (status 15): a rollback needs the backup of 5. The database needs `psql -f sql/schema.sql` first; a binary that has the column in its queries and a table that lacks it is a refusal (status 20), as for every earlier column.
+
+### 34.4 Stopping
+
+`SIGTERM` or `SIGINT`: stop accepting, stop starting attempts, let the attempts on the wire finish for at most `stop-deadline-ms` (5000), flush, close the logs, exit 0. A second signal ends the process at once.
+
+**How a lex-sys program learns of a signal.** It has no builtin for it (searched: `std/`, `docs/`, the builtin table; `docs/server.md` has the one signal use there is, `signal(SIGPIPE, SIG_IGN)` through `Ffi`). `Ffi("libc")` reaches libc, and a handler is out: a callback must have an empty effect row and scalar parameters (`function-values.md`), so it could not write to a pipe or set a flag the loop reads. So the program installs no handler: at the start of the loop it **blocks** both signals (`sigblock`), and once a turn asks which are pending (`sigpending`: a system call, 50 ms of latency at most because the wait is 50 ms). When it sees one it sets `SIG_IGN`, then `SIG_DFL`, on both (ignoring a pending signal throws it away), and unblocks them (`sigsetmask(0)`): from that instant the next signal kills the process by its default action. That is the whole of "a second signal exits at once", and it needs no code to run in the dying process. `sigblock` takes an integer mask; the POSIX `sigprocmask` takes two pointers, and a lex-sys slice crosses as a pointer *and* a length, which would put the length where the second pointer goes (`strings.md` section 6), so the old BSD call it is. Four libc functions, the only foreign authority the service holds. **This changes the authority report, and the owner should weigh it:** `lex-sys authority` now opens with `UNBOUNDED: this program calls foreign code, and a library is not an authority domain` (`docs/under-a-grant.md` in lex-sys), lists `ffi("libc")` among the labels and `sigblock`, `signal`, `sigpending`, `sigsetmask` as foreign symbols; before, the service released its `Ffi` at once and the report had neither. It is confined to `src/ops.ls` and the calls in `run`; without it the service cannot learn of a signal, so cannot drain. They are in systemd's `@system-service` (`rt_sigaction`, `rt_sigpending`, `rt_sigprocmask`, `unlink`; checked with `systemd-analyze syscall-filter`, and `strace` on a run shows exactly those); `systemd-analyze verify` and `security --offline` on the unit (exposure 1.2). A signal that arrives before the loop starts (the logs are being read) has its default action and ends the process at once, which is safe.
+
+**The drain.** At the first signal the loop prints `hooks: stopping on SIGTERM: ...`, sets the stop flag and a deadline, and from then on: a request that writes is answered `503 {"error":"the service is stopping"}` and the connection closes (the check is the method, not a list of routes, so a route added later is covered); `start_attempts` starts nothing (new, retry or replay); the cron tick starts no cycle; `/readyz` is 503 `stopping`, `/metrics` says `hooks_stopping 1`; reads still answer, so a drain can be watched. The loop ends at the end of a turn in which no attempt is on the wire and the history has nothing queued or in flight (a database that is not live counts as nothing), or when the deadline has passed. Then it flushes both logs again, removes the probe files, says `hooks: stopped: ...`, and `main` closes the logs and returns 0. Attempts the deadline cut off are not recorded and are made again at the next start (at least once, as after a crash); the message counts them.
+
+**The listening socket stays open until the process exits.** This is the one thing of the item that is not as asked ("stop accepting new connections"): a connection that arrives during the drain is accepted by the server library and answered `503` with `Connection: close`. Closing the socket needs the `Listener` handle, which `main` lends to `run` for the whole loop and the server library takes by reference at every `wait`; `listener_close` consumes it. Handing `run` the listener, creating the server before `run`, and swapping in another listener for `wait` after the close compiles (a spike did it), but it moves the whole body of `run` one indentation level and every other change to the loop with it; and the server library offers no way to stop accepting while serving the connections it has. See 34.9.
+
+### 34.5 Refusing corruption (production 0.5)
+
+**Nothing is changed until everything is judged.** `logguard.preflight` opens `events.seg` and `delivery.seg` read-only, inspects each with `lexsys-log`'s own scanner (`segment.scan`, so the same length, CRC and increasing-id rules; a test compares it with a separate reader), and judges the pair against what each log would hold *after* the cut it would be given. Only then does `main` open the logs for appending, and `logguard.recover_known` apply the cut that was judged (the three steps of `log.recover`: truncate, sync; the log is not read again). So a refusal, whichever it is, leaves the directory exactly as it was (the tests compare every byte of both files and the file list), and `--repair-logs` cannot cut a log and then refuse the start. `lexsys-log` is unchanged and no patch to it is needed; `docs/lexsys-log-recover.patch` does not exist. (What would make the duplication unnecessary is a `recover` that takes the policy; see 34.9.)
+
+**(a) The pair, status 18.** The largest event id `delivery.seg` refers to (`event` of a delivered, failed, dead, replay or reason record; the starting cursor of a `created` record) must not exceed the last id of `events.seg`. If it does, the service refuses, saying both numbers and what to do. It is judged after the cuts: an `events.seg` that `--repair-logs` would shorten below what `delivery.seg` knows is refused (18) and **nothing is cut**; repairing events whose deliveries are recorded means moving `delivery.seg` aside, and every event that is left is then delivered again. `--repair-logs` never lifts 18.
+
+**(b) Damage in the middle, status 19.** After the last whole record the scan stops; what follows is **a torn tail** or **damage**:
+
+* damage if **a record that validates starts anywhere after the first bad place** (every offset is a candidate, `find_valid`), or if the bytes there **parse as two or more records of plausible length one after the other** (`chain`; the checksum is not asked: a flipped byte in a record leaves its length good);
+* otherwise a torn tail, of any size: an unfinished record, a few bytes of a header, a page of zeros, garbage, a spoiled last record, a spoiled record and a part of the next.
+
+The reason for the rule: what a crash can leave in the unsynced tail is a prefix of the truth with at most garbage after it, and **nothing that validates after garbage**; what bit rot or a bad restore leaves in the middle has intact records after it, and cutting there throws away records that are whole. Using the number of bytes (the first version of `logcheck.py` allowed one record's length) is wrong both ways: the shim of `tests/fsync_shim.c` zeroes up to 64 bytes at the end of the file, which can spoil a whole record and part of the one before it. A torn tail is cut as before, and **said, after `listening`** (the tests read the first line of stderr and wait for `listening`): `hooks: events.seg: cut a torn tail of N bytes at byte X (an unfinished write); M records are whole`.
+
+Damage is refused (19) with the log named, where it is whole to (`whole for K records (up to byte X)`), how many bytes cutting would take, how many intact records start among them (and where), and how to go on. `--repair-logs 1` cuts at X **after copying the bytes after X to `<log>.cut-X`** (written, synced, closed; if that file exists, or cannot be written, nothing is cut and the start is refused again), says `hooks: --repair-logs: events.seg: cut at byte X: N bytes gone, among them M intact records; K records are whole. The bytes are kept in events.seg.cut-X`, and goes on. It is a setting (`repair-logs`, in the file or on the command line); `GET /config` shows it, and the sample file says to give it once on the command line.
+
+**One rule, two implementations.** `scripts/logcheck.py` has the same rule (`classify_tail`), and `tests/corrupt_test.py` stage E gives 153 corruptions (150 random, 3 directed) of a small log (flips, truncations, zero runs, garbage, holes, duplicated records, a flipped byte near the end) to `logcheck.classify_tail` and then to the service, which must refuse exactly the ones the reference calls damage and cut to exactly the same byte the others.
+
+**The known false positive.** A crash that persists a later page of the unsynced tail and not an earlier one leaves intact records after a hole. They are unacknowledged (nothing after a flush's boundary was), the rule cannot tell, and the start is refused (19): an operator step (`--repair-logs 1`) and no loss. The opposite mistake cost 250 events. None of the power-cut tests produced it (the shim only truncates and zeroes the end): `chaos.py` (105 kills as power cuts), `delivery.py` (101), `scan_test` (12), `backup_test` stage B (13), `schedules_test` (6 rounds and 35 more) all restart after cuts, and none was refused (the one run of the whole suite on the final code).
+
+**Cost.** `segment.scan` is `log.recover`'s scan, done once, so `events.seg` is read as many times as before; `delivery.seg` is read once more, for the pair (`last_reference`). A start on a 241 MB `events.seg` of a million events took 4.8 to 5.2 s against 4.7 to 5.5 s before (three runs each, `listening` as the end), and on 200,000 events with a 15 MB `delivery.seg` 3.0 to 3.4 s against 3.3 to 3.7 s.
+
+### 34.6 Tests
+
+Every harness is new except `backup_test.py`, `delete_test.py`, `config_test.*` and `state_test.ls`, which changed (below). The helper `tests/opslib.py` has a service whose stderr is kept, receivers that fail in a chosen way on raw sockets (`ok`, a status, `silent`, `slow`, `reset` with an `RST`, `close`, `garbage`), an independent reader of both logs, and the strict parser of the Prometheus text. **No test waits for the clock to say something happened**: each step is taken when the service or a receiver has been seen to do what the step needs (a receiver has the request, a line is on stderr), and the only durations checked are the ones the contract is about (how long a drain may take, that it waits for its deadline).
+
+| file | checks | what |
+|---|---|---|
+| `tests/ops_test.ls`, `reason_test.ls` (unit) | 13, 6 | the counters, the readiness order, the probe's schedule, the stop deadline, the text of `/metrics` (a family once, a series per reason, a row per endpoint, 62 endpoints under 40 KB); every code an attempt can end with has its reason, the numbers are pinned (they are on disk), the legacy status |
+| `tests/metrics_test.py` | 60 | stage 1, a known workload (43 events one at a time, three with keys and repeated, five refused, three endpoints: ok, 500, nothing listening): every number against `/stats`, the logs read with another reader, and the arithmetic; stage 2 lag, retries, and the last failure across a restart; stage 3 a `410` and the breaker; stage 4 62 endpoints; stage 5 the history against the rows of the table (with a database) |
+| `tests/reason_test.py` | 36 | ten receivers, one event: the reason in `/attempts`, `/metrics`, the table's column and the log (a record of kind 14 right after its outcome), the coarse status kept, a replay's reason (+256), the last failure after a stop and a start, and ended by a delivery |
+| `tests/ready_test.py` | 28 | `/readyz` ready; a proxy cuts the database (503 `database`, delivery unaffected, no reconnect: `INFO`, 200 after a restart); a 256 KiB tmpfs fills through the service (503 `events_log`, `/healthz` still 200, a restart finds every event) and is filled by another process (503 `data_dir`, 200 again with no restart) |
+| `tests/stop_test.py` | 54 | SIGTERM and SIGINT idle; with 8 attempts on the wire and 192 events waiting (503 on writes, `/readyz`, `/metrics`, `/healthz`, no ninth request ever, the 8 recorded, exit 0, the next start delivers the rest and repeats none); the deadline (exits 0 after about it, leaving the attempts, which are repeated) and a deadline of 0; a second signal in three combinations (killed by that signal); under load (four clients posting, a slow receiver, SIGTERM: exit 0 in under 5.5 s, every acknowledged event in the log, every event reached each receiver **exactly once** across the stop and the next start) |
+| `tests/corrupt_test.py` | 113 | A the pair (an older `events.seg`, a missing one, a `created` cursor beyond, a reason record beyond: status 18, files untouched; exactly the last event starts; `--repair-logs` does not lift it); B seven kinds of damage (status 19, the numbers in the message, files untouched); C eight torn tails (cut, said after `listening`, the next id continues, the next start silent); D `--repair-logs` (the cut kept byte for byte in `<log>.cut-X`, the report, a refusal when the file exists, `delivery.seg`, a clean log, the settings file; and a repair that would make the pair disagree is refused 18 with nothing cut); E 153 corruptions (150 random, 3 directed) against `logcheck.classify_tail` |
+
+*Existing tests that had to change, and why.* `delete_test.py` stages 3e and 3f read the sequence of kinds in `delivery.seg` and now expect the reason record between `replay_failed` and `replay_dead`, and after `dead`. `state_test.ls` used 14 as "one past the last kind"; it is 15 now. `config_test.*` name two more settings in `GET /config`. `backup_test.py` stage C item 9 was *information* (what the service does with the refused pair: "NEVER DELIVERED"); it is a check now, for the pair (18) and for the flipped byte (19), given to the service itself. `scripts/logcheck.py` knows kind 14 (without it `backup_test` stage A failed: "226 records are not outcomes this version writes", which is also what the previous version would say of a log of this one).
+
+### 34.7 Mutants
+
+39 mutants of the new code, one at a time on a saved copy of the file (built, the test that should notice run, the file restored from the copy and compared; `mutate.py` is not kept in the repository, the list is here): **38 killed, 1 equivalent.**
+
+| area | mutants (killed by) |
+|---|---|
+| reasons | a refused port classed as `connect_error`; a deadline while connecting classed as `no_response`; a reset as `closed_early`; a bad status line as `closed_early`; `410` as `status_4xx` (unit test); the history `status` of a refused port not the coarse -1; the reason record never written; a replay's reason without the +256; recovery ignoring the reason record; the history row without a reason (`reason_test`, `metrics_test`) |
+| metrics | every refusal counted under 400; a key repeat counted as accepted; group commits of the events log not looked at; an endpoint's lag taken as its cursor; retries waiting counting events never attempted (`metrics_test`); a stopped service not saying `stopping` (`stop_test`) |
+| readiness | ignoring the database; ignoring a broken events log; a probe that always passes (`ready_test`) |
+| stopping | a write taken while stopping; attempts started while stopping; the second signal not ending the process; a drain that never gives up at the deadline; one that exits at once; SIGINT not looked for; SIGINT not held back (`stop_test`) |
+| the pair and damage | a pair that refers to exactly the last event refused (`>=` for `>`); a `created` record's cursor, and a reason record, not counted as references; no search for intact records after the damage; no look at records in a row; damage in `delivery.seg` not looked for; the cut bytes not kept; the cut one byte too late; a torn tail cut without a word (`corrupt_test`) |
+| the setting and the reference | `stop-deadline-ms` defaulting to 0 (`config_test.py`); `scripts/logcheck.py` without kind 14 (`backup_test`); `logcheck.py` ignoring records in a row (`corrupt_test` stage E) |
+
+**Equivalent:** `recover_known` cutting damage without `--repair-logs`: `preflight` has already refused it, so the guard in `recover_known` is defence in depth that no input reaches.
+
+Two things the first round taught. The mutant for logcheck's "records in a row" **survived** the random corpus (a random corruption rarely spoils several whole records at the end with nothing valid after them): stage E now begins with three directed cases (the last 2, 3 and 5 records spoiled), and the mutant is killed. And two mutants did not build because the compiler holds a function's effect row to what its body does (`note_reason` declaring `file_write` but never writing: "a row is exact or it is decoration"); they were rewritten to stay inside the row.
+
+### 34.8 Measured
+
+*Hot path* (`scripts/bench/run.py`, three runs each, base = the commit before this one, interleaved, a machine shared with other work, medians): CPU a delivery with 1 endpoint 85 us base, 91 us here (ranges 75 to 86 and 74 to 92); 10 endpoints 70 and 73 us; CPU an event on ingest 11 and 12 us; requests a second on ingest 40,793 and 40,484. The extra work is a `sigpending` call, a clock read and two comparisons a turn, and three adds a delivery. **Within noise, with a bias of a few percent that this machine cannot resolve.**
+
+*Start time* (to `listening`, three runs each, base first): a 241 MB `events.seg` of a million events 4.7 to 5.5 s and 4.8 to 5.2 s; 200,000 events with a 15 MB `delivery.seg` 3.3 to 3.7 s and 3.0 to 3.4 s. The scan that judges the logs is the scan `log.recover` did.
+
+*The suite*: every step of `.github/workflows/ci.yml` against a PostgreSQL of this machine's own, in order, on the final code: all green (the steps in the list: `fmt`, the unit tests, `cron`, `sign`, `config`, `history`, `roster`, `layout`, `manage`, `slots`, `patch`, `delete`, `saturation`, `ssrf`, `replay`, `gone`, `attempt`, `retry`, `isolation`, `scan`, `breaker`, `chaos` (105 kills as power cuts), `backup` (13 kills, 12 online backups), `shellcheck`, `delivery` (101 kills), `idempotency` and `schedules` with `FULL=1`, and the five new ones).
+
+### 34.10 Not verified
+
+The stop under a real systemd or in the container (the image was not rebuilt; `systemd-analyze verify` complains only that `/opt/hooks/bin/hooks` is not there, `security --offline` says 1.2, the syscalls were read with `strace` and `systemd-analyze syscall-filter`). Anything on macOS (the signal functions and the bit positions are the same by the headers, not run). `connect_timeout` needs a host where `10.255.255.1` swallows the SYN (this one does; the test checks and skips otherwise), and `send_timeout` has no test (34.3). The tmpfs part of `ready_test.py` needs root or passwordless `sudo` and is skipped without. The false positive of 34.5 is argued, not produced. The listening socket stays open in the drain (34.4). A reconnect to the database does not exist (34.9). `GET /metrics` has no credential until 0.3. The process was not measured over days.
+
+### 34.9 What the compiler and the libraries lacked
+
+* **The LLVM backend (the default since #127) cannot compile a comparison with the result of `fs_write`.** Found writing the directory probe; the Cranelift backend builds the same file. Minimal reproducer (`lex-sys build repro.ls --std`; add `--backend cranelift` and it builds):
+
+  ```
+  edition 5;
+  import std.io;
+  fn wrote[&f](fs: &f Fs("")) -> [fs_write("")] bool {
+      return fs_write(fs, "/tmp/x", "1") == 1;
+  }
+  fn main(world: World) -> [] int {
+      let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+      var ok = 1;
+      borrow fs as &f in { if wrote(f) { ok = 0; } }
+      release(ffi); release(fs); release(net); release(clock); release(args); release(io); release(heap);
+      return ok;
+  }
+  // error: the compiler failed to generate code for `wrote`; this is a bug in lex-sys, not in the program
+  //        (cannot determine the scalar kind of `FileOp { write: true, prefix: "", args: [Load(Slot(0)), Bytes("/tmp/x"), Bytes("1")] }` here)
+  ```
+
+  The workaround (`ops.ls`, `probe_write`) is to bind the result first: `let wrote = fs_write(..); return wrote == 1;`.
+* **No builtin for signals.** `Ffi("libc")` and four functions do it (34.4). A `std.signal` that says "SIGTERM or SIGINT is pending" and consumes it, behind a capability of its own, would remove the only foreign authority the service holds and the BSD `sigblock` (the POSIX call takes two pointers, and a slice crosses as a pointer and a length: `strings.md` section 6). On macOS the mask bits and `sigpending`'s buffer are the same, but **nothing here was run on macOS**.
+* **A `Listener` cannot be closed from inside the loop that serves on it.** `server.wait` takes `&!Listener` on every turn, `listener_close` consumes it, and the `http.server` package has no "stop accepting" (a `server.stop_accepting(srv)` that closes or shuts down the listener it was opened on, or a `server.open` that takes the listener by value, would do). Without it the drain leaves the socket open (34.4).
+* **The history pool cannot reopen a connection without blocking the loop.** `pg.login` is a blocking exchange (SCRAM is several round trips) on a `Conn` with no timeout, and `tcp_connect` blocks until the kernel gives up (minutes, for an address that does not answer); the only non-blocking dial is `tcp_connect_start`. So a running service cannot reconnect without a stall that would stop ingest and delivery, which is why a lost database connection is not reopened (it was documented as a limit before this section) and why `/readyz` says `database` until a restart. A `pg.pool.connect_start` that logs in under the poller would fix it. The test records the behaviour (`INFO 2.`), not as a check, so that implementing the reconnect does not need a test to be changed.
+* **`lexsys-log` has no recovery policy.** `log.recover` cuts whatever follows the last whole record. A `recover(rw, window, max_len, policy)` that returns the verdict and cuts only what the caller allows, or a `log.inspect` that does not cut, would remove the 30 lines of `logguard.recover_known` that repeat `recover`'s truncate-and-sync. No patch was needed to do the work; `segment.scan` and `record.check` are public, which is what this relies on.
+* **A `&static [byte]` cannot be compared with `==`** (`int`, `byte`, `bool`, `float` and `c_ptr` can): the tests that name a reason compare with a loop. Known (`strings.md`); it cost a rewritten assertion.
