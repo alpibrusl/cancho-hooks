@@ -16,7 +16,7 @@ It is chosen because the properties that make it hard are exactly the properties
 | the signature is checkable by anyone | an independent implementation verifies every delivery | `std.crypto` (plus HMAC, which is missing) |
 | the authority is small and visible | the service touches one data directory, one listening port, and outbound network | `lex-sys authority`, `lex-os` grants |
 
-The claim, in one sentence: **a single-node webhook service in lex-sys, with no `Ffi` (section 34.4 added four libc signal functions), that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one.
+The claim, in one sentence: **a single-node webhook service in lex-sys, with one foreign authority (`Ffi("libc")`, five functions: sections 33.5 and 34.4), that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one. **Corrected in sections 33.5 and 34.4:** "with no `Ffi`" held until the service had to learn that it was asked to stop (four libc signal functions, `src/ops.ls`) and, for the production profile, to read the mode of a file (`statx`, `src/perm.ls`), neither of which lex-sys can do; its authority report now opens with `UNBOUNDED`.
 
 ## 2. What is built from what
 
@@ -86,7 +86,7 @@ A harness drives the service with a **receiver** it controls (it records every r
 3. **A stalled receiver does not stall the others.** One endpoint that never answers; a hundred others healthy. The healthy ones' p99 delivery latency with the stalled one present is within a stated factor of without it.
 4. **Idempotency survives a crash.** The same key sent before and after a kill gets the same answer and one delivery.
 5. **Signatures verify** against an independent implementation (Python's `hmac` and `base64`), for every delivery in the run.
-6. **The authority report** has no `ffi` (until section 34.4: four libc signal functions), names one filesystem prefix, one bound port, and outbound network only. Pinned by a test.
+6. **The authority report** has no `ffi` (until sections 33.5 and 34.4: `statx` and four libc signal functions, and then it opens with `UNBOUNDED`), names one filesystem prefix, one bound port, and outbound network only. Pinned by a test.
 7. **Reported, not gated:** events accepted per second with the flush policy `always`; p50 and p99 of time from `202` to first delivery; memory and descriptors at 1,000 endpoints. The comparison is a Python service (FastAPI, Redis Streams, one worker) built to the same specification; its numbers are measured before ours and the method is written down before either.
 
 If a criterion cannot be met because a component is missing, the result says which component and what the failure looked like. That is a finding, and the purpose.
@@ -925,6 +925,209 @@ What stage 9 found, and was checked after: in each of the six rounds the log hel
 
   It hit three times (`next_tag`, `iso`, `reply` in a loop with many locals) and each was renamed; in a function as long as `run` the collisions are easy to make.
 
+## 33. Credentials on every route, and a profile that refuses to be unsafe (`docs/production.md` 0.3)
+
+**What was open.** Until here only `POST`, `PATCH` and `DELETE /endpoints` and the five `/schedules` routes needed the admin token. `POST /events`, `GET /events/:id`, `GET /events/:id/attempts`, `GET /endpoints`, `GET /endpoints/:id`, `GET /stats`, `GET /config`, `POST /endpoints/:id/enable` and the two replay routes needed nothing: whoever could reach the port could post events, read every payload, and send any event again to every receiver. The service also started happily with the data directory world-readable, private destinations on, and no token at all.
+
+### 33.1 Decisions
+
+* **Three scopes, three tokens.** `ingest` (`POST /events`, and so its idempotent retries), `read` (the `GET`s of events, attempts, endpoints, `/stats`, `/config`) and `admin` (everything that changes configuration or state: endpoints, enable, replay, schedules). The admin token also satisfies the other two; the ingest and read tokens satisfy only their own. Settings `ingest-token` and `read-token` beside `admin-token`, one rule for all three (8 to 255 visible characters; `config.plain_token`), from a file or a flag. There is no environment variable: the service reads none (section 20), and this does not add one.
+* **A scope with no token configured leaves its routes open.** This is the part that costs something, and it was chosen because the alternative breaks every existing deployment and test at once: a service that has only an `admin-token` (the only token there was) keeps accepting events and answering reads exactly as before. The routes that already said `403 management is off` still do. The price is that a service with only some of the tokens set is only partly closed, and says nothing about it; `production = 1` is the check that nothing was left out, and the runbook says in its first paragraph on the subject that the default is open. The other choice (any token set closes every scope, and an unset scope answers `403`) was considered and left to the owner: it makes a half-configured service fail closed but changes what a service with an `admin-token` has been doing since section 25.
+* **`GET /healthz` and `GET /readyz` are open whatever is configured**, because they are what the container's `HEALTHCHECK` and a load balancer call (section 34.1), and they say only that the process is up and whether it is ready. `GET /metrics` (section 34.2) is a **read** route: with a `read-token` configured a scraper sends it, and in production it needs the read token or the admin token.
+* **`401` or `403`.** A request with no token, or a token that is none of the configured ones, is a `401` with `WWW-Authenticate: Bearer` (the answer the endpoint routes always gave). A token that *is* one of the configured ones but of a scope that does not reach the route is a `403` that says which token the route needs (`this route needs the read token (or the admin token)`). Where there is no admin token the handlers' own `403` ("management is off") stays, and the gate leaves those routes to them.
+* **`production = 1` and the read token.** `read-token` is optional in production, and if it is not set the read routes need the admin token. That is done by putting the admin token in the read token's place at start (`main`), so `authz.judge` has one rule and no flag.
+* **The gate is in front of every handler** (`handle` in `hooks.ls`, straight after `route.find`), not inside each one, and in front of the stop gate of section 34.4: a write without the right token is a `401` or `403` while the service drains, as at any other time, and only a write that passes is told `503 the service is stopping`. The five handlers that already checked the admin token still do: they are the source of the `403` "management is off", and a second check costs a few microseconds on routes that are not hot.
+* **The three tokens are three blocks of 256 integers** in the delivery state, one after another from `off_token()`; `off_mg()` follows `authz.tokens_size()`, so every later offset moved by 512 and nothing was written by hand.
+
+### 33.2 Fail closed: one table, one place
+
+`src/authz.ls` has `scope_of(id)`, an entry for each route by the id `routes()` gives it, with the method and path in a comment on the same line. A route registered without an entry is `unscoped`: it needs the admin token, and **with no admin token it is refused outright (`403`)**, never open, so forgetting the entry is felt at once and in the safe direction. Three things hold the table to the routes:
+
+1. a unit test pins the scope of each of the 21 routes, and that `scope_of` of an id nobody gave a line is `unscoped` (a mutant that returns `open` there is killed);
+2. `tests/authz_test.py` reads the `route.add` lines of `hooks.ls` and the entries of `authz.ls`, and fails if a route has no entry, an entry has no route, the method or path in the comment differs, the scope differs from the test's own row, or the route has no row in the test's matrix: a route added without its row fails the test, and the failure says where to add it;
+3. the matrix itself: every route against no token, a wrong token, the ingest token, the read token and the admin token, in five ways of configuring the tokens (all three; only the admin token; none; the production profile, with the file as the source; ingest and read without an admin token). 21 routes x 5 identities x 5 configurations is 525 requests, each with the status the scope's table says. A request the gate lets through reaches its handler and has the handler's status: the service in this test has no database and no endpoint, so the handlers answer `404`, `503` and so on, which no gate does.
+
+A request that matched no route (`404`, `405`) is judged by nobody and is the same for everyone: a path that is not a route, and the methods a route has (`Allow:`), can be learned without a token.
+
+| scope | routes |
+|---|---|
+| open | `GET /healthz`, `GET /readyz` |
+| ingest | `POST /events` |
+| read | `GET /events/:id`, `GET /events/:id/attempts`, `GET /endpoints`, `GET /endpoints/:id`, `GET /stats`, `GET /config`, `GET /metrics` |
+| admin | `POST /endpoints`, `PATCH /endpoints/:id`, `DELETE /endpoints/:id`, `POST /endpoints/:id/enable`, `POST /events/:id/replay`, `POST /events/:id/replay/:endpoint`, `POST`, `GET`, `PATCH`, `DELETE` of `/schedules` and `/schedules/:id` |
+
+The reads of `/schedules` stay admin (section 32.6: a body is a payload). `GET /config` is read, not open: it says whether private hosts are allowed and what the retry schedule is. `GET /metrics` is read for the same reason: per-endpoint ids, lags and the reasons deliveries fail say how the receivers are doing.
+
+### 33.3 The comparison
+
+Not changed, and called three times instead of once. `manage.authorize` is the function of section 25.2:
+
+```
+    let given = value[7..len(value)];
+    if len(given) > 255 {
+        return 2;
+    }
+    var diff = len(given) ^ token[0];
+    var j = 0;
+    while j < 255 {
+        var a = 0;
+        if j < len(given) {
+            a = int_of(given[j]);
+        }
+        var b = 0;
+        if j < token[0] {
+            b = token[1 + j];
+        }
+        diff = diff | a ^ b;
+        j = j + 1;
+    }
+    if diff == 0 {
+        return 0;
+    }
+    return 2;
+```
+
+It looks at every one of 255 positions whichever byte differs first, folds the length in, and returns after the loop. `authz.judge` calls it for the admin, ingest and read tokens **every time**, without stopping at the first match, so the time does not depend on which token matched either. A token that is not configured (length 0) is answered `1` before the loop, which depends on the configuration and not on the request. Unit tests pin what the loop must do (a token of 255 bytes differing in its last byte, in its first and in its middle; one that is the prefix of another, or longer by one byte; the scheme in any case; two `Authorization` headers refused). **What is not tested is the timing**: a constant-time claim cannot be shown by a behaviour test, and the mutants that would break it (an early return on the first differing byte) are equivalent in behaviour and are not in the table. It is read, not measured.
+
+### 33.4 The production profile
+
+`production = 1` (a setting, so a file line or a flag). `config.production_status` judges the settings, `perm.files` the data directory, both before anything is opened; there is **one exit status for each cause** and a line on stderr that begins `hooks: production = 1 refuses to start:` and names the setting or the path.
+
+| status | cause | message names |
+|---|---|---|
+| 30 | `admin-token` not set | `admin-token` |
+| 31 | `ingest-token` not set | `ingest-token` |
+| 32 | `allow-private-hosts` is 1 | `allow-private-hosts` |
+| 33 | the directory, `events.seg`, `delivery.seg` or `endpoints.conf` can be read or written by the group or by others (mode `& 0o066`) | the path |
+| 34 | two of the three tokens are the same | `admin-token, ingest-token and read-token` |
+| 35 | the mode of the directory cannot be read, or of a file that opens | the path |
+
+Causes are found in that order, so a service with several things wrong says one at a time, the same one each time. Status 34 is an addition to what the plan listed: a read or ingest token that is the admin token gives its holder the admin scope, and a profile that allows that is not one. A **database is not required**: the profile is about who may call the service, and a file of endpoints with no database is a small deployment that works (`POST /endpoints` and the schedules answer `503`). The decision, taken on the owner's behalf and reversible in one line of `production_status`: a missing capability is told by a `503`, not by a refusal to start.
+
+**What counts as exposed** is any read or write bit for the group or for others (`0o060`, `0o006`). A search bit alone on a directory (`0710`, `0701`, `0711`) is allowed: it lets nobody read or write anything by itself, and the files in it are judged on their own. A symbolic link is judged by its target.
+
+**The umask trap, found while writing the test.** The logs the service makes are `0666` less its umask, so under the usual `022` the first start of `production = 1` in an empty directory made `events.seg` `0644`, and the second start would have refused it. The files are therefore judged twice: before anything is opened (the directory, and whichever of the three files exist), and again after the logs are opened and recovered, so a start that made files it would refuse says so at once instead of at the next restart. The refusal at that point leaves the empty files it made; the message names the file, the runbook says to start with `umask 077`, and the systemd unit (`UMask=0077`, `StateDirectoryMode=0700`) and the container image (`deploy/hooks-entrypoint.sh`, `/var/lib/hooks` `0700`) are changed to do so. `scripts/restore.sh` already wrote under `umask 077`. Neither the Dockerfile nor the unit was run: there is no Docker and no systemd in the sandbox this was built in.
+
+### 33.5 The one call into libc, and the compiler gaps it exposed
+
+A mode is a fact lex-sys cannot read. Opening a file does not tell it (the owner can always open its own file), and the compiler has no `stat`:
+
+```
+borrow fs as &f in { mode = fs_stat(f, "/tmp"); }
+  error: `fs_stat` is not a function in this program
+```
+
+(`docs/agent-toolbox.md` in lex-sys lists this as A.2 and L3.) The only way left was `Ffi("libc")` and `statx`, which is what `src/perm.ls` does: one extern, read-only, called on the data directory and its three files, and only with `production = 1`. `statx` and not `stat` because `struct statx` has the same layout on x86-64 and aarch64 and `struct stat` does not; the mode is the 16-bit field at offset 28, and `stx_mask` is checked for `STATX_MODE` so a mode the kernel did not fill in is a refusal and not a guess (little-endian machines only; on a big-endian one the mask check fails and the profile refuses, which is safe).
+
+Three consequences, stated plainly because the first is a loss:
+
+1. **The authority report is `UNBOUNDED`** (`lex-sys authority` prints "this program calls foreign code", lists `ffi("libc")` among the labels as unbounded and `statx` among the foreign symbols). Before the production profile and the graceful stop, the report named every capability the service has (the README said "No `Ffi`"); now it does not bound them. The service holds `Ffi("libc")` for **five** functions: this one, and the four signal functions of section 34.4, which make the report `UNBOUNDED` on their own, so removing `statx` alone would not bound it again. The README, the page and this document say so. `src/perm.ls` is one small file, and when lex-sys has a file-mode builtin it is a few lines; with a signal builtin as well (section 34.9) the `Ffi` is gone and the report is bounded again. If the check is not worth the foreign call, the whole of it is `src/perm.ls`, one `perm.files` call site in `main` (two, counting the check after the logs are opened) and `statx`'s share of the `libc` handle: removing them leaves statuses 33 and 35 unreachable and nothing else changed. (`docs/production.md` P1 item 7 already expects `https` to bring OpenSSL, which makes the report `UNBOUNDED` too.)
+2. **A slice crosses a foreign call as a pointer and a length, two arguments, and there is no way to pass a pointer alone.** `statx(dirfd, path, flags, mask, buf)` declared as the header has it gets `flags` = the path's length and `mask` = the real flags, and fails with `EINVAL` (reproducer below). The declaration in `perm.ls` is written for the shift: no `flags`, and the path passed as an empty slice at the start of its buffer, so the length that lands in `flags` is 0.
+
+   ```
+   extern fn statx[&f, &p, &b](ffi: &f Ffi("libc"), dirfd: int, path: &p [byte], flags: int, mask: int, buf: &!b [byte]) -> [ffi("libc")] c_int;
+   ... statx(l, 0 - 100, path, 0, 2, buf)       // path is "/tmp", 8 bytes
+   $ strace -e trace=statx ./a.out
+   statx(AT_FDCWD, "/tmp", AT_STATX_SYNC_AS_STAT|0x8, 0, 0x2) = -1 EINVAL     // flags is the length, mask is flags, buf is mask
+   ```
+3. **A string literal has no `\x` escape** (`"del\x7f"` is "`\x` is not an escape; a string literal takes `\n`, `\r`, `\t`, `\\`, `\"` and `\0`"), so a unit test cannot put a byte above 126 in a token; the test of that is in Python (`tests/authz_test.py` refuses a token with DEL and with a non-ASCII character).
+
+### 33.6 Secrets at rest: the database is the trust boundary
+
+The endpoints' signing secrets are in the clear in the `endpoints` table and `endpoints.conf` (said since section 24.1). Encryption was considered and **not built**: the service signs every delivery with the secret, so it must be able to read it, and a key it can read is a key anyone who can read the process's memory or its settings can read; encryption at rest with a key from outside the database moves the problem to that key and adds a rotation and a recovery story for it, and protects only against a stolen table or backup. The decision is the plainer statement, in the README, the runbook and the sample settings: **the database is the trust boundary**. Whoever can read the table, or a backup of it, can sign as the service. The recommendation is to give the service's database role only `select`, `insert`, `update` and `delete` on `endpoints`, `attempts` and `schedules` and `usage` on the sequence, to keep the database off any network the senders or receivers share, and to encrypt the disk and the backups. A role that can only call what the service calls cannot create other roles, read other databases or drop tables; it can still read every secret, which is why the statement is not "the secrets are safe".
+
+### 33.7 A token on stderr, found by the test that looked
+
+The first leak test passed, and the second (a token that is *refused as a setting*) did not: `hooks: \`--admin-token=short\` has a value that setting does not take`. A message that quotes what was typed is the right behaviour for `--window-ms=-1` (section 20), and the wrong one for a token, which is most likely the real one with a typo, or one with a space in it that the shell split. The same was true of `--pg-password=` since section 24. `say_flag` now prints `--admin-token=<hidden>` (and likewise for `--ingest-token`, `--read-token` and `--pg-password`); the form with a separate value (`--admin-token short`) only ever named the flag, and a refused line of a settings file is a line number. Nothing else the service prints can contain a token: the rest of stderr is the word `listening`, the production profile's lines (which name settings and paths) and the lines of section 34 (the stop, a log cut or refused), which name logs, counts and byte offsets.
+
+### 33.8 Tests, and the mutants
+
+**Gate and evidence.** Everything below was run on the code of this section (before the operating features of section 34 were combined with it) against a PostgreSQL of its own, together with the whole existing suite exactly as `.github/workflows/ci.yml` runs it (30 steps, every one green; the two new ones are `tests/authz_test.py` and `tests/production_test.py`).
+
+| test | what it pins | result |
+|---|---|---|
+| `lex-sys test`, set `authz` (`tests/authz_test.ls`) | the scope of each of the 19 routes then (21 now: `/readyz` open, `/metrics` read) and of an id nobody gave a line; the verdict for no token, a wrong one, and each of the three, with every way of configuring the tokens that matters (all, none, one at a time, the production fall-back); a request that matched no route; what is a token on the wire (the scheme in any case, one header, the whole token, a prefix of another, 255 bytes differing in the last, the first or the middle byte); which modes `perm.private` calls private | 9 passed |
+| `lex-sys test`, set `config` | the three tokens' rule and places in the blob, `production`, `production_status` cause by cause and in order, the messages | 17 passed (4 new) |
+| `tests/authz_test.py` | stages 1 to 4 below | 226 checks, 0 failures |
+| `tests/production_test.py` | stages 1 to 7 below | 113 checks, 0 failures (with `HOOKS_PG`; 112 and one skipped without) |
+| `tests/config_test.py` | the three new settings refused when wrong; `/config` has `production` | 40 checks, 0 failures |
+
+The stages of `tests/authz_test.py`: **1** the routes of the source (read from the `route.add` lines), the rows of the test and the entries of `src/authz.ls` are the same set, with the same method, path and scope, and ids are unique; **2** the matrix: 19 routes then (21 now) x 5 identities (no token, wrong, ingest, read, admin) x 5 configurations (all three tokens, flags; only the admin token, flags; none; the production profile, from a file; ingest and read without an admin token, from a file) = 475 requests then (525 now), each with the status the scope's table says, `401` with `WWW-Authenticate: Bearer`, `403` naming the scope, `403` "management is off" where there is no admin token; **3** a path that is no route is a `404` and a wrong method a `405` with `Allow`, for every identity; the scheme in other case is accepted; no scheme, a token with a byte more or less, another scheme and two `Authorization` headers are refused; `/config` says whether the profile is on; **4** no token is in any of 686 answers (bodies and headers), `GET /config` and `GET /stats` among them, or on the stderr of a service that was asked everything (`listening` and nothing else); a token that is refused as a setting (too short, a space, DEL, a non-ASCII character, empty) is not repeated by the message that refuses it, as a flag with `=`, as a flag with a separate value, or as a line of a file.
+
+The stages of `tests/production_test.py`: **1** each cause is a refusal with its exit status and a message that begins `hooks: production = 1 refuses to start:` and names the setting or the path, nothing is created in the directory by a refusal that comes before the logs are opened, the six statuses are different and none is 0, 2, 3 or 10 to 20; **2** twelve modes of the directory and nine of each of the three files that have a read or write bit for the group or others are refused and the path is named, and `0600`, `0400`, `0700`, `0710`, `0701`, `0711` (and `0000` for a file) are not refused for their mode; a symbolic link is judged by its target; **3** the first start under a umask of 022 makes logs of `0644` and is refused after opening them, naming `events.seg`, and so is the next; after `chmod 600` it starts; under 077 it starts and the logs are `0600`; **4** all safe it starts (three tokens; two; from a file; the sample file of `deploy/` with its production lines uncommented; with a database named), `/healthz` is open, `/config` needs a token and says `"production":1`, the ingest token cannot read; `--production 0` over a file that says 1, and no production at all with an open directory, no tokens and private hosts, start; **5** with everything wrong at once the causes come in the order 30, 31, 32, 34, 33; **7** (a preloaded `statx` that fails, or answers without a mode, for the logs or for the directory) a mode that cannot be read is a refusal (35) naming the path, never a pass, and without the profile the call is never made.
+
+**What was found by the tests, and fixed.** A refused token on the command line was repeated in the message that refused it (section 33.7). The first draft of the production test passed with the logs created under a umask of 022 and refused them at the second start (33.4). A mutant that makes the minimum token length 4 made the refusal test *start a service on port 1 and wait for it for ever*; the test now kills a service that does not refuse and counts that as a failure.
+
+**Existing tests changed when sections 33 and 34 were combined.** `/readyz` (open) and `/metrics` (read) are two more rows of the matrix of `tests/authz_test.py` (21 routes, 525 requests, 236 checks, 746 answers searched for a token) and of the unit test of the table (`scope_of(40)`, `scope_of(41)`); `ops_test.ls` lost the test that pinned `/metrics` as open until the tokens existed (`ops.scope_metrics()` is gone: the scope is a line of `src/authz.ls`). The stage of `authz_test.py` that reads a service's stderr ended the service with `SIGTERM`, which since section 34.4 prints two lines of its own, and expected `listening` alone; it now expects `listening` and then only those two lines (`hooks: stopping on SIGTERM:` and `hooks: stopped:`), and still no token anywhere.
+
+**Existing tests changed, and why (section 33 alone).** `tests/delete_test.py`: eleven requests of `replay` and `enable` that explicitly sent no token now send the admin token, because that test sets an `admin-token` and those two routes are admin routes now; no assertion changed. `tests/config_test.ls`: one assertion said the admin token's place was the last of the settings' blob (`len(blob) == token_at() + 256`); it now says the three tokens' places are side by side and the read token's is the last (`len(blob) == read_token_at() + 256`). `tests/config_test.py`: the `/config` it expects has `"production": 0`. Every other existing test passes unchanged, among them `manage_test.py`, `patch_test.py`, `schedules_test.py` and `ssrf_test.py`, which set an admin token and send it where it is needed.
+
+**The hot path** (`POST /events`, 50,000 events over 64 keep-alive connections, the service's CPU time from `/proc`, five interleaved runs of each on a shared 4-core machine with a load average above 4, so the numbers are a bound and not a benchmark). CPU per event in microseconds, minimum to maximum (median): the build before this change 11.0 to 12.0 (11.4); this build with no token 9.2 to 11.6 (10.6); with the admin and ingest tokens and the header sent 9.6 to 13.0 (11.2); the production profile 10.4 to 11.8 (11.2). Indistinguishable from the noise. With the ingest token the load generator gets 202 for every request and without it, or with a wrong one, 401 for every request.
+
+**Mutants: 45 run, 42 killed, 3 survived (each equivalent in behaviour, and said why).** Each is one edit to a saved copy of the file in a scratch copy of the tree, built, run against the unit tests and the three Python tests (all of them, not until the first failure), and the file restored from the copy (checked with `cmp`; no mutant was left on disk). The "caught by" column is every suite that failed.
+
+| mutant | the edit | caught by |
+|---|---|---|
+| A1 | A request that matched no route is judged like one that did | unit tests, `authz_test.py` |
+| A2 | GET /healthz is not open | unit tests, `authz_test.py`, `production_test.py` |
+| A3 | The admin token does not satisfy ingest | unit tests, `authz_test.py` |
+| A4 | The read scope without a read token is not open | unit tests, `authz_test.py`, `production_test.py`, `config_test.py` |
+| A5 | The admin routes without an admin token are not left to their handlers | unit tests, `authz_test.py` |
+| A6 | A route with no scope and no admin token is open | unit tests |
+| A7 | A route with no line in the table is open (fail open) | unit tests |
+| A8 | POST /events needs read, not ingest | unit tests, `authz_test.py` |
+| A9 | Enable needs only read | unit tests, `authz_test.py` |
+| A10 | Attempts need no token | unit tests, `authz_test.py` |
+| A11 | The read token on an ingest route is a 401, not a 403 | unit tests, `authz_test.py` |
+| A12 | A lower token on an admin route is a 401, not a 403 | unit tests, `authz_test.py` |
+| A13 | The read token is read from the ingest token's place | unit tests, `authz_test.py`, `production_test.py` |
+| A14 | A 401 without WWW-Authenticate | `authz_test.py` |
+| A15 | A 403 does not say which scope the route needs | `authz_test.py` |
+| A16 | The admin token does not satisfy the admin scope | unit tests, `authz_test.py` |
+| H1 | The gate is not called | `authz_test.py`, `production_test.py` |
+| H2 | The ingest token is never put in the delivery state | `authz_test.py`, `production_test.py` |
+| H3 | In production the read routes do not fall back to the admin token | `authz_test.py`, `production_test.py` |
+| H4 | The modes of the logs are not judged after they are opened | `production_test.py` |
+| H5 | /config says production is off | `authz_test.py`, `production_test.py` |
+| H6 | A refused token on the command line is repeated in the message | `authz_test.py` |
+| H7 | The refusal for a mode does not name the directory | `production_test.py` |
+| H8 | The production profile is never judged | `production_test.py` |
+| C1 | The shortest token is 4, not 8 | unit tests, `authz_test.py`, `config_test.py` |
+| C2 | Production does not need an ingest token | unit tests, `production_test.py` |
+| C3 | Production allows private hosts | unit tests, `production_test.py` |
+| C4 | A token that is the prefix of another is the same token | unit tests |
+| C5 | Production does not need an admin token | unit tests, `production_test.py` |
+| C6 | The read token may be the ingest token | unit tests, `production_test.py` |
+| C7 | Production = 1 is not kept | unit tests, `authz_test.py`, `production_test.py` |
+| C8 | The read token is kept in the ingest token's place | unit tests, `authz_test.py`, `production_test.py` |
+| P1 | A bit for the group is not looked at | unit tests, `production_test.py` |
+| P2 | Endpoints.conf is not judged | `production_test.py` |
+| P3 | A data directory that is not there is not a refusal | `production_test.py` |
+| P4 | An exposed mode is not a refusal | `production_test.py` |
+| P5 | Every readable mode is private | unit tests, `production_test.py` |
+| P6 | A statx that fails is taken for one that worked | **survived** (equivalent, below) |
+| P7 | A mode the kernel did not fill in is read anyway | `production_test.py` |
+| P67 | The mode is read from the answer whether or not statx gave one (P6 and P7 together) | `production_test.py` |
+| P8 | The mode's high byte (the sticky and setid bits, and the type) is dropped | **survived** (equivalent, below) |
+| P9 | A path that opens but whose mode is unreadable is taken as absent | `production_test.py` |
+| M1 | The last byte of a 255-byte token is not compared | unit tests |
+| M3 | A second Authorization header is ignored | unit tests, `authz_test.py` |
+| M2 | The length is not part of the comparison | **survived** (equivalent, below) |
+
+The survivors: **P6** (`statx` returning -1 taken for success) is guarded a second time by the mask check (a failed call fills in no mask), so alone it changes nothing; **P67** removes both guards and is killed. **P8** (the mode's high byte dropped) changes nothing that is judged: the six bits looked at (`0o066`) are all in the low byte. **M2** (the length left out of the comparison) is guarded by the zero padding of the loop (a longer or shorter token differs at a position past the shorter one) and by the parser, which refuses a NUL in a header (`Bearer <token>\x00` is a `400`), the only way a token and a longer string could agree on every position. The mutants that cannot be killed by a behaviour test are the ones that change only the *time* of the comparison (an early return on the first differing byte); there is none in the table, and 33.3 says the time is read, not measured.
+
+**A route added without a scope** was also run, three ways, on a scratch copy: R1 a route with a handler and neither an entry in `authz.ls` nor a row in the test fails three checks of stage 1 (no row, no entry, 19 entries for 20 routes); R2 an entry and no row fails the row check; R3 a row and no entry fails the entry check and the matrix (the route is admin-only at run time, which is not the scope the row says). And at run time R1 behaves as the rule says: with no token configured `GET /zz` is a `403` ("this route has no declared scope and the service was not given an admin-token"); with the three tokens, no token is a `401`, the read and the ingest token a `403` ("this route needs the admin token") and the admin token a `200`.
+
+**What the tests do not pin.**
+
+* **The time of the comparison** (33.3), by nature.
+* **The container image, the entry point and the unit.** No Docker and no systemd in the sandbox: `shellcheck` is clean on `deploy/hooks-entrypoint.sh`, and the unit's change is two lines (`StateDirectoryMode`, the `RestartPreventExitStatus` list); neither was run. `tests/production_test.py` runs the sample settings file.
+* **A filesystem whose modes mean something else.** `statx` reports what the filesystem says. A directory on a mount that shows every file as `0777` (some network and FAT mounts) is refused, which is the safe direction; extended ACLs are judged by the group bits the kernel shows, nothing more; a volume that is `0700` to its owner and shared by uid with another service is not detected (the mode is all this looks at).
+* **A big-endian machine** (the mode is read as two little-endian bytes; on the other kind the mask check refuses, which is safe and not tested), and **a kernel without `statx`** (before 4.11; the call fails and the profile refuses with 35, tested with the shim).
+* **The user.** The tests ran as root and, for the two new ones, also as `nobody`; the mode checks do not depend on who runs them, the tests of unreadable files (`0000`) accept either a start or a status 10.
+* **Whether a start that was refused after its logs were opened is clean.** It leaves two empty files (33.4); the tests check the message and the status, not what a restart does with them beyond refusing again.
+* **Several services on one directory**, and tokens in the process's command line (`ps`): the documents say to use a file.
+* **A 24-hour run with the tokens on**, and a request path with the read token under load (only ingest was measured).
 
 ## 34. Operating it: ready, watched, stopped, and not repaired in silence (`docs/production.md` 0.4 and 0.5)
 
@@ -943,7 +1146,7 @@ The service could be run, but not operated: `GET /healthz` answered `200` with t
 | `data_dir` | a 1-byte file could not be written in the data directory at the last probe (once a second) | by itself, when space is back |
 | `database` | a database is named and neither of its two connections is live | a restart (34.9) |
 
-It reads three flags and the last probe: it waits for nothing and writes nothing, so it can be asked as often as a load balancer likes. `/healthz` is unchanged (and still `200` with the disk full: it is the liveness question). Both are open; `GET /metrics` is open too and carries its scope in one place, `ops.scope_metrics()` (0, open), which the scoped tokens of 0.3 turn into a read scope; the handler is `id == 41` in `hooks.ls`.
+It reads three flags and the last probe: it waits for nothing and writes nothing, so it can be asked as often as a load balancer likes. `/healthz` is unchanged (and still `200` with the disk full: it is the liveness question). `/readyz` is open whatever tokens are configured (it is the container's health check and a load balancer's), and `/healthz` too; `GET /metrics` is a **read** route (section 33): its scope is its line in `src/authz.ls`, like every route's. The handlers are `id == 40` and `id == 41` in `hooks.ls`.
 
 **Why the probe, and why two files.** A log whose handle is open keeps taking writes after the directory's permissions change, and a full disk shows in a log only as the *first failed write*, which breaks the log until a restart. If `/readyz` already says 503 `data_dir` when the disk fills, a balancer stops sending events, no write fails, and when space returns the service is ready again without a restart. The probe must therefore be able to fail on a full disk, and a file rewritten in place cannot: truncating it frees the block the rewrite needs (measured on a 64 KiB tmpfs with a script: on the full disk a truncate-and-write of the same file succeeds, and a new file fails with `ENOSPC`). The probe writes `.writable-0` and `.writable-1` by turns, and removes the other after the write succeeds, so the new file needs a block of its own while the old one still holds its. A clean stop removes both. (A read-only remount would be the same; a tmpfs cannot be remounted read-only while the service holds its logs open for writing, `EBUSY`, so the test fills the disk instead.)
 
@@ -953,7 +1156,7 @@ It reads three flags and the last probe: it waits for nothing and writes nothing
 
 The Prometheus text exposition format 0.0.4 (`text/plain; version=0.0.4`), about 100 series for the service and 7 for each endpoint, none labelled by anything that grows: `endpoint` (an id, at most 62), `reason` (16), `outcome` (3), `result`, `log` and `status` (a handful each). A strict parser in `tests/opslib.py` reads the answer (HELP and TYPE once and before the samples, a family's samples together, no series twice, counters named `_total`). 62 endpoints answer in 24.9 KB, under the server's 64 KiB output buffer (a unit test pins the bound); the cost of a scrape is one walk over each endpoint's 1,024 cells (for the events waiting for a retry): 0.46 ms a scrape against 0.26 ms for `/healthz`, 62 endpoints, 200 scrapes from a Python client.
 
-* **Where the numbers live.** The counters of `ops.ls` are the last 112 integers of the delivery state (`off_ops()`), so no signature of `handle` or `run` grew for them. The *formatting* is `metrics.ls`, pure: `hooks.ls` fills two arrays (`gather`: the service in one, a row per endpoint in the other) and `metrics.render` writes text from them. That is why it is unit-tested on its own (`tests/ops_test.ls`, 13 tests, including the 62-endpoint size).
+* **Where the numbers live.** The counters of `ops.ls` are the last 112 integers of the delivery state (`off_ops()`), so no signature of `handle` or `run` grew for them. The *formatting* is `metrics.ls`, pure: `hooks.ls` fills two arrays (`gather`: the service in one, a row per endpoint in the other) and `metrics.render` writes text from them. That is why it is unit-tested on its own (`tests/ops_test.ls`, 12 tests after section 33 replaced the one that pinned `/metrics` as open, including the 62-endpoint size).
 * **Ingest.** `accepted` is counted when the `202` is sent, after the flush (a flush that fails makes it a `503` and counts `refused` under 503 for each request held); `duplicate` is an `Idempotency-Key` repeat that was acknowledged; `refused` is what the handler refused, by status (400, 413, 422, 503, 507, other). Requests the HTTP layer refuses before the handler (a malformed head, a head over 16 KiB) are not counted: they never reach it.
 * **Group commits, not flushes.** `hooks_log_commits_total{log}` counts the turns of the loop in which a log's *durable size moved* (`log.synced`), looked at once a turn. It is not the number of `fsync` calls (a turn can make two, a handler's and the turn's), because counting calls would have meant touching a dozen call sites in `hooks.ls`, and what an operator reads from it is how many commits the events log made for how many events: with one request a turn it equals the events (the test asserts 43 of 43), under load it is far fewer. A repeat of a key flushes nothing and counts nothing.
 * **Attempts.** `hooks_attempts_total{outcome}` is `c_delivered`/`c_failed`/`c_dead`, the same cells `/stats` reads; `dead` is a dead letter. `hooks_attempt_failures_total{reason}` counts failed and dead attempts by reason (34.3). Neither survives a restart (`rate` and `increase` expect that); the per-endpoint last failure does.
@@ -988,9 +1191,9 @@ The deadline case needed the state the attempt was in when the sweep ended it (`
 
 `SIGTERM` or `SIGINT`: stop accepting, stop starting attempts, let the attempts on the wire finish for at most `stop-deadline-ms` (5000), flush, close the logs, exit 0. A second signal ends the process at once.
 
-**How a lex-sys program learns of a signal.** It has no builtin for it (searched: `std/`, `docs/`, the builtin table; `docs/server.md` has the one signal use there is, `signal(SIGPIPE, SIG_IGN)` through `Ffi`). `Ffi("libc")` reaches libc, and a handler is out: a callback must have an empty effect row and scalar parameters (`function-values.md`), so it could not write to a pipe or set a flag the loop reads. So the program installs no handler: at the start of the loop it **blocks** both signals (`sigblock`), and once a turn asks which are pending (`sigpending`: a system call, 50 ms of latency at most because the wait is 50 ms). When it sees one it sets `SIG_IGN`, then `SIG_DFL`, on both (ignoring a pending signal throws it away), and unblocks them (`sigsetmask(0)`): from that instant the next signal kills the process by its default action. That is the whole of "a second signal exits at once", and it needs no code to run in the dying process. `sigblock` takes an integer mask; the POSIX `sigprocmask` takes two pointers, and a lex-sys slice crosses as a pointer *and* a length, which would put the length where the second pointer goes (`strings.md` section 6), so the old BSD call it is. Four libc functions, the only foreign authority the service holds. **This changes the authority report, and the owner should weigh it:** `lex-sys authority` now opens with `UNBOUNDED: this program calls foreign code, and a library is not an authority domain` (`docs/under-a-grant.md` in lex-sys), lists `ffi("libc")` among the labels and `sigblock`, `signal`, `sigpending`, `sigsetmask` as foreign symbols; before, the service released its `Ffi` at once and the report had neither. It is confined to `src/ops.ls` and the calls in `run`; without it the service cannot learn of a signal, so cannot drain. They are in systemd's `@system-service` (`rt_sigaction`, `rt_sigpending`, `rt_sigprocmask`, `unlink`; checked with `systemd-analyze syscall-filter`, and `strace` on a run shows exactly those); `systemd-analyze verify` and `security --offline` on the unit (exposure 1.2). A signal that arrives before the loop starts (the logs are being read) has its default action and ends the process at once, which is safe.
+**How a lex-sys program learns of a signal.** It has no builtin for it (searched: `std/`, `docs/`, the builtin table; `docs/server.md` has the one signal use there is, `signal(SIGPIPE, SIG_IGN)` through `Ffi`). `Ffi("libc")` reaches libc, and a handler is out: a callback must have an empty effect row and scalar parameters (`function-values.md`), so it could not write to a pipe or set a flag the loop reads. So the program installs no handler: at the start of the loop it **blocks** both signals (`sigblock`), and once a turn asks which are pending (`sigpending`: a system call, 50 ms of latency at most because the wait is 50 ms). When it sees one it sets `SIG_IGN`, then `SIG_DFL`, on both (ignoring a pending signal throws it away), and unblocks them (`sigsetmask(0)`): from that instant the next signal kills the process by its default action. That is the whole of "a second signal exits at once", and it needs no code to run in the dying process. `sigblock` takes an integer mask; the POSIX `sigprocmask` takes two pointers, and a lex-sys slice crosses as a pointer *and* a length, which would put the length where the second pointer goes (`strings.md` section 6), so the old BSD call it is. Four libc functions, which with `statx` of the production profile (section 33.5) are the only foreign authority the service holds. **This changes the authority report, and the owner should weigh it:** `lex-sys authority` opens with `UNBOUNDED: this program calls foreign code, and a library is not an authority domain` (`docs/under-a-grant.md` in lex-sys), lists `ffi("libc")` among the labels and `sigblock`, `signal`, `sigpending`, `sigsetmask` (and `statx`) as foreign symbols; without the signal functions the service would release its `Ffi` at once and the report would have neither, unless `statx` is there. The signal calls are confined to `src/ops.ls` and the calls in `run`; without them the service cannot learn of a signal, so cannot drain. They are in systemd's `@system-service` (`rt_sigaction`, `rt_sigpending`, `rt_sigprocmask`, `unlink`; checked with `systemd-analyze syscall-filter`, and `strace` on a run shows exactly those); `systemd-analyze verify` and `security --offline` on the unit (exposure 1.2). A signal that arrives before the loop starts (the logs are being read) has its default action and ends the process at once, which is safe.
 
-**The drain.** At the first signal the loop prints `hooks: stopping on SIGTERM: ...`, sets the stop flag and a deadline, and from then on: a request that writes is answered `503 {"error":"the service is stopping"}` and the connection closes (the check is the method, not a list of routes, so a route added later is covered); `start_attempts` starts nothing (new, retry or replay); the cron tick starts no cycle; `/readyz` is 503 `stopping`, `/metrics` says `hooks_stopping 1`; reads still answer, so a drain can be watched. The loop ends at the end of a turn in which no attempt is on the wire and the history has nothing queued or in flight (a database that is not live counts as nothing), or when the deadline has passed. Then it flushes both logs again, removes the probe files, says `hooks: stopped: ...`, and `main` closes the logs and returns 0. Attempts the deadline cut off are not recorded and are made again at the next start (at least once, as after a crash); the message counts them.
+**The drain.** At the first signal the loop prints `hooks: stopping on SIGTERM: ...`, sets the stop flag and a deadline, and from then on: a request that writes and has passed the credential check (section 33.1) is answered `503 {"error":"the service is stopping"}` and the connection closes (the check is the method, not a list of routes, so a route added later is covered); `start_attempts` starts nothing (new, retry or replay); the cron tick starts no cycle; `/readyz` is 503 `stopping`, `/metrics` says `hooks_stopping 1`; reads still answer, so a drain can be watched. The loop ends at the end of a turn in which no attempt is on the wire and the history has nothing queued or in flight (a database that is not live counts as nothing), or when the deadline has passed. Then it flushes both logs again, removes the probe files, says `hooks: stopped: ...`, and `main` closes the logs and returns 0. Attempts the deadline cut off are not recorded and are made again at the next start (at least once, as after a crash); the message counts them.
 
 **The listening socket stays open until the process exits.** This is the one thing of the item that is not as asked ("stop accepting new connections"): a connection that arrives during the drain is accepted by the server library and answered `503` with `Connection: close`. Closing the socket needs the `Listener` handle, which `main` lends to `run` for the whole loop and the server library takes by reference at every `wait`; `listener_close` consumes it. Handing `run` the listener, creating the server before `run`, and swapping in another listener for `wait` after the close compiles (a spike did it), but it moves the whole body of `run` one indentation level and every other change to the loop with it; and the server library offers no way to stop accepting while serving the connections it has. See 34.9.
 
@@ -1021,7 +1224,7 @@ Every harness is new except `backup_test.py`, `delete_test.py`, `config_test.*` 
 
 | file | checks | what |
 |---|---|---|
-| `tests/ops_test.ls`, `reason_test.ls` (unit) | 13, 6 | the counters, the readiness order, the probe's schedule, the stop deadline, the text of `/metrics` (a family once, a series per reason, a row per endpoint, 62 endpoints under 40 KB); every code an attempt can end with has its reason, the numbers are pinned (they are on disk), the legacy status |
+| `tests/ops_test.ls`, `reason_test.ls` (unit) | 13 then (12 now), 6 | the counters, the readiness order, the probe's schedule, the stop deadline, the text of `/metrics` (a family once, a series per reason, a row per endpoint, 62 endpoints under 40 KB); every code an attempt can end with has its reason, the numbers are pinned (they are on disk), the legacy status |
 | `tests/metrics_test.py` | 60 | stage 1, a known workload (43 events one at a time, three with keys and repeated, five refused, three endpoints: ok, 500, nothing listening): every number against `/stats`, the logs read with another reader, and the arithmetic; stage 2 lag, retries, and the last failure across a restart; stage 3 a `410` and the breaker; stage 4 62 endpoints; stage 5 the history against the rows of the table (with a database) |
 | `tests/reason_test.py` | 36 | ten receivers, one event: the reason in `/attempts`, `/metrics`, the table's column and the log (a record of kind 14 right after its outcome), the coarse status kept, a replay's reason (+256), the last failure after a stop and a start, and ended by a delivery |
 | `tests/ready_test.py` | 28 | `/readyz` ready; a proxy cuts the database (503 `database`, delivery unaffected, no reconnect: `INFO`, 200 after a restart); a 256 KiB tmpfs fills through the service (503 `events_log`, `/healthz` still 200, a restart finds every event) and is filled by another process (503 `data_dir`, 200 again with no restart) |
@@ -1053,11 +1256,11 @@ Two things the first round taught. The mutant for logcheck's "records in a row" 
 
 *Start time* (to `listening`, three runs each, base first): a 241 MB `events.seg` of a million events 4.7 to 5.5 s and 4.8 to 5.2 s; 200,000 events with a 15 MB `delivery.seg` 3.3 to 3.7 s and 3.0 to 3.4 s. The scan that judges the logs is the scan `log.recover` did.
 
-*The suite*: every step of `.github/workflows/ci.yml` against a PostgreSQL of this machine's own, in order, on the final code: all green (the steps in the list: `fmt`, the unit tests, `cron`, `sign`, `config`, `history`, `roster`, `layout`, `manage`, `slots`, `patch`, `delete`, `saturation`, `ssrf`, `replay`, `gone`, `attempt`, `retry`, `isolation`, `scan`, `breaker`, `chaos` (105 kills as power cuts), `backup` (13 kills, 12 online backups), `shellcheck`, `delivery` (101 kills), `idempotency` and `schedules` with `FULL=1`, and the five new ones).
+*The suite, combined with section 33*: every step of `.github/workflows/ci.yml` (34 test steps, including the formatting check, shellcheck, and `FULL=1` for the idempotency and schedules tests) on one build of the two features together, against a PostgreSQL of this machine's own: all green, after the one change in `tests/authz_test.py` that 33.8 names (236 checks there, 21 routes, 525 requests in the matrix, 746 answers searched for a token). *The suite before they were combined*: every step of `.github/workflows/ci.yml` as it was before the credentials of section 33 were combined with this one, against a PostgreSQL of this machine's own, in order, on the final code: all green (the steps in the list: `fmt`, the unit tests, `cron`, `sign`, `config`, `history`, `roster`, `layout`, `manage`, `slots`, `patch`, `delete`, `saturation`, `ssrf`, `replay`, `gone`, `attempt`, `retry`, `isolation`, `scan`, `breaker`, `chaos` (105 kills as power cuts), `backup` (13 kills, 12 online backups), `shellcheck`, `delivery` (101 kills), `idempotency` and `schedules` with `FULL=1`, and the five new ones).
 
 ### 34.10 Not verified
 
-The stop under a real systemd or in the container (the image was not rebuilt; `systemd-analyze verify` complains only that `/opt/hooks/bin/hooks` is not there, `security --offline` says 1.2, the syscalls were read with `strace` and `systemd-analyze syscall-filter`). Anything on macOS (the signal functions and the bit positions are the same by the headers, not run). `connect_timeout` needs a host where `10.255.255.1` swallows the SYN (this one does; the test checks and skips otherwise), and `send_timeout` has no test (34.3). The tmpfs part of `ready_test.py` needs root or passwordless `sudo` and is skipped without. The false positive of 34.5 is argued, not produced. The listening socket stays open in the drain (34.4). A reconnect to the database does not exist (34.9). `GET /metrics` has no credential until 0.3. The process was not measured over days.
+The stop under a real systemd or in the container (the image was not rebuilt; `systemd-analyze verify` complains only that `/opt/hooks/bin/hooks` is not there, `security --offline` says 1.2, the syscalls were read with `strace` and `systemd-analyze syscall-filter`). Anything on macOS (the signal functions and the bit positions are the same by the headers, not run). `connect_timeout` needs a host where `10.255.255.1` swallows the SYN (this one does; the test checks and skips otherwise), and `send_timeout` has no test (34.3). The tmpfs part of `ready_test.py` needs root or passwordless `sudo` and is skipped without. The false positive of 34.5 is argued, not produced. The listening socket stays open in the drain (34.4). A reconnect to the database does not exist (34.9). The process was not measured over days.
 
 ### 34.9 What the compiler and the libraries lacked
 
@@ -1081,7 +1284,7 @@ The stop under a real systemd or in the container (the image was not rebuilt; `s
   ```
 
   The workaround (`ops.ls`, `probe_write`) is to bind the result first: `let wrote = fs_write(..); return wrote == 1;`.
-* **No builtin for signals.** `Ffi("libc")` and four functions do it (34.4). A `std.signal` that says "SIGTERM or SIGINT is pending" and consumes it, behind a capability of its own, would remove the only foreign authority the service holds and the BSD `sigblock` (the POSIX call takes two pointers, and a slice crosses as a pointer and a length: `strings.md` section 6). On macOS the mask bits and `sigpending`'s buffer are the same, but **nothing here was run on macOS**.
+* **No builtin for signals.** `Ffi("libc")` and four functions do it (34.4). A `std.signal` that says "SIGTERM or SIGINT is pending" and consumes it, behind a capability of its own, would remove four of the five foreign symbols the service holds (the fifth is `statx`, section 33.5: with a file-mode builtin too the `Ffi`, and `UNBOUNDED` in the authority report, would go) and the BSD `sigblock` (the POSIX call takes two pointers, and a slice crosses as a pointer and a length: `strings.md` section 6). On macOS the mask bits and `sigpending`'s buffer are the same, but **nothing here was run on macOS**.
 * **A `Listener` cannot be closed from inside the loop that serves on it.** `server.wait` takes `&!Listener` on every turn, `listener_close` consumes it, and the `http.server` package has no "stop accepting" (a `server.stop_accepting(srv)` that closes or shuts down the listener it was opened on, or a `server.open` that takes the listener by value, would do). Without it the drain leaves the socket open (34.4).
 * **The history pool cannot reopen a connection without blocking the loop.** `pg.login` is a blocking exchange (SCRAM is several round trips) on a `Conn` with no timeout, and `tcp_connect` blocks until the kernel gives up (minutes, for an address that does not answer); the only non-blocking dial is `tcp_connect_start`. So a running service cannot reconnect without a stall that would stop ingest and delivery, which is why a lost database connection is not reopened (it was documented as a limit before this section) and why `/readyz` says `database` until a restart. A `pg.pool.connect_start` that logs in under the poller would fix it. The test records the behaviour (`INFO 2.`), not as a check, so that implementing the reconnect does not need a test to be changed.
 * **`lexsys-log` has no recovery policy.** `log.recover` cuts whatever follows the last whole record. A `recover(rw, window, max_len, policy)` that returns the verdict and cuts only what the caller allows, or a `log.inspect` that does not cut, would remove the 30 lines of `logguard.recover_known` that repeat `recover`'s truncate-and-sync. No patch was needed to do the work; `segment.scan` and `record.check` are public, which is what this relies on.

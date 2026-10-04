@@ -2,6 +2,7 @@ edition 5;
 
 import std.test;
 import config;
+import std.bytes;
 
 // The settings (`src/config.ls`): the defaults, each setting from a file, every way a file or a value is refused and that a
 // refusal changes nothing, and the split of one command-line argument.
@@ -297,8 +298,129 @@ fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
         test.assert_eq(config.set(cfg, blob, "admin-token", long[0..256]), config.why_value());
         // the largest token ends inside its own place: the last byte of the blob is the token's
         test.assert_eq(int_of(blob[config.token_at() + 254]), int_of(long[254]));
-        test.assert_eq(len(blob), config.token_at() + 256);
+        // the three tokens' places are side by side and the read token's is the last of the blob
+        test.assert_eq(config.token_at() + 256, config.ingest_token_at());
+        test.assert_eq(config.ingest_token_at() + 256, config.read_token_at());
+        test.assert_eq(len(blob), config.read_token_at() + 256);
     }
+    return 0;
+}
+
+// `ingest-token` and `read-token` (`docs/design.md` section 33) follow the admin token's rule exactly -- 8 to 255 visible characters, a
+// refusal leaves the one that was set -- and each lands in its own place without touching the others.
+fn test_the_ingest_and_read_tokens_follow_the_admin_tokens_rule() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.ingest_token_len(cfg), 0);
+        test.assert_eq(config.read_token_len(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "ingest-token", "seven77"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "read-token", "seven77"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "ingest-token", "has a space"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "read-token", "tab\there1"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "ingest-token", "nul\0nul123"), config.why_value());
+        test.assert_eq(config.ingest_token_len(cfg), 0);
+        test.assert_eq(config.read_token_len(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "admin-token", "aaaaaaaa"), 0);
+        test.assert_eq(config.set(cfg, blob, "ingest-token", "iiiiiiiii"), 0);
+        test.assert_eq(config.set(cfg, blob, "read-token", "rrrrrrrrrr"), 0);
+        test.assert_eq(config.token_len(cfg), 8);
+        test.assert_eq(config.ingest_token_len(cfg), 9);
+        test.assert_eq(config.read_token_len(cfg), 10);
+        test.assert_eq(int_of(blob[config.token_at()]), 'a');
+        test.assert_eq(int_of(blob[config.ingest_token_at()]), 'i');
+        test.assert_eq(int_of(blob[config.ingest_token_at() + 8]), 'i');
+        test.assert_eq(int_of(blob[config.read_token_at()]), 'r');
+        test.assert_eq(int_of(blob[config.read_token_at() + 9]), 'r');
+        // a refused token leaves the one that was set
+        test.assert_eq(config.set(cfg, blob, "ingest-token", "short"), config.why_value());
+        test.assert_eq(config.ingest_token_len(cfg), 9);
+        let long = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        test.assert_eq(config.set(cfg, blob, "ingest-token", long[0..255]), 0);
+        test.assert_eq(config.set(cfg, blob, "read-token", long[0..255]), 0);
+        test.assert_eq(config.set(cfg, blob, "ingest-token", long[0..256]), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "read-token", long[0..256]), config.why_value());
+        // the longest ones fill their own places and the admin token is untouched by either
+        test.assert_eq(int_of(blob[config.ingest_token_at() + 254]), int_of(long[254]));
+        test.assert_eq(int_of(blob[config.read_token_at() + 254]), int_of(long[254]));
+        test.assert_eq(int_of(blob[config.token_at()]), 'a');
+        test.assert_eq(config.token_len(cfg), 8);
+    }
+    return 0;
+}
+
+// `production` is 0 or 1, 0 until set, and a file can set it.
+fn test_production_is_zero_or_one() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert(!config.production(cfg));
+        test.assert_eq(config.set(cfg, blob, "production", "1"), 0);
+        test.assert(config.production(cfg));
+        test.assert_eq(config.set(cfg, blob, "production", "2"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "production", "yes"), config.why_value());
+        test.assert_eq(config.set(cfg, blob, "production", ""), config.why_value());
+        test.assert(config.production(cfg));
+        test.assert_eq(config.set(cfg, blob, "production", "0"), 0);
+        test.assert(!config.production(cfg));
+        test.assert_eq(config.parse_file("production = 1\n", cfg, blob), 0);
+        test.assert(config.production(cfg));
+    }
+    return 0;
+}
+
+// The production profile's judgement of the settings (`config.production_status`): one status for each cause, and the order in which they are
+// found (the admin token first), so that a service with several things wrong says one at a time, the same one each time.
+fn test_the_production_profile_names_one_cause_at_a_time() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.production_status(cfg, blob), 30);
+        config.set(cfg, blob, "ingest-token", "iiiiiiii");
+        test.assert_eq(config.production_status(cfg, blob), 30);
+        config.set(cfg, blob, "ingest-token", "iiiiiiii");
+        config.set(cfg, blob, "admin-token", "aaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 0);
+        // the read token is optional
+        config.set(cfg, blob, "read-token", "rrrrrrrr");
+        test.assert_eq(config.production_status(cfg, blob), 0);
+        // private hosts
+        config.set(cfg, blob, "allow-private-hosts", "1");
+        test.assert_eq(config.production_status(cfg, blob), 32);
+        config.set(cfg, blob, "allow-private-hosts", "0");
+        test.assert_eq(config.production_status(cfg, blob), 0);
+        // two tokens the same, each pair, and a prefix is not the same
+        config.set(cfg, blob, "ingest-token", "aaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 34);
+        config.set(cfg, blob, "ingest-token", "aaaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 0);
+        config.set(cfg, blob, "read-token", "aaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 34);
+        config.set(cfg, blob, "read-token", "aaaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 34);
+        config.set(cfg, blob, "read-token", "aaaaaaaaaa");
+        test.assert_eq(config.production_status(cfg, blob), 0);
+        // no ingest token
+        let none = alloc_slice[a](config.size(), 0);
+        config.defaults(none);
+        config.set(none, blob, "admin-token", "aaaaaaaa");
+        test.assert_eq(config.production_status(none, blob), 31);
+    }
+    return 0;
+}
+
+// Every status the profile ends with has a message that names what is wrong, and they are all different.
+fn test_each_production_refusal_says_which_setting() -> [] int {
+    test.assert(bytes.find(config.unsafe_message(30), "admin-token") >= 0);
+    test.assert(bytes.find(config.unsafe_message(31), "ingest-token") >= 0);
+    test.assert(bytes.find(config.unsafe_message(32), "allow-private-hosts") >= 0);
+    test.assert(bytes.find(config.unsafe_message(34), "ingest-token") >= 0);
+    test.assert(bytes.find(config.unsafe_message(33), "umask") >= 0);
+    test.assert(!bytes.equal(config.unsafe_message(30), config.unsafe_message(31)));
+    test.assert(!bytes.equal(config.unsafe_message(33), config.unsafe_message(35)));
     return 0;
 }
 

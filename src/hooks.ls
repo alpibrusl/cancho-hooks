@@ -51,6 +51,8 @@ import ops;
 import logguard;
 import reason;
 import metrics;
+import authz;
+import perm;
 
 fn max_len() -> [] int {
     return 65536;
@@ -433,7 +435,7 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
     return 0;
 }
 
-// `GET /metrics`: the Prometheus text format. The route's scope is `ops.scope_metrics()`: open until the scoped tokens of production item 0.3 name a read scope.
+// `GET /metrics`: the Prometheus text format. The route's scope is in `authz.scope_of` (read); it was open until the scoped tokens of production item 0.3 name a read scope.
 fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l log.Log, done: &g log.Log, ix: &x [int], sg: &j [int], now: int, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
     let n = dv[c_endpoints()];
     let gv = box_slice(heap, metrics.g_size(), 0);
@@ -474,16 +476,21 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
     let id = route.find(router, http.method(request, table), path, params);
+    // Who may call this route (`src/authz.ls`: the scope of every route is there, and a route with none is admin-only).
+    let verdict = authz.judge(id, request, table, stats[off_token()..off_token() + authz.tokens_size()]);
+    if verdict != authz.allowed() {
+        return authz.refuse(heap, out, verdict, id, keep);
+    }
     if ops.stopping(ops_of(stats)) && !bytes.equal(http.method(request, table), "GET") {
         // Asked to stop (`docs/design.md` section 34.4): nothing new is taken, and the connection is closed after the answer.
         return server.failure(heap, out, 503, ops.stopping_message(), false);
     }
     if id == 40 {
-        // GET /readyz (section 34.1): open, like /healthz.
+        // GET /readyz (section 34.1): open, like /healthz (`authz.scope_of`).
         return readyz_reply(heap, stats, lg, done, keep, out);
     }
     if id == 41 {
-        // GET /metrics (section 34.2). Scope: `ops.scope_metrics()`, open until production item 0.3 lands.
+        // GET /metrics (section 34.2). Scope: read (`authz.scope_of`).
         return metrics_reply(heap, stats, lg, done, ix, sg, now, keep, out);
     }
     if id >= 15 && id <= 19 {
@@ -629,6 +636,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, stats[c_private()]);
         w = json.put_key(heap, w, "breaker-days");
         w = json.put_int(heap, w, stats[c_breaker()]);
+        w = json.put_key(heap, w, "production");
+        w = json.put_int(heap, w, stats[c_production()]);
         w = json.put_key(heap, w, "cron-catchup");
         w = json.put_int(heap, w, sg[sched.catchup_at()]);
         w = json.put_key(heap, w, "cron-seconds");
@@ -985,7 +994,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 //     slotid   62    per slot: the id of the endpoint that has it, or free, or never seen
 //     scan     124   per slot: the last event of the events log that endpoint has looked at, and where the next record starts
 //     streak   62    per slot: when the endpoint's current run of failed attempts began (Unix ms), 0 if it has none
-//     token    256   the admin token: its length, then its bytes
+//     token    768   the admin, ingest and read tokens (`authz.ls`), 256 each: the length, then the bytes
 //     mg       368   the change that waits for the database (`manage.ls`)
 //     offs     63488 per slot, 1024 each: where in the events log each event of that endpoint's window starts, by `id % window`
 //     cells    ...   `state.cells(62)`: final / attempts / next attempt, per slot and `id % window`
@@ -1060,6 +1069,11 @@ fn c_tripped() -> [] int {
 // How many times the breaker has paused an endpoint since the service started.
 fn c_trips() -> [] int {
     return 14;
+}
+
+// 1 if the service was started with `production = 1` (`docs/design.md` section 33), else 0; it only shows in `GET /config`.
+fn c_production() -> [] int {
+    return 15;
 }
 
 fn is_draining[&d](dv: &d [int], e: int) -> [] bool {
@@ -1195,14 +1209,14 @@ fn off_streak() -> [] int {
     return off_scan() + 2 * state.max_endpoints();
 }
 
-// The bearer token that lets a request change endpoints (its length, then its bytes), and the one change that may wait for the
+// The bearer tokens (the admin token first; each is its length, then its bytes: `authz.ls`), and the one change that may wait for the
 // database (`manage.ls`).
 fn off_token() -> [] int {
     return off_streak() + state.max_endpoints();
 }
 
 fn off_mg() -> [] int {
-    return off_token() + manage.token_size();
+    return off_token() + authz.tokens_size();
 }
 
 fn off_offs() -> [] int {
@@ -3494,14 +3508,47 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
     }
 }
 
-// The admin token into the delivery state: its length, then its bytes, one to an integer.
-fn put_token[&d, &t](dv: &!d [int], token: &t [byte]) -> [] int {
-    dv[off_token()] = len(token);
+// A bearer token into the delivery state, at `at` (`off_token()`, plus `authz.ingest_at()` or `authz.read_at()` for the others): its
+// length, then its bytes, one to an integer.
+fn put_token[&d, &t](dv: &!d [int], at: int, token: &t [byte]) -> [] int {
+    dv[at] = len(token);
     var i = 0;
     while i < len(token) {
-        dv[off_token() + 1 + i] = int_of(token[i]);
+        dv[at + 1 + i] = int_of(token[i]);
         i = i + 1;
     }
+    return 0;
+}
+
+// A flag as the message that refuses it names it. A value that is a secret (`--admin-token=...`, `--pg-password=...`: a token that was refused
+// is most likely the real one with a typo) is not repeated.
+fn say_flag[&i, &x](out: &!i Io, flag: &x [byte]) -> [err_write] int {
+    var eq = 0;
+    while eq < len(flag) && int_of(flag[eq]) != '=' {
+        eq = eq + 1;
+    }
+    if eq < len(flag) && (bytes.starts_with(flag, "--admin-token=") || bytes.starts_with(flag, "--ingest-token=") || bytes.starts_with(flag, "--read-token=") || bytes.starts_with(flag, "--pg-password=")) {
+        say(out, flag[0..eq + 1]);
+        say(out, "<hidden>");
+        return 0;
+    }
+    return say(out, flag);
+}
+
+// What `production = 1` found wrong, on stderr, naming the setting or the path (`docs/design.md` section 33). `status` is what
+// `config.production_status` or `perm.files` answered; `dir` is the data directory and `name` the file in it that was judged (empty: the directory).
+fn say_unsafe[&i, &d, &n](out: &!i Io, status: int, dir: &d [byte], name: &n [byte]) -> [err_write] int {
+    say(out, "hooks: production = 1 refuses to start: ");
+    if status == 33 || status == 35 {
+        say(out, dir);
+        if len(name) > 0 {
+            say(out, "/");
+            say(out, name);
+        }
+        say(out, ": ");
+    }
+    say(out, config.unsafe_message(status));
+    say(out, "\n");
     return 0;
 }
 
@@ -3523,7 +3570,8 @@ fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte], open: bool) -> [heap] in
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    // Four libc functions, to learn that the service was asked to stop (`src/ops.ls`): the only foreign authority the service holds.
+    // The only foreign authority the service holds: five libc functions, four to learn that it was asked to stop (`src/ops.ls`) and
+    // one for the modes of the data directory (`src/perm.ls`; the production profile only).
     let libc = narrow(ffi, "libc");
     var port = 0 - 1;
     var status = 2;
@@ -3575,7 +3623,7 @@ fn main(world: World) -> [] int {
                 borrow mut io as &!i in {
                     let why = code % 8;
                     say(i, "hooks: `");
-                    say(i, arg(g, code / 8));
+                    say_flag(i, arg(g, code / 8));
                     if why == config.why_key() {
                         say(i, "` is not a setting\n");
                     } else if why == config.why_value() {
@@ -3610,6 +3658,30 @@ fn main(world: World) -> [] int {
         var etext_n = 0;
         var from_db = false;
         var go = bad == 0 && dir_len > 0;
+        // The production profile (`docs/design.md` section 33): refuse to start, with a status for each cause, unless the settings are safe on the
+        // internet (`config.production_status`) and the data directory and its files are private (`perm.files`). Nothing is opened before this.
+        let probe = alloc_slice[a](2304, byte_of(0));
+        if go && config.production(cfg) {
+            var why = config.production_status(cfg, cblob);
+            var which = 0;
+            if why == 0 {
+                var found = (0, 0);
+                borrow libc as &lh in {
+                    borrow fs as &fs1 in {
+                        found = perm.files(lh, fs1, cblob[0..dir_len], probe);
+                    }
+                }
+                why = found.0;
+                which = found.1;
+            }
+            if why != 0 {
+                go = false;
+                status = why;
+                borrow mut io as &!i in {
+                    say_unsafe(i, why, cblob[0..dir_len], perm.name_of(which));
+                }
+            }
+        }
         if go && config.pg_host_len(cfg) > 0 {
             if config.pg_user_len(cfg) == 0 {
                 config.set(cfg, cblob, "pg-user", "hooks");
@@ -3798,6 +3870,19 @@ fn main(world: World) -> [] int {
                                                                 ops.init(ops_of_mut(contents(dvw)));
                                                                 ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
                                                                 status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db, config.allow_private_hosts(cfg));
+                                                                if status == 0 && config.production(cfg) {
+                                                                    // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).
+                                                                    var found = (0, 0);
+                                                                    borrow libc as &lh in {
+                                                                        found = perm.files(lh, fsr, dir_buf[0..dir_len], probe);
+                                                                    }
+                                                                    if found.0 != 0 {
+                                                                        status = found.0;
+                                                                        borrow mut io as &!i in {
+                                                                            say_unsafe(i, found.0, dir_buf[0..dir_len], perm.name_of(found.1));
+                                                                        }
+                                                                    }
+                                                                }
                                                                 if status == 0 {
                                                                     borrow net as &nn in {
                                                                         match tcp_listen(nn, port, 1024, 0) {
@@ -3806,8 +3891,18 @@ fn main(world: World) -> [] int {
                                                                                 borrow mut listener as &!lh in {
                                                                                     listener_nonblocking(lh);
                                                                                     let router = routes(h);
-                                                                                    put_token(contents(dvw), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
+                                                                                    put_token(contents(dvw), off_token(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
+                                                                                    put_token(contents(dvw), off_token() + authz.ingest_at(), cblob[config.ingest_token_at()..config.ingest_token_at() + config.ingest_token_len(cfg)]);
+                                                                                    if config.read_token_len(cfg) > 0 {
+                                                                                        put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.read_token_at()..config.read_token_at() + config.read_token_len(cfg)]);
+                                                                                    } else if config.production(cfg) {
+                                                                                        // No read token: in production the reads need the admin token.
+                                                                                        put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
+                                                                                    }
                                                                                     contents(dvw)[c_breaker()] = config.breaker_days(cfg);
+                                                                                    if config.production(cfg) {
+                                                                                        contents(dvw)[c_production()] = 1;
+                                                                                    }
                                                                                     // The database for the history, if one was named: connect and log in here, before the loop, and go on
                                                                                     // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
                                                                                     var hpool = pool.empty(h, 1, 1, 4096, 4096);

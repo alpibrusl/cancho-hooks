@@ -1,0 +1,284 @@
+edition 5;
+
+import std.test;
+import std.http;
+import authz;
+import perm;
+
+// Who may call which route (`src/authz.ls`, `docs/design.md` section 33): the table of scopes, and the verdict for a request with no token, a wrong
+// one, and each of the three, with every combination of tokens configured that matters. `tests/authz_test.py` does the same against the running
+// service, for every route the source registers.
+
+fn admin_token() -> [] &static [byte] {
+    return "admin-token-0001";
+}
+
+fn ingest_token() -> [] &static [byte] {
+    return "ingest-token-0002";
+}
+
+fn read_token() -> [] &static [byte] {
+    return "read-token-0003";
+}
+
+// The tokens as the delivery state keeps them: the admin token, the ingest token, the read token, 256 integers each, the length first. A
+// token of length 0 is a token not configured.
+fn put[&t, &v](tokens: &!t [int], at: int, text: &v [byte]) -> [] int {
+    tokens[at] = len(text);
+    var i = 0;
+    while i < len(text) {
+        tokens[at + 1 + i] = int_of(text[i]);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The verdict for `id` when the request carries `authorization` (a whole header line, or "" for none) and the tokens are as configured.
+fn verdict[&t, &k](id: int, header: &static [byte], table: &!t [int], tokens: &k [int]) -> [] int {
+    region a {
+        let buf = alloc_slice[a](640, byte_of(0));
+        var n = 0;
+        let head = "GET /x HTTP/1.1\r\nHost: h\r\n";
+        var i = 0;
+        while i < len(head) {
+            buf[n] = byte_of(int_of(head[i]));
+            n = n + 1;
+            i = i + 1;
+        }
+        i = 0;
+        while i < len(header) {
+            buf[n] = byte_of(int_of(header[i]));
+            n = n + 1;
+            i = i + 1;
+        }
+        buf[n] = byte_of('\r');
+        buf[n + 1] = byte_of('\n');
+        n = n + 2;
+        if http.parse(buf[0..n], table) < 0 {
+            return 0 - 99;
+        }
+        return authz.judge(id, buf[0..n], table, tokens);
+    }
+}
+
+fn all_tokens[&t](tokens: &!t [int]) -> [] int {
+    put(tokens, 0, admin_token());
+    put(tokens, authz.ingest_at(), ingest_token());
+    put(tokens, authz.read_at(), read_token());
+    return 0;
+}
+
+fn test_every_route_has_its_scope_and_an_unknown_one_has_none() -> [] int {
+    test.assert_eq(authz.scope_of(1), authz.s_open());
+    test.assert_eq(authz.scope_of(2), authz.s_ingest());
+    test.assert_eq(authz.scope_of(3), authz.s_read());
+    test.assert_eq(authz.scope_of(4), authz.s_read());
+    test.assert_eq(authz.scope_of(5), authz.s_read());
+    test.assert_eq(authz.scope_of(6), authz.s_admin());
+    test.assert_eq(authz.scope_of(7), authz.s_read());
+    test.assert_eq(authz.scope_of(8), authz.s_admin());
+    test.assert_eq(authz.scope_of(9), authz.s_admin());
+    test.assert_eq(authz.scope_of(10), authz.s_read());
+    test.assert_eq(authz.scope_of(11), authz.s_admin());
+    test.assert_eq(authz.scope_of(12), authz.s_read());
+    test.assert_eq(authz.scope_of(13), authz.s_admin());
+    test.assert_eq(authz.scope_of(14), authz.s_admin());
+    test.assert_eq(authz.scope_of(15), authz.s_admin());
+    test.assert_eq(authz.scope_of(16), authz.s_admin());
+    test.assert_eq(authz.scope_of(17), authz.s_admin());
+    test.assert_eq(authz.scope_of(18), authz.s_admin());
+    test.assert_eq(authz.scope_of(19), authz.s_admin());
+    test.assert_eq(authz.scope_of(40), authz.s_open());
+    test.assert_eq(authz.scope_of(41), authz.s_read());
+    // a route that nobody gave a line to
+    test.assert_eq(authz.scope_of(20), authz.s_unscoped());
+    test.assert_eq(authz.scope_of(1000), authz.s_unscoped());
+    test.assert_eq(authz.scope_of(0), authz.s_unscoped());
+    return 0;
+}
+
+fn test_with_all_three_tokens_each_scope_takes_its_own_and_the_admin() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        all_tokens(tokens);
+        let none = "";
+        let wrong = "Authorization: Bearer wrong-token-0000\r\n";
+        let admin = "Authorization: Bearer admin-token-0001\r\n";
+        let ingest = "Authorization: Bearer ingest-token-0002\r\n";
+        let read = "Authorization: Bearer read-token-0003\r\n";
+        // ingest: POST /events (2)
+        test.assert_eq(verdict(2, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(2, wrong, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(2, ingest, table, tokens), authz.allowed());
+        test.assert_eq(verdict(2, read, table, tokens), authz.forbidden());
+        test.assert_eq(verdict(2, admin, table, tokens), authz.allowed());
+        // read: GET /stats (4)
+        test.assert_eq(verdict(4, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, wrong, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, ingest, table, tokens), authz.forbidden());
+        test.assert_eq(verdict(4, read, table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, admin, table, tokens), authz.allowed());
+        // admin: POST /endpoints (11)
+        test.assert_eq(verdict(11, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(11, wrong, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(11, ingest, table, tokens), authz.forbidden());
+        test.assert_eq(verdict(11, read, table, tokens), authz.forbidden());
+        test.assert_eq(verdict(11, admin, table, tokens), authz.allowed());
+        // a route nobody gave a scope: the admin's
+        test.assert_eq(verdict(99, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(99, read, table, tokens), authz.forbidden());
+        test.assert_eq(verdict(99, admin, table, tokens), authz.allowed());
+        // open: GET /healthz (1), whatever is sent
+        test.assert_eq(verdict(1, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(1, wrong, table, tokens), authz.allowed());
+    }
+    return 0;
+}
+
+fn test_a_scope_without_its_token_is_open_except_the_admins() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        let none = "";
+        let wrong = "Authorization: Bearer wrong-token-0000\r\n";
+        // nothing configured: today's service
+        test.assert_eq(verdict(2, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(3, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(3, wrong, table, tokens), authz.allowed());
+        // the admin routes are left to their handlers (`403` "management is off" for endpoints and schedules, open for enable and replay)
+        test.assert_eq(verdict(11, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(6, none, table, tokens), authz.allowed());
+        // a route with no line in the table is never open, with no token to fall back on
+        test.assert_eq(verdict(99, none, table, tokens), authz.undeclared());
+        test.assert_eq(verdict(99, wrong, table, tokens), authz.undeclared());
+        // only the admin token: ingest and read stay open, admin is closed
+        put(tokens, 0, admin_token());
+        test.assert_eq(verdict(2, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(10, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(14, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(6, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(99, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(14, "Authorization: Bearer admin-token-0001\r\n", table, tokens), authz.allowed());
+        // only the ingest token: the reads and the admin routes are as they were, and the ingest is closed
+        put(tokens, 0, "");
+        put(tokens, authz.ingest_at(), ingest_token());
+        test.assert_eq(verdict(2, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(8, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(11, "Authorization: Bearer ingest-token-0002\r\n", table, tokens), authz.allowed());
+        // only the read token
+        put(tokens, authz.ingest_at(), "");
+        put(tokens, authz.read_at(), read_token());
+        test.assert_eq(verdict(2, none, table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, none, table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer read-token-0003\r\n", table, tokens), authz.allowed());
+    }
+    return 0;
+}
+
+// The service in production keeps the admin token in the read token's place when none was given (`hooks.ls`): the verdicts are then these.
+fn test_the_admin_token_in_the_reads_place_makes_the_reads_need_it() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        put(tokens, 0, admin_token());
+        put(tokens, authz.ingest_at(), ingest_token());
+        put(tokens, authz.read_at(), admin_token());
+        test.assert_eq(verdict(4, "", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer ingest-token-0002\r\n", table, tokens), authz.forbidden());
+        test.assert_eq(verdict(4, "Authorization: Bearer admin-token-0001\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(2, "Authorization: Bearer ingest-token-0002\r\n", table, tokens), authz.allowed());
+    }
+    return 0;
+}
+
+fn test_a_request_that_matched_no_route_reveals_nothing() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        all_tokens(tokens);
+        test.assert_eq(verdict(0 - 1, "", table, tokens), authz.allowed());
+        test.assert_eq(verdict(0 - 2, "", table, tokens), authz.allowed());
+        test.assert_eq(verdict(0, "", table, tokens), authz.allowed());
+    }
+    return 0;
+}
+
+// What counts as a token on the wire: the scheme in any case, one `Authorization` header, the whole token and nothing else.
+fn test_only_the_whole_token_in_one_header_is_a_token() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        all_tokens(tokens);
+        test.assert_eq(verdict(4, "Authorization: bearer read-token-0003\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, "authorization: BEARER read-token-0003\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, "Authorization: Bearer read-token-000\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer read-token-00033\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer Read-token-0003\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Basic read-token-0003\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: read-token-0003\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer read-token-0003\r\nAuthorization: Bearer read-token-0003\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(4, "Authorization: Bearer read-token-0003\r\nAuthorization: Bearer admin-token-0001\r\n", table, tokens), authz.unauthorized());
+    }
+    return 0;
+}
+
+// A token that is the same as another one's prefix, or longer by one byte, is not it.
+fn test_a_token_that_is_a_prefix_of_another_is_not_it() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        put(tokens, 0, "abcdefgh12");
+        put(tokens, authz.ingest_at(), "abcdefgh");
+        put(tokens, authz.read_at(), "abcdefgh1");
+        test.assert_eq(verdict(4, "Authorization: Bearer abcdefgh\r\n", table, tokens), authz.forbidden());
+        test.assert_eq(verdict(4, "Authorization: Bearer abcdefgh1\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, "Authorization: Bearer abcdefgh12\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(4, "Authorization: Bearer abcdefgh123\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(11, "Authorization: Bearer abcdefgh1\r\n", table, tokens), authz.forbidden());
+        test.assert_eq(verdict(11, "Authorization: Bearer abcdefgh12\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(2, "Authorization: Bearer abcdefgh\r\n", table, tokens), authz.allowed());
+    }
+    return 0;
+}
+
+// The longest token there can be (255 bytes) is compared to its last byte, and a difference anywhere in it is a refusal.
+fn test_the_longest_token_is_compared_to_its_last_byte() -> [] int {
+    region a {
+        let tokens = alloc_slice[a](authz.tokens_size(), 0);
+        let table = alloc_slice[a](http.slots(8), 0);
+        put(tokens, 0, "012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234");
+        test.assert_eq(verdict(11, "Authorization: Bearer 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234\r\n", table, tokens), authz.allowed());
+        test.assert_eq(verdict(11, "Authorization: Bearer 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123X\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(11, "Authorization: Bearer X12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234\r\n", table, tokens), authz.unauthorized());
+        test.assert_eq(verdict(11, "Authorization: Bearer 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456X8901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234\r\n", table, tokens), authz.unauthorized());
+    }
+    return 0;
+}
+
+// What `perm.private` calls private: no read or write bit for the group or for others, in whatever else the mode says (the type bits, the
+// sticky and set-id bits, the owner's, a search bit of the group or of others). A mode the kernel did not give (-1) is not private.
+fn test_a_mode_is_private_when_the_group_and_others_cannot_read_or_write() -> [] int {
+    test.assert(perm.private(384));
+    test.assert(perm.private(256));
+    test.assert(perm.private(448));
+    test.assert(perm.private(456));
+    test.assert(perm.private(449));
+    test.assert(perm.private(457));
+    test.assert(perm.private(0));
+    test.assert(perm.private(16384 + 448));
+    test.assert(perm.private(1024 + 448));
+    test.assert(!perm.private(416));
+    test.assert(!perm.private(388));
+    test.assert(!perm.private(432));
+    test.assert(!perm.private(386));
+    test.assert(!perm.private(420));
+    test.assert(!perm.private(438));
+    test.assert(!perm.private(493));
+    test.assert(!perm.private(511));
+    test.assert(!perm.private(16384 + 493));
+    test.assert(!perm.private(0 - 1));
+    test.assert_eq(perm.exposed_bits(), 54);
+    return 0;
+}

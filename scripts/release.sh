@@ -77,12 +77,12 @@ if [ "$strip_it" = 1 ]; then
   command -v strip >/dev/null || die 2 "strip is needed (binutils), or --keep-symbols"
   strip --strip-all --remove-section=.note.gnu.build-id "$root/bin/hooks"
 fi
-cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy/hooks.docker.conf "$here"/deploy/hooks-healthcheck.sh "$root/deploy/"
+cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy/hooks.docker.conf "$here"/deploy/hooks-healthcheck.sh "$here"/deploy/hooks-entrypoint.sh "$root/deploy/"
 cp "$here"/scripts/backup.sh "$here"/scripts/restore.sh "$here"/scripts/logcheck.py "$here"/scripts/release.sh "$root/scripts/"
 cp "$here"/sql/schema.sql "$here"/sql/queries.sql "$root/sql/"
 cp "$here"/docs/runbook.md "$here"/docs/design.md "$here"/docs/production.md "$root/docs/"
 cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/lex-sys.toml "$root/"
-chmod 0755 "$root/bin/hooks" "$root/deploy/hooks-healthcheck.sh" "$root"/scripts/*
+chmod 0755 "$root/bin/hooks" "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
 
 # The SBOM stub: read from the tools, and honest about what it does not list.
 python3 - "$here" "$root" "$name" "$version" "$commit" "$dirty" "${LEX_SYS:-}" "$strip_it" <<'PY' > "$out/$name.sbom.json"
@@ -166,7 +166,7 @@ sbom = {
         "from": "ldd on the build host; the target host supplies its own copies, which must be this glibc or newer",
         "entries": libc,
     },
-    "statically_linked_native_code": "none known: the program's only foreign calls are four libc signal functions (src/ops.ls; the compiler's authority report lists them); not verified by this script",
+    "statically_linked_native_code": "none known: the program's only foreign calls are five libc functions: four signal functions (src/ops.ls) and statx (src/perm.ls); the compiler's authority report lists them; not verified by this script",
     "not_listed": [
         "the Rust toolchain that built the compiler (named by the compiler repository's rust-toolchain.toml at the pinned commit)",
         "the crates the compiler was built from (its Cargo.lock at the pinned commit)",

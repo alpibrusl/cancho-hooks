@@ -19,6 +19,9 @@ import std.bytes;
 //     import-endpoints  `1`: copy `endpoints.conf` into the database and exit   default 0 (section 24)
 //     allow-private-hosts  `1`: endpoints may be names and non-public addresses (section 26)   default 0
 //     admin-token  the bearer token that lets a request change endpoints       default none: management is off (section 25.2)
+//     ingest-token the bearer token that lets a request post events            default none: ingest is open (section 33)
+//     read-token   the bearer token that lets a request read                   default none: the reads are open (section 33)
+//     production   `1`: refuse to start unless the settings and the data directory are safe on the internet   default 0 (section 33)
 //     breaker-days  pause an endpoint whose every attempt has failed for this many days; 0 turns it off   default 5 (section 31)
 //     cron-catchup `1`: a schedule whose fires were missed while the service was stopped fires once for them; `0`: it skips them   default 1 (section 32)
 //     cron-seconds `1`: a schedule's expression has a leading seconds field (six fields; a test mode)   default 0 (section 32)
@@ -35,20 +38,30 @@ import std.bytes;
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
 //     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
 //     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)   cfg[17] stop-deadline-ms (5000 until set)   cfg[18] repair-logs (0 or 1)
+//     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
-//     and password (256), at `pg_host_at()` and the offsets after it
+//     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
+//     token (256), at `token_at()`, `ingest_token_at()` and `read_token_at()`
 
 pub fn size() -> [] int {
-    return 19;
+    return 22;
 }
 
 pub fn blob_size() -> [] int {
-    return 3200;
+    return 3712;
 }
 
 pub fn token_at() -> [] int {
     return 2944;
+}
+
+pub fn ingest_token_at() -> [] int {
+    return 3200;
+}
+
+pub fn read_token_at() -> [] int {
+    return 3456;
 }
 
 pub fn pg_host_at() -> [] int {
@@ -131,6 +144,19 @@ pub fn token_len[&c](cfg: &c [int]) -> [] int {
     return cfg[12];
 }
 
+pub fn ingest_token_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[19];
+}
+
+pub fn read_token_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[20];
+}
+
+// Is the production profile asked for (`production = 1`, `docs/design.md` section 33)?
+pub fn production[&c](cfg: &c [int]) -> [] bool {
+    return cfg[21] == 1;
+}
+
 pub fn import_endpoints[&c](cfg: &c [int]) -> [] bool {
     return cfg[11] == 1;
 }
@@ -177,6 +203,67 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     return 0;
 }
 
+// The production profile (`production = 1`, `docs/design.md` section 33): is every setting one that is safe on the internet? Answers 0 if
+// so, or the exit status the service ends with, one for each cause (the data directory's modes are judged elsewhere: `perm.ls`, 33 and 35):
+//
+//     30 `admin-token` is not set     31 `ingest-token` is not set     32 `allow-private-hosts` is 1     34 two of the three tokens are the same
+//
+// `read-token` may be left out: the read routes then need the admin token. A database is not required: without one the endpoints are a
+// file, `POST /endpoints` and the schedules answer `503`, and delivery works.
+pub fn production_status[&c, &b](cfg: &c [int], blob: &b [byte]) -> [] int {
+    if cfg[12] == 0 {
+        return 30;
+    }
+    if cfg[19] == 0 {
+        return 31;
+    }
+    if cfg[13] == 1 {
+        return 32;
+    }
+    if same(blob, token_at(), cfg[12], ingest_token_at(), cfg[19]) {
+        return 34;
+    }
+    if cfg[20] > 0 && (same(blob, token_at(), cfg[12], read_token_at(), cfg[20]) || same(blob, ingest_token_at(), cfg[19], read_token_at(), cfg[20])) {
+        return 34;
+    }
+    return 0;
+}
+
+// Are the tokens at `a` (`la` bytes) and at `b` (`lb` bytes) the same? Not a secret comparison: both are the operator's, at start.
+fn same[&k](blob: &k [byte], a: int, la: int, b: int, lb: int) -> [] bool {
+    if la != lb {
+        return false;
+    }
+    var i = 0;
+    while i < la {
+        if int_of(blob[a + i]) != int_of(blob[b + i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// What `production_status` (or `perm.files`, for 33 and 35) found, naming the setting. The data directory's own message is built by the caller.
+pub fn unsafe_message(status: int) -> [] &static [byte] {
+    if status == 30 {
+        return "admin-token is not set (nothing would protect the changes to endpoints and schedules, nor replay and enable)";
+    }
+    if status == 31 {
+        return "ingest-token is not set (anyone who can reach the port could post events)";
+    }
+    if status == 32 {
+        return "allow-private-hosts is 1 (endpoints could aim the service at a private network); set it to 0";
+    }
+    if status == 34 {
+        return "admin-token, ingest-token and read-token must be three different tokens (a token that is the same as the admin token gives its holder the admin scope)";
+    }
+    if status == 33 {
+        return "can be read or written by its group or by others; the data directory must be 0700 and its files 0600 (start the service with umask 077)";
+    }
+    return "the mode cannot be read";
+}
+
 // A non-negative number of at most twelve digits, or -1.
 fn number[&t](text: &t [byte]) -> [] int {
     if len(text) == 0 || len(text) > 12 {
@@ -193,6 +280,19 @@ fn number[&t](text: &t [byte]) -> [] int {
         i = i + 1;
     }
     return n;
+}
+
+// A bearer token (`admin-token`, `ingest-token`, `read-token`): 8 to 255 visible ASCII characters, no space. One rule for the three.
+fn plain_token[&t](value: &t [byte]) -> [] bool {
+    var plain = len(value) >= 8 && len(value) <= 255;
+    var k = 0;
+    while k < len(value) {
+        if int_of(value[k]) <= 32 || int_of(value[k]) >= 127 {
+            plain = false;
+        }
+        k = k + 1;
+    }
+    return plain;
 }
 
 fn keep[&t, &b](text: &t [byte], blob: &!b [byte], at: int) -> [] int {
@@ -281,16 +381,28 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[10] = keep(value, blob, pg_password_at());
         }
     } else if bytes.equal(key, "admin-token") {
-        var plain = len(value) >= 8 && len(value) <= 255;
-        var k = 0;
-        while k < len(value) {
-            if int_of(value[k]) <= 32 || int_of(value[k]) >= 127 {
-                plain = false;
-            }
-            k = k + 1;
-        }
-        if plain {
+        if plain_token(value) {
             cfg[12] = keep(value, blob, token_at());
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "ingest-token") {
+        if plain_token(value) {
+            cfg[19] = keep(value, blob, ingest_token_at());
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "read-token") {
+        if plain_token(value) {
+            cfg[20] = keep(value, blob, read_token_at());
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "production") {
+        if bytes.equal(value, "1") {
+            cfg[21] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[21] = 0;
         } else {
             why = why_value();
         }

@@ -409,12 +409,6 @@ pub fn check_name(code: int) -> [] &static [byte] {
     return "";
 }
 
-// The scope `GET /metrics` needs: 0 is open. Production item 0.3 (scoped tokens) changes this one number to its read scope, and the handler
-// of the route (`id == 41` in `hooks.ls`) is where that scope is checked.
-pub fn scope_metrics() -> [] int {
-    return 0;
-}
-
 pub fn why_not(code: int) -> [] &static [byte] {
     if code == 1 {
         return "the service is stopping";
