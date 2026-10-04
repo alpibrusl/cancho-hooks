@@ -28,7 +28,7 @@ records the service writes (kinds 10 and 11 above all) are checked and not only 
   12. a restart (kill -9) while an endpoint is draining: the row is gone, the slot is dormant, and `take_slot` reclaims it when it is needed
   12b. ... and a row put back by hand before the next start is the same endpoint resuming, with the replays that were dropped still dropped
   13. a deleted endpoint is sent nothing under load, and the others lose no event
-  14. the slowest endpoint is deleted: the others, held to its window, are served further at once
+  14. the slowest endpoint is deleted: the others are served either way (they are not held to its window: docs/production.md 0.1)
   15. a database that does not answer in five seconds: 504, nothing changed, and the next start reconciles
   16. dormant slots beside a draining one: the draining slot is not mistaken for a dormant one
 """
@@ -673,7 +673,7 @@ def main():
           seq[0][0] == CREATED and [r[0] for r in seq[-4:]] == [REPLAY, REPLAY_DEAD, REMOVED, CREATED]
           and {FAILED, DEAD, DISABLED} <= {r[0] for r in seq[1:-4]}, str(seq))
     check("8. ... the first created says id 99, the last id 100 and start 5", seq[0][2] == 99 and seq[-1][2:4] == (100, 5), str((seq[0], seq[-1])))
-    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 100] == [{"id": 100, "port": rn.port, "cursor": 5, "disabled": False}], str((listing(svc), stats(svc))))
+    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 100] == [{"id": 100, "port": rn.port, "cursor": 5, "disabled": False, "paused": False, "failing_since": 0}], str((listing(svc), stats(svc))))
     # post enough events that the ring of the slot (1,024 cells) would reach the cells the old endpoint left above its cursor (events 3 and 4)
     total = 1040
     for n in range(6, total + 1):
@@ -707,7 +707,7 @@ def main():
     svc = start(d, schedule="3600000")
     check("8. restart with a row added by hand (150): it takes the slot that 100 left (1)", created_slot(d, 150) == 1 and ids(svc) == [98, 150], str((of_kind(d, CREATED), listing(svc))))
     check("8. ... at the cursor of the slowest endpoint it knows (the other one's), enabled, no replay",
-          [e for e in listing(svc) if e["id"] == 150] == [{"id": 150, "port": r150.port, "cursor": 1041, "disabled": False}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
+          [e for e in listing(svc) if e["id"] == 150] == [{"id": 150, "port": r150.port, "cursor": 1041, "disabled": False, "paused": False, "failing_since": 0}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
     post_event(svc, 1042)
     check("8. ... it gets event 1042 and nothing before it", wait_for(lambda: r150.events() == [1042], 6), str(r150.seen))
     time.sleep(0.5)
@@ -930,7 +930,10 @@ def main():
     stop(svc)
     shutil.rmtree(d)
 
-    # 14. the slowest endpoint is deleted: the others are served further ---------------------------------------------
+    # 14. the slowest endpoint is deleted: the others are served either way ------------------------------------------
+    # (This test used to say the opposite: that the fast endpoint was *held to the slow one's window*, 1,024 events, until the slow one
+    # was deleted. That was the defect of docs/production.md 0.1, pinned as if it were a design; each endpoint now reads the log from its own
+    # cursor, so the fast one is served everything while the slow one is dead, and deleting the slow one changes nothing for it.)
     reset_db()
     ss, sf = secret(), secret()
     rs, rf = Receiver([ss]), Receiver([sf])
@@ -941,20 +944,16 @@ def main():
     total = 1300
     for n in range(1, total + 1):
         post_event(svc, n)
-    check("14. the fast endpoint is held to the slow one's window: it is sent events 1 to 1,024 and no more",
-          wait_for(lambda: len(set(rf.events())) >= 1024, 40), str(len(set(rf.events()))))
-    time.sleep(1.0)
-    check("14. ... exactly 1 to 1024", sorted(set(rf.events())) == list(range(1, 1025)), str((len(set(rf.events())), max(rf.events()))))
-    check("14. the slow endpoint's cursor is 0, the fast one's 1024", cursors(svc) == {100: 0, 101: 1024}, str(cursors(svc)))
+    check("14. the fast endpoint is sent all 1,300 events, though the slow one is dead and 1,024 events behind it",
+          wait_for(lambda: sorted(set(rf.events())) == list(range(1, total + 1)), 40), str((len(set(rf.events())), max(rf.events() or [0]))))
+    check("14. the slow endpoint's cursor is 0, the fast one's 1300", wait_for(lambda: cursors(svc) == {100: 0, 101: total}, 10), str(cursors(svc)))
     st, out = delete(svc, 100)
     check("14. delete the slow one", st == 200, str((st, out)))
-    check("14. the fast one is served the rest at once (1025 to 1300), each event once", wait_for(lambda: sorted(set(rf.events())) == list(range(1, total + 1)), 30), str((len(set(rf.events())), max(rf.events()))))
-    check("14. ... and its cursor is at the end", wait_for(lambda: cursors(svc) == {101: total}, 10), str(cursors(svc)))
-    check("14. nothing was sent twice", len(rf.events()) == total, str(len(rf.events())))
+    check("14. the fast one's cursor stays at the end and nothing was sent twice", wait_for(lambda: cursors(svc) == {101: total}, 10) and len(rf.events()) == total, str((cursors(svc), len(rf.events()))))
     st, out = create(svc, rf.port)
     rf.keys.append(out["secret"])
     post_event(svc, total + 1)
-    check("14. a new event reaches the one left and the new one (the scan did not regress)", wait_for(lambda: rf.events().count(total + 1) == 2, 10), str(rf.events()[-3:]))
+    check("14. a new event reaches the one left and the new one", wait_for(lambda: rf.events().count(total + 1) == 2, 10), str(rf.events()[-3:]))
     stop(svc)
     shutil.rmtree(d)
 

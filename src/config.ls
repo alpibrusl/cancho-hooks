@@ -19,6 +19,7 @@ import std.bytes;
 //     import-endpoints  `1`: copy `endpoints.conf` into the database and exit   default 0 (section 24)
 //     allow-private-hosts  `1`: endpoints may be names and non-public addresses (section 26)   default 0
 //     admin-token  the bearer token that lets a request change endpoints       default none: management is off (section 25.2)
+//     breaker-days  pause an endpoint whose every attempt has failed for this many days; 0 turns it off   default 5 (section 31)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -28,13 +29,13 @@ import std.bytes;
 //
 //     cfg[0] port (-1 until set)   cfg[1] deadline-ms   cfg[2] window-ms   cfg[3] dir length   cfg[4] schedule length
 //     cfg[5] why the last refusal happened (`why_*`)    cfg[6] pg-port (5432 until set)
-//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)
+//     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it
 
 pub fn size() -> [] int {
-    return 14;
+    return 15;
 }
 
 pub fn blob_size() -> [] int {
@@ -133,6 +134,11 @@ pub fn allow_private_hosts[&c](cfg: &c [int]) -> [] bool {
     return cfg[13] == 1;
 }
 
+// Days of failure after which the circuit breaker pauses an endpoint (`docs/design.md` section 31); 0 is off.
+pub fn breaker_days[&c](cfg: &c [int]) -> [] int {
+    return cfg[14];
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -142,6 +148,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[0] = 0 - 1;
     cfg[2] = 86400000;
     cfg[6] = 5432;
+    cfg[14] = 5;
     return 0;
 }
 
@@ -208,6 +215,14 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[2] = n;
+        }
+    } else if bytes.equal(key, "breaker-days") {
+        // At most 100 years: the days are multiplied by 86,400,000 and must not overflow.
+        let n = number(value);
+        if n < 0 || n > 36500 {
+            why = why_value();
+        } else {
+            cfg[14] = n;
         }
     } else if bytes.equal(key, "pg-host") {
         if len(value) < 1 || len(value) > 253 {

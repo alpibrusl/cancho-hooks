@@ -4,7 +4,8 @@
     gcc -O2 -o scripts/bench/loadgen scripts/bench/loadgen.c && gcc -O2 -o scripts/bench/sink scripts/bench/sink.c
     python3 scripts/bench/stall_probe.py          # HOOKS_BIN is not read: it runs build/hooks
 
-Before the fix of docs/production.md item 0.1 the healthy endpoint stops at cursor 1,024; after it, at 3,000.
+Before the fix of docs/production.md item 0.1 (design section 31) the healthy endpoint stopped at cursor 1,024 and the dead one's was 0;
+after it the healthy one ends at 3,000 (the dead one's stays at 0). tests/scan_test.py is the gate: this prints the cursors.
 """
 import base64, os, subprocess, sys, tempfile, time, json, urllib.request, socket
 HERE=os.path.dirname(os.path.abspath(__file__)); ROOT=os.path.dirname(os.path.dirname(HERE)); sys.path.insert(0,HERE)

@@ -3,8 +3,8 @@
 
     python3 tests/layout_test.py build/hooks
 
-The table of where each event of the window starts in the events log (`offs`, 1,024 entries) once overlapped the first 16 integers
-of the cells, so that an event whose number was 1,008 to 1,023 modulo 1,024 lost its place in the log when the first events of the
+The table of where each event of the window starts in the events log (`offs`, 1,024 entries then, 1,024 a slot since design section 31)
+once overlapped the first 16 integers of the cells, so that an event whose number was 1,008 to 1,023 modulo 1,024 lost its place in the log when the first events of the
 window became final: a retry of it read the log at a wrong offset and the event was never delivered. The receiver here fails
 event 1,011 once and event 2,035 once (the same place in the next window); both must be delivered later, with their own bodies,
 along with every other event, once each (retries aside).

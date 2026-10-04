@@ -277,3 +277,54 @@ fn test_a_turn_starts_no_more_than_the_free_connections() -> [] int {
     test.assert_eq(state.starts_allowed(10, 64, 4), 4);
     return 0;
 }
+
+// The health records (a streak of failures began, the breaker paused the endpoint) read back as themselves, the start of the streak
+// riding in the next-attempt field, and `apply` does nothing with them.
+fn test_health_records_read_back_and_change_no_cell() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        state.put_outcome(buf, 0, 9, state.streak(), 4, 0, 0, 1767225600000);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, state.streak());
+        test.assert_eq(o.1, 4);
+        test.assert_eq(o.4, 1767225600000);
+        state.put_outcome(buf, 0, 10, state.paused(), 4, 0, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, state.paused());
+        test.assert_eq(state.outcome_at(buf, 0).1, 4);
+        // one past the last kind is still not an outcome
+        state.put_outcome(buf, 0, 11, state.paused(), 4, 0, 0, 0);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 14);
+        test.assert_eq(state.outcome_at(buf, 0).0, 0);
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.streak(), 1, 0, 1767225600000), 0);
+        test.assert_eq(state.apply(w, c, 0, state.paused(), 1, 0, 0), 0);
+        test.assert_eq(c[0], 0);
+        test.assert(!state.is_final(w, c, 0, 1));
+        test.assert_eq(state.attempts(w, 0, 1), 0);
+        test.assert_eq(state.next_at(w, 0, 1), 0);
+    }
+    return 0;
+}
+
+// The breaker's rule at its edges: off with 0 days, nothing to trip on without a streak, the boundary exactly at `days` days (not a
+// millisecond before), a clock that went backwards, and the default of 5 days.
+fn test_the_breaker_trips_after_n_days_of_failures_and_not_before() -> [] int {
+    let day = state.day_ms();
+    test.assert_eq(day, 86400000);
+    let t0 = 1767225600000;
+    // five days: a ms short, exactly, and past
+    test.assert(!state.breaker_trips(5, t0, t0 + 5 * day - 1));
+    test.assert(state.breaker_trips(5, t0, t0 + 5 * day));
+    test.assert(state.breaker_trips(5, t0, t0 + 5 * day + 1));
+    test.assert(!state.breaker_trips(5, t0, t0));
+    test.assert(!state.breaker_trips(5, t0, t0 + 4 * day));
+    // the days are the setting's: one day trips at one day, and 6 days does not trip at 5
+    test.assert(state.breaker_trips(1, t0, t0 + day));
+    test.assert(!state.breaker_trips(6, t0, t0 + 5 * day));
+    // off, no streak, a clock that went back
+    test.assert(!state.breaker_trips(0, t0, t0 + 500 * day));
+    test.assert(!state.breaker_trips(5, 0, t0 + 500 * day));
+    test.assert(!state.breaker_trips(5, t0, t0 - 10 * day));
+    return 0;
+}
