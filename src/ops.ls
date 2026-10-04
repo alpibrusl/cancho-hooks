@@ -426,7 +426,7 @@ pub fn why_not(code: int) -> [] &static [byte] {
         return "the data directory does not take a write (read-only, or the disk is full)";
     }
     if code == 5 {
-        return "the database is named and no connection to it is live; a lost connection is not reopened, restart the service";
+        return "the database is named and the service has no live connection to it, or has not read its endpoints from it yet; it reconnects by itself, backing off between attempts (GET /stats and /metrics say how it is going)";
     }
     return "";
 }

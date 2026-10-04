@@ -95,6 +95,11 @@ sources = ["tests/reason_test.ls", "src/reason.ls"]
 std = true
 
 [[test]]
+name = "dbup"
+sources = ["tests/dbup_test.ls", "src/dbup.ls"]
+std = true
+
+[[test]]
 name = "ops"
 sources = ["tests/ops_test.ls", "src/ops.ls", "src/metrics.ls", "src/reason.ls"]
 std = true

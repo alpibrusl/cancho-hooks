@@ -99,6 +99,11 @@ fn rt_init[&d](dv: &!d [int], days: int, ms_knob: int, window_ms: int, delivery_
 // front only, so a pin (an event not final somewhere, a replay, or an endpoint's cursor that is behind) keeps every later event too. With no endpoint
 // every event is final.
 fn rt_floor[&d, &l](dv: &d [int], lg: &l evlog.Ev) -> [] int {
+    // Until the endpoints have been read from the database (`docs/design.md` section 37) the table is empty and "every event is final at every endpoint" is
+    // vacuous: the cursors are unknown, and nothing may go.
+    if !history.endpoints_known(dv[off_hq()..off_hq() + history.size()]) {
+        return 0;
+    }
     var f = evlog.last_id(lg);
     var i = 0;
     while i < dv[c_endpoints()] {
@@ -354,12 +359,15 @@ fn rt_maintain[&h, &l, &v, &i, &a, &s, &k, &w](heap: &!h Heap, lg: &!l evlog.Ev,
     let age = dv[rt_at() + r_age_ms()];
     let floor = rt_floor(dv, lg);
     let oldest = evlog.oldest_sealed(lg);
+    // Before the endpoints are read (section 37) only sealing a segment is safe: a drop rests on cursors, and a snapshot is built from them, so with the table
+    // empty it would replace the outcomes log by nothing.
+    let known = history.endpoints_known(dv[off_hq()..off_hq() + history.size()]);
     var action = 0;
-    if retain.may_drop(retention, oldest.0, oldest.1, floor, now, age) && sched.tick_state(sg) == 0 {
+    if known && retain.may_drop(retention, oldest.0, oldest.1, floor, now, age) && sched.tick_state(sg) == 0 {
         action = 2;
     } else if retain.should_roll(evlog.active_bytes(lg), evlog.limit(lg), retention, evlog.active_created(lg), now, age) {
         action = 1;
-    } else {
+    } else if known {
         var sz = 0;
         borrow d as &dr1 in {
             sz = log.size(dr1);
@@ -725,6 +733,13 @@ fn open_delivery[&e, &d, &w, &q](ev: &!e evlog.Ev, dir: &d [byte], window: &!w [
 
 // `compact-now`: do it, say what was done, close the outcomes log. Answers the status to exit with: 0, 43 if somebody holds the lock, 44 if a step failed.
 fn compact_once[&h, &l, &v, &i, &a, &w, &o](heap: &!h Heap, lg: &!l evlog.Ev, done: log.Log, dv: &!v [int], ix: &!i [int], arena: &!a [byte], window: &!w [byte], now: int, out: &!o Io) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll, err_write] int {
+    if !history.endpoints_known(dv[off_hq()..off_hq() + history.size()]) {
+        // A one-off run does not wait for the database, and without the endpoints it knows no cursor: it would drop what a slow endpoint still needs and
+        // replace the outcomes log by an empty snapshot. Refused, with nothing changed.
+        log.close(done);
+        say(out, "hooks: compact-now: a database is named, and this run does not read the endpoints from it, so it does not know which events are final; nothing was done (run it without pg-host settings only for a service that has none)\n");
+        return 44;
+    }
     let segments = evlog.dropped_segments(lg);
     let events = evlog.dropped_events(lg);
     var was = 0;

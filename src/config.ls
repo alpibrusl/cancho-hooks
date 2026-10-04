@@ -34,6 +34,10 @@ import std.bytes;
 //     idem-keys  how many idempotency keys the index holds   default 262144
 //     compact-now  `1`: compact once and exit   default 0
 //     retention-ms, compact-kill-at  **test knobs**: retention in ms instead of days; stop at a numbered step of a compaction   default 0
+//     pg-backoff-min-ms, pg-backoff-max-ms  the wait after a failed connection to the database, from the first to the longest (it doubles)   default 100, 5000 (section 37)
+//     pg-attempt-ms  the longest one attempt to connect, log in and prepare may take   default 5000 (section 37)
+//     pg-request-ms  the longest a request to the database may wait for any answer before its connection is given up; 0 never   default 10000 (section 37)
+//     pg-start-wait-ms  how long the service may go without having read its endpoints from the database before it ends with status 20; 0 never   default 30000 (section 37)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -47,6 +51,7 @@ import std.bytes;
 //     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)   cfg[17] stop-deadline-ms (5000 until set)   cfg[18] repair-logs (0 or 1)
 //     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)   cfg[22] rotation-grace-ms (86400000 until set)
 //     cfg[40] retention-days   cfg[41] segment-bytes   cfg[42] delivery-log-bytes   cfg[43] idem-keys   cfg[44] compact-now   cfg[45] retention-ms   cfg[46] compact-kill-at
+//     cfg[23] pg-backoff-min-ms (100 until set)   cfg[24] pg-backoff-max-ms (5000)   cfg[25] pg-attempt-ms (5000)   cfg[26] pg-request-ms (10000)   cfg[27] pg-start-wait-ms (30000)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
@@ -230,6 +235,38 @@ pub fn compact_kill_at[&c](cfg: &c [int]) -> [] int {
     return cfg[46];
 }
 
+// The wait after a failed connection to the database starts at this many ms and doubles up to `pg_backoff_max_ms` (`docs/design.md` section 37).
+pub fn pg_backoff_min_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[23];
+}
+
+pub fn pg_backoff_max_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[24];
+}
+
+// The longest one attempt to make a connection (dial, login, prepare the statements) may take, in ms.
+pub fn pg_attempt_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[25];
+}
+
+// The longest a request to the database may wait without any byte coming back before the connection is given up, in ms; 0 is for ever.
+pub fn pg_request_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[26];
+}
+
+// How long the service may run without having read its endpoints from the database before it ends with status 20, in ms; 0 is for ever.
+pub fn pg_start_wait_ms[&c](cfg: &c [int]) -> [] int {
+    return cfg[27];
+}
+
+// Whether the settings of the database's connections agree with each other: 0, or the reason (1: the longest wait is below the first).
+pub fn pg_status[&c](cfg: &c [int]) -> [] int {
+    if cfg[24] < cfg[23] {
+        return 1;
+    }
+    return 0;
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -247,6 +284,11 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[41] = 67108864;
     cfg[42] = 33554432;
     cfg[43] = 262144;
+    cfg[23] = 100;
+    cfg[24] = 5000;
+    cfg[25] = 5000;
+    cfg[26] = 10000;
+    cfg[27] = 30000;
     return 0;
 }
 
@@ -403,6 +445,44 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[22] = n;
+        }
+    } else if bytes.equal(key, "pg-backoff-min-ms") {
+        // 1 ms to 10 minutes. (That it is not above `pg-backoff-max-ms` is judged once all the settings are in: `pg_status`.)
+        let n = number(value);
+        if n < 1 || n > 600000 {
+            why = why_value();
+        } else {
+            cfg[23] = n;
+        }
+    } else if bytes.equal(key, "pg-backoff-max-ms") {
+        let n = number(value);
+        if n < 1 || n > 3600000 {
+            why = why_value();
+        } else {
+            cfg[24] = n;
+        }
+    } else if bytes.equal(key, "pg-attempt-ms") {
+        let n = number(value);
+        if n < 1 || n > 600000 {
+            why = why_value();
+        } else {
+            cfg[25] = n;
+        }
+    } else if bytes.equal(key, "pg-request-ms") {
+        // 0 is "no timeout"; an hour at most.
+        let n = number(value);
+        if n < 0 || n > 3600000 {
+            why = why_value();
+        } else {
+            cfg[26] = n;
+        }
+    } else if bytes.equal(key, "pg-start-wait-ms") {
+        // 0 is "wait for ever"; a day at most.
+        let n = number(value);
+        if n < 0 || n > 86400000 {
+            why = why_value();
+        } else {
+            cfg[27] = n;
         }
     } else if bytes.equal(key, "pg-host") {
         if len(value) < 1 || len(value) > 253 {

@@ -98,87 +98,65 @@ fn open_db[&h, &n, &t, &u, &w, &d, &z](heap: &!h Heap, net: &n Net(""), host: &t
     }
 }
 
-// The table as `endpoints.parse` reads it, written into `out`. Answers the number of bytes, or -1 (could not connect), -2 (could
-// not log in), -3 (the query failed), -4 (a row has an empty field or a byte that is not printable), -5 (the table is too large for `out`).
-pub fn fetch[&h, &n, &t, &u, &w, &d, &z, &o](heap: &!h Heap, net: &n Net(""), host: &t [byte], port: int, user: &u [byte], password: &w [byte], database: &d [byte], rng: &z Fs(""), out: &!o [byte]) -> [heap, net_out(""), conn_read, conn_write, fs_read("")] int {
-    match open_db(heap, net, host, port, user, password, database, rng) {
-        Dialed::Failed(code) => {
-            return code;
-        }
-        Dialed::Ok(dialed) => {
-            var conn = dialed;
-            var result = 0 - 3;
-            borrow mut conn as &!ch in {
-                let (reply, st) = queries.endpoints_all(heap, ch);
-                borrow reply as &rb in {
-                    let rep = buffer.bytes(rb);
-                    if st == 0 && pg.failure(rep) < 0 {
-                        var at = 0;
-                        var why = 0;
-                        var row = pg.first_row(rep);
-                        while row >= 0 && at >= 0 {
-                            let id = pg.value(rep, row, 0);
-                            let hostspan = pg.value(rep, row, 1);
-                            let portspan = pg.value(rep, row, 2);
-                            let secret = pg.value(rep, row, 3);
-                            let typesspan = pg.value(rep, row, 4);
-                            let headersspan = pg.value(rep, row, 5);
-                            let oldspan = pg.value(rep, row, 6);
-                            let untilspan = pg.value(rep, row, 7);
-                            if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) && optional(rep, typesspan) && optional(rep, headersspan) && optional(rep, oldspan) && optional(rep, untilspan) {
-                                at = put(out, at, rep, id, false);
-                                if at >= 0 {
-                                    at = put(out, at, rep, hostspan, false);
-                                }
-                                if at >= 0 {
-                                    at = put(out, at, rep, portspan, false);
-                                }
-                                if at >= 0 {
-                                    at = put(out, at, rep, secret, false);
-                                }
-                                if at >= 0 && typesspan.1 > typesspan.0 {
-                                    at = put_word(out, at, "types=", rep, typesspan);
-                                }
-                                if at >= 0 && headersspan.1 > headersspan.0 {
-                                    at = put_word(out, at, "headers=", rep, headersspan);
-                                }
-                                if at >= 0 && oldspan.1 > oldspan.0 && untilspan.1 > untilspan.0 && pg.int_text(rep, untilspan.0, untilspan.1) > 0 {
-                                    at = put_word(out, at, "old=", rep, oldspan);
-                                    if at >= 0 {
-                                        out[at - 1] = byte_of('@');
-                                        at = put(out, at, rep, untilspan, false);
-                                    }
-                                }
-                                if at >= 0 {
-                                    out[at - 1] = byte_of('\n');
-                                }
-                                if at < 0 {
-                                    why = 0 - 5;
-                                }
-                            } else {
-                                at = 0 - 1;
-                                why = 0 - 4;
-                            }
-                            row = pg.next_row(rep, row);
-                        }
-                        if at >= 0 {
-                            result = at;
-                        } else {
-                            result = why;
-                        }
-                    }
-                }
-                buffer.drop(heap, reply);
-                let (bye, st2) = (pg.terminate(heap), 0);
-                borrow bye as &bb in {
-                    pg.send(ch, buffer.bytes(bb));
-                }
-                buffer.drop(heap, bye);
-            }
-            conn_close(conn);
-            return result;
-        }
+// The table as `endpoints.parse` reads it, written into `out`, from the reply `rep` to the `endpoints_all` query (the bytes `pool.reply` gives, or
+// `queries.endpoints_all` returned). Answers the number of bytes, or -3 (the server refused the query: the reply is an error), -4 (a row has an empty field or
+// a byte that is not printable), -5 (the table is too large for `out`). The caller has judged the status of the request: this is only the reply.
+pub fn text_of[&r, &o](rep: &r [byte], out: &!o [byte]) -> [] int {
+    if pg.failure(rep) >= 0 {
+        return 0 - 3;
     }
+    var at = 0;
+    var why = 0;
+    var row = pg.first_row(rep);
+    while row >= 0 && at >= 0 {
+        let id = pg.value(rep, row, 0);
+        let hostspan = pg.value(rep, row, 1);
+        let portspan = pg.value(rep, row, 2);
+        let secret = pg.value(rep, row, 3);
+        let typesspan = pg.value(rep, row, 4);
+        let headersspan = pg.value(rep, row, 5);
+        let oldspan = pg.value(rep, row, 6);
+        let untilspan = pg.value(rep, row, 7);
+        if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) && optional(rep, typesspan) && optional(rep, headersspan) && optional(rep, oldspan) && optional(rep, untilspan) {
+            at = put(out, at, rep, id, false);
+            if at >= 0 {
+                at = put(out, at, rep, hostspan, false);
+            }
+            if at >= 0 {
+                at = put(out, at, rep, portspan, false);
+            }
+            if at >= 0 {
+                at = put(out, at, rep, secret, false);
+            }
+            if at >= 0 && typesspan.1 > typesspan.0 {
+                at = put_word(out, at, "types=", rep, typesspan);
+            }
+            if at >= 0 && headersspan.1 > headersspan.0 {
+                at = put_word(out, at, "headers=", rep, headersspan);
+            }
+            if at >= 0 && oldspan.1 > oldspan.0 && untilspan.1 > untilspan.0 && pg.int_text(rep, untilspan.0, untilspan.1) > 0 {
+                at = put_word(out, at, "old=", rep, oldspan);
+                if at >= 0 {
+                    out[at - 1] = byte_of('@');
+                    at = put(out, at, rep, untilspan, false);
+                }
+            }
+            if at >= 0 {
+                out[at - 1] = byte_of('\n');
+            }
+            if at < 0 {
+                why = 0 - 5;
+            }
+        } else {
+            at = 0 - 1;
+            why = 0 - 4;
+        }
+        row = pg.next_row(rep, row);
+    }
+    if at >= 0 {
+        return at;
+    }
+    return why;
 }
 
 // Copy the lines of `text` (an `endpoints.conf`, which the caller has already had `endpoints.parse` accept) into the table, in
