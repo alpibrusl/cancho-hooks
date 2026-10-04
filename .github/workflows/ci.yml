@@ -128,6 +128,14 @@ jobs:
         working-directory: hooks
         run: python3 tests/isolation_test.py build/hooks
 
+      - name: A dead endpoint does not stop the others (a scan position per endpoint; revived; kill -9 in the middle)
+        working-directory: hooks
+        run: python3 tests/scan_test.py build/hooks
+
+      - name: The circuit breaker (a run of failures, a pause after N days, its events wait, enable)
+        working-directory: hooks
+        run: python3 tests/breaker_test.py build/hooks
+
       - name: No acknowledged event is lost (kill -9 as a power cut)
         working-directory: hooks
         run: python3 tests/chaos.py build/hooks 2000 8 50

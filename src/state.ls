@@ -81,6 +81,33 @@ pub fn removed() -> [] int {
     return 11;
 }
 
+// Two records about an endpoint's *health*, not an event (`docs/design.md` section 31): a streak of failures began (`next_at`, the record's
+// fifth field, is its start in Unix ms; written once, by the first failed attempt after a delivery), and the circuit breaker paused the
+// endpoint. A delivery ends a streak (no record: `delivered` is the record) and `enabled` ends a pause and a streak. `apply` does nothing
+// with them.
+pub fn streak() -> [] int {
+    return 12;
+}
+
+pub fn paused() -> [] int {
+    return 13;
+}
+
+// How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
+pub fn day_ms() -> [] int {
+    return 86400000;
+}
+
+// The circuit breaker's rule: an endpoint whose every attempt has failed since `since` (Unix ms; 0 if none has failed, or one has been
+// delivered since) is paused when `now` is `days` days or more past it. `days` 0 turns the breaker off. A clock that went backwards
+// (`now` before `since`) never trips it.
+pub fn breaker_trips(days: int, since: int, now: int) -> [] bool {
+    if days <= 0 || since <= 0 {
+        return false;
+    }
+    return now - since >= days * day_ms();
+}
+
 // The size of the cell array for `n` endpoints: three ints (final, attempts, next attempt) per cell.
 pub fn cells(n: int) -> [] int {
     return n * span() * 3;
@@ -191,7 +218,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 11 {
+    if kind < 1 || kind > 13 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

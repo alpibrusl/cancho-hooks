@@ -36,7 +36,7 @@ def check(name, ok, detail=""):
 
 def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
-            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0}
+            "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5}
     base.update(kw)
     return base
 
@@ -152,6 +152,15 @@ def stage3():
     _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nallow-private-hosts = 1\n")
     shutil.rmtree(w)
     check("3. ... from a file too", cfg == settings(**{"allow-private-hosts": 1}), str(cfg))
+    _, _, cfg, w = serve(["--allow-private-hosts", "1", "--breaker-days", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    shutil.rmtree(w)
+    check("3. breaker-days 0 (off) is a setting, read back", cfg == settings(**{"breaker-days": 0, "allow-private-hosts": 1}), str(cfg))
+    _, _, cfg, w = serve(["--allow-private-hosts", "1", "--breaker-days", "2"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
+    shutil.rmtree(w)
+    check("3. breaker-days 2 from a flag, read back", cfg == settings(**{"breaker-days": 2, "allow-private-hosts": 1}), str(cfg))
+    _, _, cfg, w = serve(["--config", "@/hooks.conf"], "port = @PORT\ndir = @DIR\nbreaker-days = 9\n")
+    shutil.rmtree(w)
+    check("3. breaker-days 9 from a file, read back", cfg == settings(**{"breaker-days": 9}), str(cfg))
     code, line, _, w = serve(["--allow-private-hosts", "0"], None, {"endpoints.conf": f"0 127.0.0.1 9 {SECRET}\n"})
     shutil.rmtree(w)
     check("3. a private host in the file with the default is refused before the service listens (status 13)", code == 13 and line != "listening", str((code, line)))
@@ -191,6 +200,8 @@ def stage4():
     refused("a file of 16 KiB or more", ["--config", "@/hooks.conf"], {"hooks.conf": "# " + "x" * 16384 + "\n"},
             expect=["16 KiB"])
     refused("allow-private-hosts that is not 0 or 1", ["--port", "@PORT", "--dir", "@", "--allow-private-hosts", "yes"], expect=["`--allow-private-hosts` has a value"])
+    refused("breaker-days that is not a number of days", ["--port", "@PORT", "--dir", "@", "--breaker-days", "soon"], expect=["`--breaker-days` has a value"])
+    refused("breaker-days over 100 years", ["--port", "@PORT", "--dir", "@", "--breaker-days=36501"], expect=["`--breaker-days=36501` has a value"])
     refused("a bad flag after a good file", ["--config", "@/hooks.conf", "--port", "0"],
             {"hooks.conf": "dir = /tmp\nport = 5\n"}, expect=["`--port` has a value"])
 

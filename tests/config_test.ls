@@ -17,6 +17,7 @@ fn test_nothing_set_gives_the_defaults() -> [] int {
         test.assert_eq(config.sched_len(cfg), 0);
         test.assert_eq(config.pg_port(cfg), 5432);
         test.assert_eq(config.pg_host_len(cfg), 0);
+        test.assert_eq(config.breaker_days(cfg), 5);
     }
     return 0;
 }
@@ -270,6 +271,30 @@ fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
         // the largest token ends inside its own place: the last byte of the blob is the token's
         test.assert_eq(int_of(blob[config.token_at() + 254]), int_of(long[254]));
         test.assert_eq(len(blob), config.token_at() + 256);
+    }
+    return 0;
+}
+
+// `breaker-days` (`docs/design.md` section 31): 5 unless set, 0 is a setting (off), 36,500 is the most, and a refusal changes nothing.
+fn test_breaker_days_default_off_and_limits() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.breaker_days(cfg), 5);
+        test.assert_eq(config.set(cfg, blob, "breaker-days", "0"), 0);
+        test.assert_eq(config.breaker_days(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "breaker-days", "36500"), 0);
+        test.assert_eq(config.breaker_days(cfg), 36500);
+        test.assert_eq(config.set(cfg, blob, "breaker-days", "7"), 0);
+        test.assert_eq(config.breaker_days(cfg), 7);
+        test.assert(config.set(cfg, blob, "breaker-days", "36501") != 0);
+        test.assert(config.set(cfg, blob, "breaker-days", "-1") != 0);
+        test.assert(config.set(cfg, blob, "breaker-days", "five") != 0);
+        test.assert(config.set(cfg, blob, "breaker-days", "") != 0);
+        test.assert_eq(config.breaker_days(cfg), 7);
+        test.assert_eq(config.parse_file("breaker-days = 2\n", cfg, blob), 0);
+        test.assert_eq(config.breaker_days(cfg), 2);
     }
     return 0;
 }

@@ -265,8 +265,8 @@ def main():
     rb.key = b["secret"]
     check("4. it starts from now: its cursor is 5 (the last event)", b["cursor"] == 5 and b["from"] == "now", str(b))
     r1, one = get(svc, f"/endpoints/{b['id']}")
-    check("3. GET /endpoints/:id says id, port, cursor and disabled, and neither the secret nor the host",
-          r1 == 200 and one == {"id": b["id"], "port": rb.port, "cursor": 5, "disabled": False}, str((r1, one)))
+    check("3. GET /endpoints/:id says id, port, cursor, disabled, paused and failing_since, and neither the secret nor the host",
+          r1 == 200 and one == {"id": b["id"], "port": rb.port, "cursor": 5, "disabled": False, "paused": False, "failing_since": 0}, str((r1, one)))
     check("3. GET /endpoints lists both", [e["id"] for e in get(svc, "/endpoints")[1]] == [0, b["id"]], str(get(svc, "/endpoints")))
     check("3. GET /endpoints/x is a 400 and /endpoints/99 a 404", get(svc, "/endpoints/x")[0] == 400 and get(svc, "/endpoints/99")[0] == 404)
     post_event(svc, 6)
@@ -324,7 +324,7 @@ def main():
     psql("select setval('endpoint_ids', 100, false)")
     r, b = create(svc, good)
     check("6. an id of 100 has a slot below 62, and is read by its id (cursor 1, the last event; port as given)",
-          r == 201 and b["id"] == 100 and get(svc, "/endpoints/100")[1] == {"id": 100, "port": 9, "cursor": 1, "disabled": False}, str((r, b, get(svc, "/endpoints"))))
+          r == 201 and b["id"] == 100 and get(svc, "/endpoints/100")[1] == {"id": 100, "port": 9, "cursor": 1, "disabled": False, "paused": False, "failing_since": 0}, str((r, b, get(svc, "/endpoints"))))
     check("6. GET /endpoints says ids, not slots", [e["id"] for e in get(svc, "/endpoints")[1]][-1] == 100, str(get(svc, "/endpoints")))
     stop(svc)
     psql("truncate endpoints")

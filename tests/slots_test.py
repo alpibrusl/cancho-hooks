@@ -18,7 +18,8 @@ writes that log with its own reader and writer, so it checks the format and not 
      are not the new endpoint's (the log is written by hand to say so)
   7. the history (PostgreSQL) says the id, not the slot
   8. an endpoint the log does not know (a row added by hand, a line added to endpoints.conf) starts at the cursor of the slowest endpoint
-     it does know, not at 0: it does not widen the window the others are held to (section 25.1)
+     it does know, not at 0 (section 25.3). That rule was made so that it could not widen the window every endpoint was held to; since
+     section 31 each endpoint has its own window and the rule is only a policy (a new row is sent the slowest one's backlog, not the whole log)
 """
 import base64
 import http.server
