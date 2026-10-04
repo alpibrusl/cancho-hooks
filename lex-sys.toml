@@ -100,6 +100,26 @@ sources = ["tests/dbup_test.ls", "src/dbup.ls"]
 std = true
 
 [[test]]
+name = "jitter"
+sources = ["tests/jitter_test.ls", "src/jitter.ls"]
+std = true
+
+[[test]]
+name = "bulk"
+sources = ["tests/bulk_test.ls", "src/bulk.ls", "src/filter.ls"]
+std = true
+
+[[test]]
+name = "dead"
+sources = ["tests/dead_test.ls", "src/dead.ls"]
+std = true
+
+[[test]]
+name = "lim"
+sources = ["tests/lim_test.ls", "src/lim.ls", "src/epx.ls", "src/filter.ls", "src/hdrs.ls"]
+std = true
+
+[[test]]
 name = "ops"
 sources = ["tests/ops_test.ls", "src/ops.ls", "src/metrics.ls", "src/reason.ls"]
 std = true

@@ -117,7 +117,9 @@ pub fn text_of[&r, &o](rep: &r [byte], out: &!o [byte]) -> [] int {
         let headersspan = pg.value(rep, row, 5);
         let oldspan = pg.value(rep, row, 6);
         let untilspan = pg.value(rep, row, 7);
-        if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) && optional(rep, typesspan) && optional(rep, headersspan) && optional(rep, oldspan) && optional(rep, untilspan) {
+        let concspan = pg.value(rep, row, 8);
+        let ratespan = pg.value(rep, row, 9);
+        if plain(rep, id) && plain(rep, hostspan) && plain(rep, portspan) && plain(rep, secret) && optional(rep, typesspan) && optional(rep, headersspan) && optional(rep, oldspan) && optional(rep, untilspan) && optional(rep, concspan) && optional(rep, ratespan) {
             at = put(out, at, rep, id, false);
             if at >= 0 {
                 at = put(out, at, rep, hostspan, false);
@@ -133,6 +135,13 @@ pub fn text_of[&r, &o](rep: &r [byte], out: &!o [byte]) -> [] int {
             }
             if at >= 0 && headersspan.1 > headersspan.0 {
                 at = put_word(out, at, "headers=", rep, headersspan);
+            }
+            // the limits (section 39.4): a word only for an endpoint that has its own, 0 being "follow the service"
+            if at >= 0 && concspan.1 > concspan.0 && pg.int_text(rep, concspan.0, concspan.1) > 0 {
+                at = put_word(out, at, "concurrency=", rep, concspan);
+            }
+            if at >= 0 && ratespan.1 > ratespan.0 && pg.int_text(rep, ratespan.0, ratespan.1) > 0 {
+                at = put_word(out, at, "rate=", rep, ratespan);
             }
             if at >= 0 && oldspan.1 > oldspan.0 && untilspan.1 > untilspan.0 && pg.int_text(rep, untilspan.0, untilspan.1) > 0 {
                 at = put_word(out, at, "old=", rep, oldspan);
@@ -190,6 +199,8 @@ pub fn copy_in[&h, &n, &t, &u, &w, &d, &z, &x](heap: &!h Heap, net: &n Net(""), 
                         var headers_w = text[0..0];
                         var old_w = text[0..0];
                         var until = 0;
+                        var conc_n = 0;
+                        var rate_n = 0;
                         var rest = secret.1;
                         var more = true;
                         while more {
@@ -210,10 +221,14 @@ pub fn copy_in[&h, &n, &t, &u, &w, &d, &z, &x](heap: &!h Heap, net: &n Net(""), 
                                     }
                                     old_w = word[4..at2];
                                     until = endpoints.number_ms(word, at2 + 1, len(word));
+                                } else if bytes.starts_with(word, "concurrency=") {
+                                    conc_n = endpoints.number_ms(word, 12, len(word));
+                                } else if bytes.starts_with(word, "rate=") {
+                                    rate_n = endpoints.number_ms(word, 5, len(word));
                                 }
                             }
                         }
-                        let (reply, st) = queries.add_endpoint(heap, ch, endpoints.number(text, first.0, first.1), text[hostf.0..hostf.1], endpoints.number(text, portf.0, portf.1), text[secret.0..secret.1], types_w, headers_w, old_w, until);
+                        let (reply, st) = queries.add_endpoint(heap, ch, endpoints.number(text, first.0, first.1), text[hostf.0..hostf.1], endpoints.number(text, portf.0, portf.1), text[secret.0..secret.1], types_w, headers_w, old_w, until, conc_n, rate_n);
                         borrow reply as &rb in {
                             if st != 0 || pg.failure(buffer.bytes(rb)) >= 0 {
                                 bad = true;

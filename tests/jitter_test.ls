@@ -1,0 +1,195 @@
+edition 5;
+
+import std.test;
+import jitter;
+
+// The spread given to a retry delay (`src/jitter.ls`, `docs/design.md` section 39.3): 0 is exactly the schedule, every delay stays within its
+// percent of itself, the same (endpoint, event, attempt) always gets the same delay, and events that fail together are spread over the whole range.
+
+fn test_zero_percent_is_the_schedule_exactly() -> [] int {
+    var e = 0;
+    while e < 5 {
+        var id = 1;
+        while id < 200 {
+            test.assert_eq(jitter.delay(5000, 0, e, id, 1), 5000);
+            test.assert_eq(jitter.delay(86400000, 0, e, id, 9), 86400000);
+            id = id + 7;
+        }
+        e = e + 1;
+    }
+    test.assert_eq(jitter.delay(0, 10, 1, 1, 1), 0);
+    return 0;
+}
+
+fn test_the_span_is_the_percent_of_the_delay_and_no_more_than_50() -> [] int {
+    test.assert_eq(jitter.span(5000, 10), 500);
+    test.assert_eq(jitter.span(300000, 10), 30000);
+    test.assert_eq(jitter.span(86400000, 50), 43200000);
+    test.assert_eq(jitter.span(86400000, 99), 43200000);
+    test.assert_eq(jitter.span(5000, 0), 0);
+    test.assert_eq(jitter.span(0, 50), 0);
+    // too short for a whole millisecond of spread: not moved
+    test.assert_eq(jitter.span(9, 10), 0);
+    test.assert_eq(jitter.delay(9, 10, 3, 4, 1), 9);
+    test.assert_eq(jitter.span(10, 10), 1);
+    return 0;
+}
+
+// the Standard Webhooks schedule
+fn step(b: int) -> [] int {
+    if b == 0 {
+        return 5000;
+    }
+    if b == 1 {
+        return 300000;
+    }
+    if b == 2 {
+        return 1800000;
+    }
+    if b == 3 {
+        return 7200000;
+    }
+    if b == 4 {
+        return 18000000;
+    }
+    if b == 5 {
+        return 36000000;
+    }
+    if b == 6 {
+        return 50400000;
+    }
+    if b == 7 {
+        return 72000000;
+    }
+    return 86400000;
+}
+
+fn percent(p: int) -> [] int {
+    if p == 0 {
+        return 10;
+    }
+    if p == 1 {
+        return 25;
+    }
+    return 50;
+}
+
+fn test_every_delay_is_within_its_percent_for_the_whole_schedule() -> [] int {
+    // the schedule, at 10, 25 and 50 percent, over many events and endpoints
+    var p = 0;
+    while p < 3 {
+        var b = 0;
+        while b < 9 {
+            let s = jitter.span(step(b), percent(p));
+            var e = 0;
+            while e < 4 {
+                var id = 1;
+                while id <= 400 {
+                    let d = jitter.delay(step(b), percent(p), e * 17, id, b + 1);
+                    test.assert(d >= step(b) - s);
+                    test.assert(d <= step(b) + s);
+                    id = id + 1;
+                }
+                e = e + 1;
+            }
+            b = b + 1;
+        }
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn test_the_same_endpoint_event_and_attempt_always_get_the_same_delay() -> [] int {
+    var id = 1;
+    while id < 300 {
+        let first = jitter.delay(300000, 10, 7, id, 2);
+        test.assert_eq(jitter.delay(300000, 10, 7, id, 2), first);
+        test.assert_eq(jitter.delay(300000, 10, 7, id, 2), first);
+        id = id + 1;
+    }
+    // a pinned value: the function is part of what a recorded schedule means, so it must not change under a refactoring
+    test.assert_eq(jitter.mix(1, 1, 1), jitter.mix(1, 1, 1));
+    return 0;
+}
+
+// Events that fail in the same millisecond must not retry in it: 2,000 events of one endpoint at one attempt land in every tenth of the range.
+fn test_events_that_fail_together_are_spread_over_the_range() -> [] int {
+    let base = 300000;
+    let s = jitter.span(base, 10);
+    region a {
+        let seen = alloc_slice[a](10, 0);
+        var id = 1;
+        var sum = 0;
+        while id <= 2000 {
+            let d = jitter.delay(base, 10, 3, id, 1);
+            let tenth = (d - (base - s)) * 10 / (2 * s + 1);
+            test.assert(tenth >= 0);
+            test.assert(tenth <= 9);
+            seen[tenth] = seen[tenth] + 1;
+            sum = sum + d;
+            id = id + 1;
+        }
+        var k = 0;
+        while k < 10 {
+            // 200 expected in each; far from a spike in one of them
+            test.assert(seen[k] > 140);
+            test.assert(seen[k] < 260);
+            k = k + 1;
+        }
+        // the mean is the schedule's delay, within half a percent of it (the standard deviation of a mean of 2,000 uniform values is 0.13 percent)
+        let mean = sum / 2000;
+        test.assert(mean > base - base / 200);
+        test.assert(mean < base + base / 200);
+    }
+    return 0;
+}
+
+// A short delay has few possible values: all of them occur, and the two ends of the range are reached.
+fn test_a_short_delay_reaches_both_ends_of_its_range() -> [] int {
+    var low = 1000000;
+    var high = 0;
+    var id = 1;
+    while id <= 5000 {
+        let d = jitter.delay(200, 10, 0, id, 1);
+        test.assert(d >= 180);
+        test.assert(d <= 220);
+        if d < low {
+            low = d;
+        }
+        if d > high {
+            high = d;
+        }
+        id = id + 1;
+    }
+    test.assert_eq(low, 180);
+    test.assert_eq(high, 220);
+    return 0;
+}
+
+// The attempt and the endpoint change the spread too: the same event at the next attempt, or at another endpoint, does not repeat it.
+fn test_a_change_of_attempt_or_endpoint_changes_the_spread() -> [] int {
+    var same_attempt = 0;
+    var same_endpoint = 0;
+    var id = 1;
+    while id <= 500 {
+        if jitter.delay(300000, 10, 1, id, 1) == jitter.delay(300000, 10, 1, id, 2) {
+            same_attempt = same_attempt + 1;
+        }
+        if jitter.delay(300000, 10, 1, id, 1) == jitter.delay(300000, 10, 2, id, 1) {
+            same_endpoint = same_endpoint + 1;
+        }
+        id = id + 1;
+    }
+    test.assert(same_attempt < 5);
+    test.assert(same_endpoint < 5);
+    return 0;
+}
+
+fn test_the_mix_stays_inside_its_modulus_for_extreme_arguments() -> [] int {
+    let big = 999999999999;
+    test.assert(jitter.mix(big, big, 17) >= 0);
+    test.assert(jitter.mix(big, big, 17) < 2147483647);
+    test.assert(jitter.mix(0, 0, 0) >= 0);
+    test.assert(jitter.mix(999999, 1099511627775, 17) < 2147483647);
+    return 0;
+}

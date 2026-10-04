@@ -11,8 +11,8 @@ import manage;
 // Three tokens, three scopes, and every request goes through `judge` before its handler runs:
 //
 //     ingest   `POST /events` (and so its idempotent retries)
-//     read     `GET /events/:id`, `/events/:id/attempts`, `/endpoints`, `/endpoints/:id`, `/stats`, `/config`, `/metrics`
-//     admin    everything that changes configuration or state (endpoints, enable, replay, schedules); it also satisfies read and ingest
+//     read     `GET /events/:id`, `/events/:id/attempts`, `/endpoints`, `/endpoints/:id`, `/endpoints/:id/dead`, `/stats`, `/config`, `/metrics`
+//     admin    everything that changes configuration or state (endpoints, enable, replay, replay of dead letters, cancelling replays, schedules); it also satisfies read and ingest
 //
 // A scope whose token is not configured leaves its routes open, as they were before there were scopes (a development service needs none).
 // The exception is the admin scope, where the handlers already answer `403` ("management is off") on the routes that have always needed
@@ -119,6 +119,18 @@ pub fn scope_of(id: int) -> [] int {
     }
     if id == 19 {
         return s_admin(); // DELETE /schedules/:id
+    }
+    if id == 20 {
+        return s_read(); // GET /endpoints/:id/dead
+    }
+    if id == 21 {
+        return s_admin(); // POST /endpoints/:id/replay-dead
+    }
+    if id == 22 {
+        return s_admin(); // DELETE /events/:id/replay/:endpoint
+    }
+    if id == 23 {
+        return s_admin(); // DELETE /endpoints/:id/replays
     }
     if id == 40 {
         return s_open(); // GET /readyz

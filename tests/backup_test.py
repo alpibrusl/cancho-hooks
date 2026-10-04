@@ -297,7 +297,7 @@ def stage_a():
     s0, s1 = secret(), secret()
     psql(f"insert into endpoints values (0, '127.0.0.1', {r0.port}, '{s0}'), (1, '127.0.0.1', {r1.port}, '{s1}')")
     # the columns of design section 35 are state worth restoring too: a list that wants everything, a header, an expired previous secret
-    psql(f"update endpoints set types = '*', headers = 'X-Trace:abc%20d', secret_old = '{secret()}', secret_old_until = 1 where id = 0")
+    psql(f"update endpoints set types = '*', headers = 'X-Trace:abc%20d', secret_old = '{secret()}', secret_old_until = 1, concurrency = 3, rate = 40 where id = 0")
     for _ in range(3):
         psql("select nextval('endpoint_ids')")        # as three POST /endpoints would have: the sequence is state worth restoring
     seq_before = psql("select last_value, is_called from endpoint_ids")
@@ -343,7 +343,7 @@ def stage_a():
     check("2. ... endpoint 0 final for 1..150, endpoint 1 final for 1..50 (the state the test built)",
           fin[0] == set(range(1, 151)) and fin[1] == set(range(1, 51)), f"{len(fin[0])} {len(fin[1])}")
     attempts_before = int(psql("select count(*) from attempts")[0][0])
-    endpoints_before = psql("select id, host, port, secret, types, headers, secret_old, secret_old_until from endpoints order by id")
+    endpoints_before = psql("select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id")
     schedules_before = psql("select id, expr, event_type, body, enabled, created_at, base, last_fired, next_fire from schedules order by id")
     check("2. there are schedules to restore", len(schedules_before) == 2, str(schedules_before))
     check("2. the history has rows to restore", attempts_before >= 200, str(attempts_before))
@@ -359,7 +359,7 @@ def stage_a():
     check("3. the logs are the backup's, byte for byte",
           all(open(os.path.join(data, n), "rb").read() == open(os.path.join(bk, n), "rb").read() for n in ("events.seg", "delivery.seg")))
     check("3. the endpoints table is back, row for row (secrets, event types, headers and the previous secret included)",
-          psql("select id, host, port, secret, types, headers, secret_old, secret_old_until from endpoints order by id", check_ok=False) == endpoints_before)
+          psql("select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id", check_ok=False) == endpoints_before)
     check("3. the schedules table is back, row for row, with where each one is",
           psql("select id, expr, event_type, body, enabled, created_at, base, last_fired, next_fire from schedules order by id", check_ok=False) == schedules_before)
     new_id = psql("with i as (insert into schedules (expr, event_type, created_at, base, enabled) values ('0 0 1 1 *', 'x', 3000, 3000, false) "

@@ -534,8 +534,8 @@ def stage_snapshot():
     head = outcomes_of(d, headers=True)[0]
     check("snapshot: the outcomes log now begins with its header (kind 15, format 2)", head[0] == 15 and head[2] == 2, str(head))
     kinds = sorted((k, e, ev, att) for k, e, ev, att, nxt in after)
-    check("snapshot: and holds a slot, four final events above the cursor, the failing one with its attempts, and its run of failures",
-          kinds == sorted([(10, 0, 0, 1), (3, 0, 3, 1), (3, 0, 4, 1), (3, 0, 5, 1), (3, 0, 6, 1), (2, 0, 2, seen2), (12, 0, 0, 0)]), f"{kinds} (was {len(before)} records)")
+    check("snapshot: and holds a slot, four final events above the cursor (written as delivered: final is all a window needs, and a dead letter is the table's kind 17), the failing one with its attempts, and its run of failures",
+          kinds == sorted([(10, 0, 0, 1), (1, 0, 3, 1), (1, 0, 4, 1), (1, 0, 5, 1), (1, 0, 6, 1), (2, 0, 2, seen2), (12, 0, 0, 0)]), f"{kinds} (was {len(before)} records)")
     a.reset()
     svc3 = Svc(d, ["--schedule", sched])
     svc3.start()
@@ -999,6 +999,12 @@ def stage_compactnow():
     code, text = Svc(d, knobs + ["--compact-now", "1"]).run_once()
     check("compactnow: with the lock free it seals, drops and replaces, says what it did and exits 0", code == 0 and "dropped" in text and "delivery.seg" in text, f"{code} {text!r}")
     recs, _ = chaos.read_events(d)
+    if recs:
+        # The age an event must have is 1 ms here, and the segment the run itself seals is younger than that when the drop is looked at in the same millisecond (found
+        # as 1 run in 8 with the binary of the retention change itself): the events are final and nothing is wrong, and the next run takes them.
+        code, text = Svc(d, knobs + ["--compact-now", "1"]).run_once()
+        check("compactnow: ... a run that found the segment it sealed younger than the retention is followed by one that drops it", code == 0 and "dropped" in text, f"{code} {text!r}")
+        recs, _ = chaos.read_events(d)
     check("compactnow: ... every event was final and past the retention, so the log holds none; the next id is 701", recs == [], str(len(recs)))
     svc = Svc(d, knobs)
     svc.start()

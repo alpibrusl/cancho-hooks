@@ -14,13 +14,14 @@ import std.bytes;
 //
 // This is a stand-in for the Postgres table section 3 gives them: it is read once at start, one endpoint a line,
 //
-//     <id> <host> <port> <secret> [types=<patterns>] [headers=<spec>] [old=<secret>@<until>]
+//     <id> <host> <port> <secret> [types=<patterns>] [headers=<spec>] [old=<secret>@<until>] [concurrency=<1 to 8>] [rate=<1 to 100000>]
 //
 // with `#` comments and blank lines ignored. The words after the secret are optional and in any order, each at most once (design section 35):
 // `types=` the event types the endpoint subscribes to, comma separated (`filter.ls`: `invoice.paid,user.*`; none: every event), `headers=` the
 // custom headers of every attempt, `Name:value` pairs separated by commas with each value percent-encoded (`hdrs.ls`), and `old=` the previous
 // secret and the Unix ms until which deliveries are signed with it as well (a rotation that overlaps). They are judged by the rules that judge
-// them in the API, and a line with a word that is none of these is refused like any other bad line. A line without them is what it always was. The id is a number of at most six digits and is the endpoint's identity, so it
+// them in the API, and a line with a word that is none of these is refused like any other bad line. `concurrency=` and `rate=` are the endpoint's own
+// limits on its attempts (`lim.ls`, section 39.4), in range or the line is bad; a line without them follows the service's settings. A line without them is what it always was. The id is a number of at most six digits and is the endpoint's identity, so it
 // must not change when the file is reordered: it is written, not counted. The secret is a Standard
 // Webhooks one (`whsec_` and base64); what is kept is the key it decodes to.
 //
@@ -187,6 +188,24 @@ pub fn parse_x[&t, &n, &b, &x](text: &t [byte], table: &!n [int], blob: &!b [byt
                         }
                         if keep {
                             epx.set_spec(xt, count, word[8..len(word)]);
+                        }
+                    } else if bytes.starts_with(word, "concurrency=") && seen & 8 == 0 {
+                        seen = seen | 8;
+                        let n = number_ms(word, 12, len(word));
+                        if n < 1 || n > epx.max_concurrency() {
+                            return 0 - line;
+                        }
+                        if keep {
+                            epx.set_conc(xt, count, n);
+                        }
+                    } else if bytes.starts_with(word, "rate=") && seen & 16 == 0 {
+                        seen = seen | 16;
+                        let n = number_ms(word, 5, len(word));
+                        if n < 1 || n > epx.max_rate() {
+                            return 0 - line;
+                        }
+                        if keep {
+                            epx.set_rate(xt, count, n);
                         }
                     } else if bytes.starts_with(word, "old=") && seen & 4 == 0 {
                         seen = seen | 4;

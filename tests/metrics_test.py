@@ -16,7 +16,7 @@
      are those events, `failing_since` is set, the reason of its last failure is `status_5xx`; A's lag is 0. The service is stopped and started again:
      the last failure of B is still there (it is read back from the delivery log), and the counters have started again from zero.
   3. Disabled and paused: an endpoint that answers 410 is disabled (reason `gone`); an endpoint whose failures began days ago is paused by the breaker.
-  4. The most endpoints (62): the answer fits, and the number of series is bounded by 62 x 8 plus the service's own.
+  4. The most endpoints (62): the answer fits, and the number of series is bounded by 62 x 10 plus the service's own.
   5. With a database: the history's counters agree with the rows of the `attempts` table.
 """
 import json
@@ -231,7 +231,7 @@ def stage4():
     m = L.parse_metrics(data.decode())
     per_ep = sum(1 for k in m if "endpoint" in dict(k[1]))
     check("4. the answer fits one response and parses", status == 200 and len(data) < 60000, str(len(data)))
-    check("4. series per endpoint: 7 families for each, plus a last failure where there is one (none)", per_ep == 62 * 7, str(per_ep))
+    check("4. series per endpoint: 9 families for each (the throttled attempts and the dead letters of section 39 are two), plus a last failure where there is one (none)", per_ep == 62 * 9, str(per_ep))
     check("4. the series of the whole service are bounded (under 100)", len(m) - per_ep < 100, str(len(m) - per_ep))
     check("4. every endpoint is behind by 0", m.total("hooks_endpoint_lag_events") == 0 and len(m.series("hooks_endpoint_cursor")) == 62)
     svc.stop()

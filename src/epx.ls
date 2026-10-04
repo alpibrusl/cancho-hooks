@@ -15,17 +15,20 @@ import hdrs;
 //     [4 .. 516)     the subscription, comma separated (`filter.ls`)
 //     [516 .. 2564)  the headers as they go on the wire, `Name: value\r\n` each (`hdrs.ls`)
 //     [2564 .. 2660) the previous secret's key, as `sign.secret_key` decodes it
+//     [2660] the endpoint's own concurrency limit (1 to 8; 0: follow the service's `endpoint-concurrency`)
+//     [2661] the endpoint's own rate limit, attempts a second (1 to 100,000; 0: follow the service's `endpoint-rate`)  (`lim.ls`, section 39.4)
 //
 // Fixed room for each, so nothing here ever needs to be compacted or can run out: a row is replaced in place.
 //
 // The change a `POST` or `PATCH` asks for waits for the database in the `xg` block (like `manage.ls`'s `mg`): which members it names, the
 // subscription, the headers as a spec (`hdrs.ls`: the form the database holds), and the time the previous secret stays valid until.
 //
-//     [0] members named: 1 types, 2 headers, 4 keep   [1] types length   [2] spec length   [3] keep until (Unix ms; 0: end the overlap now)
+//     [0] members named: 1 types, 2 headers, 4 keep, 8 concurrency, 16 rate   [1] types length   [2] spec length   [3] keep until (Unix ms; 0: end the overlap now)
+//     [4] concurrency   [5] rate
 //     [8 .. 520)     the subscription        [520 .. 4616)  the spec
 
 pub fn stride() -> [] int {
-    return 2660;
+    return 2664;
 }
 
 pub fn rows() -> [] int {
@@ -33,7 +36,7 @@ pub fn rows() -> [] int {
 }
 
 pub fn xt_size() -> [] int {
-    return 62 * 2660;
+    return 62 * 2664;
 }
 
 pub fn xg_size() -> [] int {
@@ -50,6 +53,23 @@ pub fn wire_at() -> [] int {
 
 pub fn old_at() -> [] int {
     return 2564;
+}
+
+pub fn conc_at() -> [] int {
+    return 2660;
+}
+
+pub fn rate_at() -> [] int {
+    return 2661;
+}
+
+// The most attempts an endpoint can have in flight, and the largest rate limit one can be given (attempts a second: far above what one core delivers).
+pub fn max_concurrency() -> [] int {
+    return 8;
+}
+
+pub fn max_rate() -> [] int {
+    return 100000;
 }
 
 pub fn xg_types_at() -> [] int {
@@ -77,6 +97,14 @@ pub fn m_keep() -> [] int {
     return 4;
 }
 
+pub fn m_conc() -> [] int {
+    return 8;
+}
+
+pub fn m_rate() -> [] int {
+    return 16;
+}
+
 // The refusals that are not the subscription's or the headers' own (those are theirs plus 100 and 200).
 pub fn why(code: int) -> [] &static [byte] {
     if code > 100 && code < 200 {
@@ -99,6 +127,12 @@ pub fn why(code: int) -> [] &static [byte] {
     }
     if code == 305 {
         return "there is no previous secret to keep: give a new \"secret\" (or \"rotate\") with \"keep_old_ms\"";
+    }
+    if code == 306 {
+        return "\"concurrency\" must be an integer from 1 to 8 (0 or null: follow the service's endpoint-concurrency)";
+    }
+    if code == 307 {
+        return "\"rate\" must be an integer from 1 to 100000 attempts a second (0 or null: follow the service's endpoint-rate)";
     }
     return "the request is not valid";
 }
@@ -125,6 +159,25 @@ pub fn old_len[&x](xt: &x [int], i: int) -> [] int {
 
 pub fn old_until[&x](xt: &x [int], i: int) -> [] int {
     return xt[base(i) + 3];
+}
+
+// The endpoint's own concurrency and rate limits; 0 is "follow the service's setting" (`lim.ls`).
+pub fn conc[&x](xt: &x [int], i: int) -> [] int {
+    return xt[base(i) + conc_at()];
+}
+
+pub fn rate[&x](xt: &x [int], i: int) -> [] int {
+    return xt[base(i) + rate_at()];
+}
+
+pub fn set_conc[&x](xt: &!x [int], i: int, n: int) -> [] int {
+    xt[base(i) + conc_at()] = n;
+    return 0;
+}
+
+pub fn set_rate[&x](xt: &!x [int], i: int, n: int) -> [] int {
+    xt[base(i) + rate_at()] = n;
+    return 0;
 }
 
 // The wire form's byte `k` of the headers of row `i`.
@@ -319,7 +372,7 @@ pub fn put_members[&h, &x](heap: &!h Heap, w: json.Writer, xt: &x [int], i: int,
 // ---------------------------------------------------------------------
 
 // Fill `xg` with the members of the body `body` of a `POST /endpoints` (`patch` false) or `PATCH /endpoints/:id` (`patch` true) that this module
-// owns: `types`, `headers`, and for a patch `keep_old_ms` or `keep_old` (the previous secret stays valid that long; `keep_old: true` is `grace_ms`).
+// owns: `types`, `headers`, and for a patch `keep_old_ms` or `keep_old` (the previous secret stays valid that long; `keep_old: true` is `grace_ms`), and `concurrency` and `rate` (`lim.ls`: 0 or null follows the service).
 // `now` is the Unix time in ms. Answers 0, or the code of the refusal (`why`). What the body does not name is not in `xg`'s mask. The body has been
 // judged to be a JSON object by the caller.
 pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: bool, grace_ms: int, now: int) -> [heap] int {
@@ -328,6 +381,8 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
     var tn = 0;
     var sn = 0;
     var keep_until = 0;
+    var conc_n = 0;
+    var rate_n = 0;
     let tape = box_slice(heap, json.tape_len(body), 0);
     borrow mut tape as &!tw in {
         let t = contents(tw);
@@ -469,6 +524,37 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
                         mask = mask | m_headers();
                     }
                 }
+                if code == 0 {
+                    // The limits (`lim.ls`): an integer in range, or 0 or null for "follow the service's setting". Named, they replace the endpoint's own.
+                    let cn = json.get(body, t, 0, "concurrency");
+                    if cn >= 0 {
+                        mask = mask | m_conc();
+                        if json.is_null(t, cn) {
+                            conc_n = 0;
+                        } else if !json.is_int(t, cn) || !json.fits_int(body, t, cn) {
+                            code = 306;
+                        } else {
+                            conc_n = json.to_int(body, t, cn);
+                            if conc_n < 0 || conc_n > max_concurrency() {
+                                code = 306;
+                            }
+                        }
+                    }
+                    let rn = json.get(body, t, 0, "rate");
+                    if code == 0 && rn >= 0 {
+                        mask = mask | m_rate();
+                        if json.is_null(t, rn) {
+                            rate_n = 0;
+                        } else if !json.is_int(t, rn) || !json.fits_int(body, t, rn) {
+                            code = 307;
+                        } else {
+                            rate_n = json.to_int(body, t, rn);
+                            if rate_n < 0 || rate_n > max_rate() {
+                                code = 307;
+                            }
+                        }
+                    }
+                }
                 if code == 0 && patch {
                     let km = json.get(body, t, 0, "keep_old_ms");
                     let kb = json.get(body, t, 0, "keep_old");
@@ -504,6 +590,8 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
                     xg[1] = tn;
                     xg[2] = sn;
                     xg[3] = keep_until;
+                    xg[4] = conc_n;
+                    xg[5] = rate_n;
                     var k = 0;
                     while k < tn {
                         xg[xg_types_at() + k] = int_of(list[k]);
@@ -526,6 +614,8 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
     xg[1] = 0;
     xg[2] = 0;
     xg[3] = 0;
+    xg[4] = 0;
+    xg[5] = 0;
     return code;
 }
 
@@ -535,7 +625,18 @@ pub fn clear_pending[&g](xg: &!g [int]) -> [] int {
     xg[1] = 0;
     xg[2] = 0;
     xg[3] = 0;
+    xg[4] = 0;
+    xg[5] = 0;
     return 0;
+}
+
+// The limits a change waits to apply (valid when `m_conc()` / `m_rate()` is in the mask).
+pub fn pending_conc[&g](xg: &g [int]) -> [] int {
+    return xg[4];
+}
+
+pub fn pending_rate[&g](xg: &g [int]) -> [] int {
+    return xg[5];
 }
 
 pub fn pending_mask[&g](xg: &g [int]) -> [] int {

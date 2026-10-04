@@ -614,3 +614,97 @@ fn test_pg_connection_settings_default_and_limits() -> [] int {
     return 0;
 }
 
+// `retry-jitter`, `endpoint-concurrency` and `endpoint-rate` (`docs/design.md` section 39): their defaults, their edges, and that a refusal changes nothing.
+fn test_retry_jitter_and_the_limits_default_and_limits() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.retry_jitter(cfg), 10);
+        test.assert_eq(config.endpoint_concurrency(cfg), 8);
+        test.assert_eq(config.endpoint_rate(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "retry-jitter", "0"), 0);
+        test.assert_eq(config.retry_jitter(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "retry-jitter", "50"), 0);
+        test.assert_eq(config.retry_jitter(cfg), 50);
+        test.assert(config.set(cfg, blob, "retry-jitter", "51") != 0);
+        test.assert(config.set(cfg, blob, "retry-jitter", "-1") != 0);
+        test.assert(config.set(cfg, blob, "retry-jitter", "10%") != 0);
+        test.assert(config.set(cfg, blob, "retry-jitter", "") != 0);
+        test.assert_eq(config.retry_jitter(cfg), 50);
+        test.assert_eq(config.set(cfg, blob, "endpoint-concurrency", "1"), 0);
+        test.assert_eq(config.endpoint_concurrency(cfg), 1);
+        test.assert_eq(config.set(cfg, blob, "endpoint-concurrency", "8"), 0);
+        test.assert_eq(config.endpoint_concurrency(cfg), 8);
+        test.assert(config.set(cfg, blob, "endpoint-concurrency", "0") != 0);
+        test.assert(config.set(cfg, blob, "endpoint-concurrency", "9") != 0);
+        test.assert(config.set(cfg, blob, "endpoint-concurrency", "-1") != 0);
+        test.assert(config.set(cfg, blob, "endpoint-concurrency", "") != 0);
+        test.assert_eq(config.endpoint_concurrency(cfg), 8);
+        test.assert_eq(config.set(cfg, blob, "endpoint-rate", "100000"), 0);
+        test.assert_eq(config.endpoint_rate(cfg), 100000);
+        test.assert_eq(config.set(cfg, blob, "endpoint-rate", "0"), 0);
+        test.assert_eq(config.endpoint_rate(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "endpoint-rate", "25"), 0);
+        test.assert(config.set(cfg, blob, "endpoint-rate", "100001") != 0);
+        test.assert(config.set(cfg, blob, "endpoint-rate", "-5") != 0);
+        test.assert(config.set(cfg, blob, "endpoint-rate", "2.5") != 0);
+        test.assert_eq(config.endpoint_rate(cfg), 25);
+        test.assert_eq(config.parse_file("retry-jitter = 7\nendpoint-concurrency 3\nendpoint-rate=9\n", cfg, blob), 0);
+        test.assert_eq(config.retry_jitter(cfg), 7);
+        test.assert_eq(config.endpoint_concurrency(cfg), 3);
+        test.assert_eq(config.endpoint_rate(cfg), 9);
+    }
+    return 0;
+}
+
+// No two settings share an index of the table (cfg[23..27] are the database's, cfg[28..30] the pace's, cfg[40..46] retention's): every numeric setting is given a value
+// of its own and each is read back, so one that landed on another's index would have overwritten it or been overwritten.
+fn test_no_two_settings_share_an_index() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.set(cfg, blob, "retry-jitter", "11"), 0);
+        test.assert_eq(config.set(cfg, blob, "endpoint-concurrency", "3"), 0);
+        test.assert_eq(config.set(cfg, blob, "endpoint-rate", "777"), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-min-ms", "101"), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-backoff-max-ms", "5001"), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-attempt-ms", "5002"), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-request-ms", "10003"), 0);
+        test.assert_eq(config.set(cfg, blob, "pg-start-wait-ms", "30004"), 0);
+        test.assert_eq(config.set(cfg, blob, "retention-days", "31"), 0);
+        test.assert_eq(config.set(cfg, blob, "segment-bytes", "300000"), 0);
+        test.assert_eq(config.set(cfg, blob, "delivery-log-bytes", "100001"), 0);
+        test.assert_eq(config.set(cfg, blob, "idem-keys", "300002"), 0);
+        test.assert_eq(config.set(cfg, blob, "compact-now", "1"), 0);
+        test.assert_eq(config.set(cfg, blob, "retention-ms", "1503"), 0);
+        test.assert_eq(config.set(cfg, blob, "compact-kill-at", "7"), 0);
+        test.assert_eq(config.set(cfg, blob, "breaker-days", "6"), 0);
+        test.assert_eq(config.set(cfg, blob, "rotation-grace-ms", "86400005"), 0);
+        test.assert_eq(config.set(cfg, blob, "stop-deadline-ms", "5006"), 0);
+        test.assert_eq(config.set(cfg, blob, "deadline-ms", "2007"), 0);
+        test.assert_eq(config.retry_jitter(cfg), 11);
+        test.assert_eq(config.endpoint_concurrency(cfg), 3);
+        test.assert_eq(config.endpoint_rate(cfg), 777);
+        test.assert_eq(config.pg_backoff_min_ms(cfg), 101);
+        test.assert_eq(config.pg_backoff_max_ms(cfg), 5001);
+        test.assert_eq(config.pg_attempt_ms(cfg), 5002);
+        test.assert_eq(config.pg_request_ms(cfg), 10003);
+        test.assert_eq(config.pg_start_wait_ms(cfg), 30004);
+        test.assert_eq(config.retention_days(cfg), 31);
+        test.assert_eq(config.segment_bytes(cfg), 300000);
+        test.assert_eq(config.delivery_log_bytes(cfg), 100001);
+        test.assert_eq(config.idem_keys(cfg), 300002);
+        test.assert(config.compact_now(cfg));
+        test.assert_eq(config.retention_ms_knob(cfg), 1503);
+        test.assert_eq(config.compact_kill_at(cfg), 7);
+        test.assert_eq(config.breaker_days(cfg), 6);
+        test.assert_eq(config.rotation_grace_ms(cfg), 86400005);
+        test.assert_eq(config.stop_deadline_ms(cfg), 5006);
+        test.assert_eq(config.deadline_ms(cfg), 2007);
+        // and the table is wide enough for the highest of them
+        test.assert(config.size() > 46);
+    }
+    return 0;
+}

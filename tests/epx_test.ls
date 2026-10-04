@@ -124,3 +124,80 @@ fn test_the_text_the_extras_take_is_estimated_generously() -> [] int {
     }
     return 0;
 }
+
+// The limits of an endpoint (`lim.ls`, docs/design.md section 39.4) are two integers of its row: 0 is "follow the service". A delete shifts them like the rest.
+fn test_the_limits_are_kept_per_row_and_shift_with_a_delete() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        epx.set_conc(xt, 1, 3);
+        epx.set_rate(xt, 1, 250);
+        test.assert_eq(epx.conc(xt, 1), 3);
+        test.assert_eq(epx.rate(xt, 1), 250);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        // they sit beyond the previous secret's key, in no other member's place
+        epx.set_old(xt, 1, "key", 77);
+        epx.set_types(xt, 1, "a,b");
+        epx.set_spec(xt, 1, "A:one");
+        test.assert_eq(epx.conc(xt, 1), 3);
+        test.assert_eq(epx.rate(xt, 1), 250);
+        epx.drop_row(xt, 2, 0);
+        test.assert_eq(epx.conc(xt, 0), 3);
+        test.assert_eq(epx.rate(xt, 0), 250);
+        test.assert_eq(epx.conc(xt, 1), 0);
+        test.assert_eq(epx.rate(xt, 1), 0);
+        epx.clear_row(xt, 0);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        test.assert_eq(epx.max_concurrency(), 8);
+        test.assert_eq(epx.max_rate(), 100000);
+    }
+    return 0;
+}
+
+fn test_the_request_names_the_limits_or_refuses_them[&h](heap: &!h Heap) -> [heap] int {
+    let xgb = box_slice(heap, epx.xg_size(), 0);
+    borrow mut xgb as &!xw in {
+        let xg = contents(xw);
+        // both, in a POST and in a PATCH
+        test.assert_eq(epx.parse(heap, "{\"host\":\"8.8.8.8\",\"concurrency\":3,\"rate\":250}", xg, false, 1000, 5), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
+        test.assert_eq(epx.pending_conc(xg), 3);
+        test.assert_eq(epx.pending_rate(xg), 250);
+        test.assert_eq(epx.parse(heap, "{\"rate\":7}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_rate());
+        test.assert_eq(epx.pending_rate(xg), 7);
+        test.assert_eq(epx.pending_conc(xg), 0);
+        // null and 0 follow the service: named, and 0
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":null,\"rate\":0}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
+        test.assert_eq(epx.pending_conc(xg), 0);
+        test.assert_eq(epx.pending_rate(xg), 0);
+        // the edges
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":8,\"rate\":100000}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.pending_conc(xg), 8);
+        test.assert_eq(epx.pending_rate(xg), 100000);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":1,\"rate\":1}", xg, true, 1000, 5), 0);
+        // not named: not in the mask
+        test.assert_eq(epx.parse(heap, "{\"types\":[\"a\"]}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.pending_mask(xg) & (epx.m_conc() | epx.m_rate()), 0);
+        // refusals leave nothing pending
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":9}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.pending_mask(xg), 0);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":-1}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":2.5}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":\"2\"}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":true}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.parse(heap, "{\"rate\":100001}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":-1}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":\"x\"}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":99999999999999999999}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":3,\"rate\":[]}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.pending_conc(xg), 0);
+        test.assert_eq(epx.pending_rate(xg), 0);
+    }
+    unbox_slice(heap, xgb);
+    return 0;
+}

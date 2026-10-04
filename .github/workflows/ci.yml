@@ -64,7 +64,7 @@ jobs:
       - name: The reference library for Standard Webhooks
         run: pip install standardwebhooks
 
-      - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings, the reasons, the counters and the text of /metrics)
+      - name: Unit tests (the delivery window, the endpoints file, the idempotency index, the settings, the reasons, the counters and the text of /metrics, the spread of retries, the limits, the table of dead letters, the requests about them)
         working-directory: hooks
         run: ../lex-sys/target/release/lex-sys test
 
@@ -165,6 +165,22 @@ jobs:
       - name: The circuit breaker (a run of failures, a pause after N days, its events wait, enable)
         working-directory: hooks
         run: python3 tests/breaker_test.py build/hooks
+
+      - name: Dead letters you can list and replay in bulk (pages, kill -9, the bound of 32 waiting replays, the table of 2,048, a log from before the time of death)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/dead_test.py build/hooks
+
+      - name: Cancel a waiting replay (one or all, durable across kill -9 and a power cut, never an attempt on the wire)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/cancel_test.py build/hooks
+
+      - name: Retry jitter (bounds, 0 is the schedule, a function of endpoint, event and attempt, the recorded time survives kill -9)
+        working-directory: hooks
+        run: python3 tests/jitter_test.py build/hooks
+
+      - name: Concurrency and rate per endpoint (observed at the receiver, held-back events are not failures, one slow endpoint does not slow another, the table, endpoints.conf, an old schema)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/limits_test.py build/hooks
 
       - name: No acknowledged event is lost (kill -9 as a power cut)
         working-directory: hooks

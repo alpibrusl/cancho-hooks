@@ -355,8 +355,51 @@ fn test_a_bad_optional_word_refuses_the_line() -> [] int {
     test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@0\n"), 0 - 1);
     test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=@100\n"), 0 - 1);
     test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=not*base64@100\n"), 0 - 1);
+    // the limits (`lim.ls`): in range, once each
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= concurrency=0\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= concurrency=9\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= concurrency=\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= concurrency=x\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= rate=0\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= rate=100001\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE=\n2 h 80 c2VjcmV0ISE= rate=\n"), 0 - 2);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= rate=2 rate=3\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= concurrency=2 concurrency=2\n"), 0 - 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= concurency=2\n"), 0 - 1);
     // and the good ones
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= concurrency=1 rate=1\n"), 1);
+    test.assert_eq(refused("1 h 80 c2VjcmV0ISE= rate=100000 concurrency=8 types=a\n"), 1);
     test.assert_eq(refused("1 h 80 c2VjcmV0ISE= types=*\n"), 1);
     test.assert_eq(refused("1 h 80 c2VjcmV0ISE= old=c2VjcmV0ISE=@100\n"), 1);
+    return 0;
+}
+
+fn test_the_limits_are_kept_beside_the_endpoint_in_either_order() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        let text = "1 8.8.8.8 9001 c2VjcmV0ISE= concurrency=2 rate=9\n2 1.1.1.1 9002 c2VjcmV0ISE= types=a rate=3 concurrency=5\n";
+        test.assert_eq(endpoints.parse_x(text, table, blob, true, xt), 2);
+        test.assert_eq(epx.conc(xt, 0), 2);
+        test.assert_eq(epx.rate(xt, 0), 9);
+        test.assert_eq(epx.conc(xt, 1), 5);
+        test.assert_eq(epx.rate(xt, 1), 3);
+        test.assert_eq(epx.types_len(xt, 1), 1);
+    }
+    return 0;
+}
+
+fn test_a_line_without_limits_follows_the_service() -> [] int {
+    region a {
+        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let blob = alloc_slice[a](512, byte_of(0));
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_conc(xt, 0, 4);
+        epx.set_rate(xt, 0, 40);
+        test.assert_eq(endpoints.parse_x("3 1.1.1.2 9003 c2VjcmV0ISE=\n", table, blob, true, xt), 1);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+    }
     return 0;
 }
