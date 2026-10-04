@@ -7,6 +7,7 @@ import log;
 import record;
 import segment;
 import state;
+import store;
 
 // `logguard` -- refuse corruption instead of repairing it silently (`docs/production.md` 0.5, `docs/design.md` section 34.5).
 //
@@ -41,13 +42,20 @@ import state;
 //     4 bytes from valid_end to the end of the file                  5 offset of the first intact record after valid_end, or -1
 //     6 intact records from there on (contiguous)                    7 plausible-length records chained from valid_end (2 is "two or more")
 //     8 the sequence number of the last whole record (-1 if none)    9 the size of the file when it was looked at
+//    10 1 if the first record is the header of a log written since retention (it counts in 2, and is not said in the messages: "records" are events or outcomes)
 
 pub fn rep_size() -> [] int {
-    return 10;
+    return 11;
 }
 
-// The whole report of a start: the events log's, the delivery log's, then the pair's two integers, then which log was refused for damage (1 events, 2 delivery).
+// The whole report of a start: the events log's, the delivery log's, then the pair's two integers, then which log was refused for damage (1 events, 2 delivery), then the
+// number of the events segment that the events log's report is about (the last one: the only one a crash can leave a torn tail in, `docs/retention.md` section 5).
 pub fn report_size() -> [] int {
+    return 2 * rep_size() + 4;
+}
+
+// Where that segment number is.
+pub fn segment_at() -> [] int {
     return 2 * rep_size() + 3;
 }
 
@@ -475,6 +483,27 @@ fn look[&c, &d, &n, &w, &r](fs: &c Fs(""), dir: &d [byte], name: &n [byte], wind
                         Done::Ok(n) => {
                             size = n;
                             verdict = inspect(fh, size, window, max_len, rep).0;
+                            if verdict != segment.unreadable() && rep[2] > 0 {
+                                var got = 0;
+                                match file_pread(fh, 0, window[0..128]) {
+                                    Read::Got(k) => {
+                                        got = k;
+                                    }
+                                    Read::End => {
+                                    }
+                                    Read::Failed(e) => {
+                                    }
+                                }
+                                if got >= 128 {
+                                    if outcomes {
+                                        if state.outcome_at(window, 0).0 == state.format() {
+                                            rep[10] = 1;
+                                        }
+                                    } else if record.ms_of(window, 0) == 0 {
+                                        rep[10] = 1;
+                                    }
+                                }
+                            }
                             if outcomes && verdict != segment.unreadable() {
                                 refs = last_reference(fh, rep[1], window, max_len);
                             }
@@ -491,12 +520,51 @@ fn look[&c, &d, &n, &w, &r](fs: &c Fs(""), dir: &d [byte], name: &n [byte], wind
     }
 }
 
-// Judge both logs before anything is changed (see the head of this file). `rep` is `2 * rep_size() + 2` integers: the events log's report, the delivery log's, then the pair's
+// The number of the last segment of the events log: from the one `events.first` names (0 if there is no such file), up while the files exist. A directory from before retention has
+// `events.seg` alone and answers 0.
+fn last_segment[&c, &d](fs: &c Fs(""), dir: &d [byte]) -> [fs_read(""), file_read] int {
+    var k = 0;
+    region a {
+        let path = alloc_slice[a](2112, byte_of(0));
+        let small = alloc_slice[a](32, byte_of(0));
+        let pn = store.path_join(path, dir, "events.first");
+        let got = store.read_range(fs, path[0..pn], 0, small);
+        var i = 0;
+        var n = 0;
+        while got > 0 && i < got && int_of(small[i]) >= 48 && int_of(small[i]) <= 57 && n < 1000000000 {
+            n = n * 10 + int_of(small[i]) - 48;
+            i = i + 1;
+        }
+        if i > 0 {
+            k = n;
+        }
+        var more = true;
+        while more && k < n + 4096 + 1 {
+            let nm = store.seg_path(path, dir, k + 1);
+            if store.size_of(fs, path[0..nm]) >= 0 {
+                k = k + 1;
+            } else {
+                more = false;
+            }
+        }
+    }
+    return k;
+}
+
+// Judge both logs before anything is changed (see the head of this file). `rep` is `2 * rep_size() + 4` integers: the events log's report, the delivery log's, then the pair's
 // (the largest event the delivery log refers to, the last event the events log would hold). Answers 0 to go on; 19 for damage that `repair` does not allow cutting (the events log
 // is judged first; `which` tells which: `rep[2 * rep_size() + 2]`); 18 for a pair that disagrees *after* the cuts that would be made.
 pub fn preflight[&c, &d, &w, &r](fs: &c Fs(""), dir: &d [byte], window: &!w [byte], max_len: int, repair: bool, rep: &!r [int]) -> [fs_read(""), file_read] int {
     let n = rep_size();
-    let events = look(fs, dir, "events.seg", window, max_len, rep[0..n], false);
+    // The events log is a chain of segments (`docs/retention.md`): the last is the one that can end in a torn tail, and the one this judges. (The others are sealed: the start
+    // checks that each ends where the next begins.)
+    let lastk = last_segment(fs, dir);
+    rep[2 * n + 3] = lastk;
+    var events = (clean(), 0);
+    region a {
+        let name = alloc_slice[a](64, byte_of(0));
+        events = look(fs, dir, name[0..store.seg_name(name, lastk)], window, max_len, rep[0..n], false);
+    }
     let delivery = look(fs, dir, "delivery.seg", window, max_len, rep[n..2 * n], true);
     rep[2 * n + 2] = 0;
     if events.0 == segment.unreadable() || delivery.0 == segment.unreadable() {
@@ -517,7 +585,8 @@ pub fn preflight[&c, &d, &w, &r](fs: &c Fs(""), dir: &d [byte], window: &!w [byt
     }
     rep[2 * n] = delivery.1;
     rep[2 * n + 1] = last;
-    if delivery.1 > last {
+    // A last segment that holds no event (just rolled, or everything dropped) says nothing about the last event: the start judges the pair again once the log is open.
+    if last >= 1 && delivery.1 > last {
         return 18;
     }
     return 0;
@@ -557,7 +626,7 @@ pub fn say_damage[&i, &n, &r](out: &!i Io, name: &n [byte], rep: &r [int], why: 
     say(out, "hooks: ");
     say(out, name);
     say(out, ": damage in the middle of the log, not a torn tail. It is whole for ");
-    num(out, rep[2]);
+    num(out, rep[2] - rep[10]);
     say(out, " records (up to byte ");
     num(out, rep[1]);
     say(out, "); after that ");
@@ -598,7 +667,7 @@ pub fn say_damage[&i, &n, &r](out: &!i Io, name: &n [byte], rep: &r [int], why: 
 }
 
 fn name_is_events[&n](name: &n [byte]) -> [] bool {
-    return len(name) == 10 && name[0] == byte_of('e');
+    return len(name) >= 10 && name[0] == byte_of('e');
 }
 
 // Status 19 from the whole report: the log that was refused is named in its last cell (or, when nothing was cut because the bytes could not be kept, the one whose verdict says so).
@@ -610,7 +679,10 @@ pub fn say_damage_of[&i, &r](out: &!i Io, report: &r [int], why: int) -> [err_wr
     if delivery {
         say_damage(out, "delivery.seg", report[rep_size()..2 * rep_size()], why);
     } else {
-        say_damage(out, "events.seg", report[0..rep_size()], why);
+        region a {
+            let name = alloc_slice[a](64, byte_of(0));
+            say_damage(out, name[0..store.seg_name(name, report[segment_at()])], report[0..rep_size()], why);
+        }
     }
     return 0;
 }
@@ -625,7 +697,7 @@ pub fn say_cut[&i, &n, &r](out: &!i Io, name: &n [byte], rep: &r [int]) -> [err_
         say(out, " bytes at byte ");
         num(out, rep[1]);
         say(out, " (an unfinished write); ");
-        num(out, rep[2]);
+        num(out, rep[2] - rep[10]);
         say(out, " records are whole\n");
     }
     if rep[0] == damage_cut() {
@@ -638,12 +710,21 @@ pub fn say_cut[&i, &n, &r](out: &!i Io, name: &n [byte], rep: &r [int]) -> [err_
         say(out, " bytes gone, among them ");
         num(out, rep[6]);
         say(out, " intact records; ");
-        num(out, rep[2]);
+        num(out, rep[2] - rep[10]);
         say(out, " records are whole. The bytes are kept in ");
         say(out, name);
         say(out, ".cut-");
         num(out, rep[1]);
         say(out, "\n");
+    }
+    return 0;
+}
+
+// What a start did to the events log (its last segment), after `listening`.
+pub fn say_cut_events[&i, &r](out: &!i Io, report: &r [int]) -> [err_write] int {
+    region a {
+        let name = alloc_slice[a](64, byte_of(0));
+        say_cut(out, name[0..store.seg_name(name, report[segment_at()])], report[0..rep_size()]);
     }
     return 0;
 }

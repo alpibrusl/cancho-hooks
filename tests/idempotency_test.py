@@ -108,10 +108,12 @@ def event(n, pad=0):
 class Run:
     """A service with a data directory of its own."""
 
-    def __init__(self, window_ms=None):
+    def __init__(self, window_ms=None, flags=()):
         self.datadir = tempfile.mkdtemp(prefix="hooks-idem-")
         self.port = chaos.free_port()
         extra = ("5000", 0, window_ms) if window_ms is not None else ()
+        if flags:
+            extra = ("5000", 0, 86400000 if window_ms is None else window_ms, *flags)
         self.svc = chaos.Service(self.port, self.datadir, extra=extra)
         self.svc.start()
 
@@ -465,7 +467,9 @@ def stage_broken():
 # ---- 7. the index at its capacity ---------------------------------------------------------------------------------
 
 def stage_full():
-    r = Run()
+    # The index holds `idem-keys` keys (a setting since retention; 262,144 by default, 65,536 was the only size it had): the limit is the same
+    # mechanism at whatever size it is given, and 65,536 is the size that can be filled in seconds.
+    r = Run(flags=("--idem-keys", str(CAPACITY)))
     done = [0]
     lock = threading.Lock()
     refused = []

@@ -293,7 +293,7 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(state.outcome_at(buf, 0).1, 4);
         // one past the last kind is still not an outcome
         state.put_outcome(buf, 0, 11, state.reason(), 4, 7, 2, 11);
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 15);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 16);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);
@@ -353,6 +353,25 @@ fn test_the_reason_record_reads_back_and_changes_no_cell() -> [] int {
         test.assert_eq(state.attempts(w, 0, 1), 0);
         test.assert_eq(state.next_at(w, 0, 1), 0);
         test.assert(!state.is_final(w, c, 0, 1));
+    }
+    return 0;
+}
+
+// The header of an outcomes log written since there were formats (`docs/retention.md` section 4): kind 15, the format in the event field, the
+// time in the next-attempt field, and an endpoint that is no slot. `apply` does nothing with it.
+fn test_the_format_header_reads_back_and_is_no_slot() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        state.put_outcome(buf, 0, 1, state.format(), state.max_endpoints(), 2, 0, 1767225600000);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, state.format());
+        test.assert_eq(o.1, state.max_endpoints());
+        test.assert_eq(o.2, 2);
+        test.assert_eq(o.4, 1767225600000);
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        test.assert_eq(state.apply(w, c, 0, state.format(), 1, 0, 0), 0);
+        test.assert_eq(c[0], 0);
     }
     return 0;
 }

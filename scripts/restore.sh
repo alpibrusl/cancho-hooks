@@ -6,12 +6,12 @@
 #                      [--pg-database hooks [--pg-host H] [--pg-port P] [--pg-user U]]
 #
 # It checks everything before it changes anything: the checksums, the manifest, both logs record by record, and that
-# delivery.seg does not refer to an event that events.seg lacks (a pair like that makes a service acknowledge events it
+# delivery.seg does not refer to an event that the events log lacks (a pair like that makes a service acknowledge events it
 # never delivers; scripts/logcheck.py explains). It refuses, and says why, rather than restore a pair it does not trust.
 #
 #   * The service must not be running (a log of --dir open in any process is a refusal; it looks in /proc: run it as root or
 #     as the service's user).
-#   * A --dir that already holds events.seg or delivery.seg is a refusal, unless --force: then those files are MOVED to
+#   * A --dir that already holds a log (events.seg, events-N.seg, delivery.seg) is a refusal, unless --force: then those files are MOVED to
 #     <dir>/pre-restore-<UTC time>/, never deleted.
 #   * With --pg-database the tables are restored with pg_restore --clean --if-exists in one transaction: the database must exist
 #     (createdb hooks; the tables need not: the dump creates them, the sequence endpoint_ids keeps its value so that an endpoint
@@ -55,9 +55,18 @@ if [ -n "$pg_db" ]; then command -v pg_restore >/dev/null || die 2 "pg_restore i
 
 # 1. The backup itself.
 if [ ! -f "$backup/MANIFEST" ] || [ ! -f "$backup/SHA256SUMS" ]; then die 4 "$backup has no MANIFEST or SHA256SUMS: not a backup of this script"; fi
-grep -qx 'format=lexsys-hooks-backup/1' "$backup/MANIFEST" || die 4 "unknown backup format ($(grep '^format=' "$backup/MANIFEST" || echo none)): this script reads lexsys-hooks-backup/1"
+# /1 is a backup of one events.seg; /2 lists the segments of the events log (retention: docs/retention.md) in `events_files=`.
+if grep -qx 'format=lexsys-hooks-backup/2' "$backup/MANIFEST"; then
+  events_files=$(sed -n 's/^events_files=//p' "$backup/MANIFEST")
+  [ -n "$events_files" ] || die 4 "the MANIFEST lists no events files"
+elif grep -qx 'format=lexsys-hooks-backup/1' "$backup/MANIFEST"; then
+  events_files=events.seg
+else
+  die 4 "unknown backup format ($(grep '^format=' "$backup/MANIFEST" || echo none)): this script reads lexsys-hooks-backup/1 and /2"
+fi
 (cd "$backup" && sha256sum --quiet -c SHA256SUMS) || die 4 "a checksum does not match: the backup is damaged"
-for f in events.seg delivery.seg; do
+for f in $events_files delivery.seg; do
+  case $f in *[!A-Za-z0-9._-]*|"") die 4 "a file name in the MANIFEST is not one this script makes: $f" ;; esac
   grep -q " $f\$" "$backup/SHA256SUMS" || die 4 "$f is not listed in SHA256SUMS"
 done
 kv=$(python3 "$logcheck" check "$backup" --kv) || die 4 "the logs of the backup are not a consistent pair (see above); nothing was restored"
@@ -72,24 +81,29 @@ holders=$(
   for fd in /proc/[0-9]*/fd/*; do
     target=$(readlink "$fd" 2>/dev/null) || continue
     case $target in
-      "$dir/events.seg"|"$dir/delivery.seg") fd=${fd#/proc/}; echo "${fd%%/*}" ;;
+      "$dir"/events.seg|"$dir"/events-[0-9]*.seg|"$dir/delivery.seg") fd=${fd#/proc/}; echo "${fd%%/*}" ;;
     esac
   done | sort -u
 )
 [ -z "$holders" ] || die 3 "the service has $dir open (pid $(echo "$holders" | tr '\n' ' ')): stop it first"
 aside=""
-if [ -e "$dir/events.seg" ] || [ -e "$dir/delivery.seg" ]; then
+have_log=0
+for f in "$dir"/events.seg "$dir"/events-[0-9]*.seg "$dir"/delivery.seg; do
+  if [ -e "$f" ]; then have_log=1; fi
+done
+if [ "$have_log" = 1 ]; then
   [ "$force" = 1 ] || die 3 "$dir already has a log: restore into an empty directory, or --force to move the old files to $dir/pre-restore-<time>/"
   aside="$dir/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -m 0700 "$aside"
-  for f in events.seg delivery.seg endpoints.conf; do
-    if [ -e "$dir/$f" ]; then mv "$dir/$f" "$aside/$f"; fi
+  for path in "$dir"/events.seg "$dir"/events-[0-9]*.seg "$dir"/events.first "$dir"/delivery.seg "$dir"/endpoints.conf; do
+    if [ -e "$path" ]; then mv "$path" "$aside/$(basename "$path")"; fi
   done
   echo "restore: the files that were in $dir are in $aside" >&2
 fi
 
 # 3. The files: each to a temporary name, flushed, then renamed, so that a failure part-way leaves no half-written log.
-for f in delivery.seg events.seg endpoints.conf; do
+# (the outcomes first, then the segments, then the manifest that names the first: the order of the backup)
+for f in delivery.seg $events_files events.first endpoints.conf; do
   if [ -f "$backup/$f" ]; then
     cp "$backup/$f" "$dir/.$f.restoring"
     sync "$dir/.$f.restoring" 2>/dev/null || sync

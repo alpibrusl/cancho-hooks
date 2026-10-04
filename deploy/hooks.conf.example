@@ -7,7 +7,8 @@
 # The TCP port, 1 to 65535. Below 1024 needs a capability the unit does not grant: put a reverse proxy in front instead.
 port = 8080
 
-# The data directory: events.seg, delivery.seg and (without a database) endpoints.conf. The unit's StateDirectory.
+# The data directory: the events log (events.seg, events-N.seg, events.first), delivery.seg, compact.lock and (without a database)
+# endpoints.conf. The unit's StateDirectory.
 dir = /var/lib/hooks
 
 # --- PostgreSQL: the endpoints are its `endpoints` table and the attempt history is written to it. Without pg-host there is no
@@ -61,3 +62,19 @@ dir = /var/lib/hooks
 # --- refusal, and not here: here it would cut without being asked on every start. (A delivery.seg ahead of its events.seg, status 18, is never
 # --- repaired: restore a matching pair.)
 #repair-logs = 0
+
+# --- Retention (docs/retention.md): how long the logs keep what is already delivered. An event is dropped, a whole segment at a time, only when
+# --- it is final (delivered or dead-lettered) at EVERY endpoint, and older than the retention (or than window-ms, if that is longer). An event
+# --- that a paused, disabled or dead endpoint, or a waiting replay, still needs is never dropped, at any age. After the drop the event's
+# --- body is a 404, a replay of it is a 404, and its Idempotency-Key is forgotten (the same key posted again is a new event).
+# --- 0 keeps events for ever: the disk then grows with history, as it did before retention existed.
+#retention-days = 30
+# --- An events segment is sealed at this size (256 KiB or more); retention drops whole segments, so the disk holds up to this much more than
+# --- the retention period's events. delivery.seg is replaced by a snapshot of the delivery state at this size (64 KiB or more), or at four
+# --- times the size of the last snapshot if that is more. The defaults are 64 MiB and 32 MiB.
+#segment-bytes = 67108864
+#delivery-log-bytes = 33554432
+# --- How many idempotency keys the index holds (16 to 4194304; a schedule index of a quarter of this holds cron's). 262144 keys cost about
+# --- 40 MB of memory; a key is forgotten when its window-ms has passed or its event is dropped, whichever is first. A new key beyond this
+# --- many that are still fresh is a 507.
+#idem-keys = 262144

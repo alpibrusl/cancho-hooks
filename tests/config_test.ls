@@ -502,3 +502,58 @@ fn test_rotation_grace_default_and_limits() -> [] int {
     }
     return 0;
 }
+
+// The retention settings (`docs/retention.md` section 3): their defaults, each at the edges of what it takes, and that a refusal changes nothing.
+fn test_retention_settings_defaults_and_edges() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.retention_days(cfg), 30);
+        test.assert_eq(config.segment_bytes(cfg), 67108864);
+        test.assert_eq(config.delivery_log_bytes(cfg), 33554432);
+        test.assert_eq(config.idem_keys(cfg), 262144);
+        test.assert(!config.compact_now(cfg));
+        test.assert_eq(config.retention_ms_knob(cfg), 0);
+        test.assert_eq(config.compact_kill_at(cfg), 0);
+        // 0 days keeps for ever; 36,500 is the most
+        test.assert_eq(config.set(cfg, blob, "retention-days", "0"), 0);
+        test.assert_eq(config.retention_days(cfg), 0);
+        test.assert_eq(config.set(cfg, blob, "retention-days", "36500"), 0);
+        test.assert_eq(config.retention_days(cfg), 36500);
+        test.assert(config.set(cfg, blob, "retention-days", "36501") != 0);
+        test.assert(config.set(cfg, blob, "retention-days", "a month") != 0);
+        test.assert_eq(config.retention_days(cfg), 36500);
+        // a segment of at least 256 KiB, a log limit of at least 64 KiB
+        test.assert_eq(config.set(cfg, blob, "segment-bytes", "262144"), 0);
+        test.assert_eq(config.segment_bytes(cfg), 262144);
+        test.assert(config.set(cfg, blob, "segment-bytes", "262143") != 0);
+        test.assert_eq(config.segment_bytes(cfg), 262144);
+        test.assert_eq(config.set(cfg, blob, "delivery-log-bytes", "65536"), 0);
+        test.assert(config.set(cfg, blob, "delivery-log-bytes", "65535") != 0);
+        test.assert_eq(config.delivery_log_bytes(cfg), 65536);
+        // 16 to 4,194,304 keys
+        test.assert_eq(config.set(cfg, blob, "idem-keys", "16"), 0);
+        test.assert_eq(config.idem_keys(cfg), 16);
+        test.assert(config.set(cfg, blob, "idem-keys", "15") != 0);
+        test.assert_eq(config.set(cfg, blob, "idem-keys", "4194304"), 0);
+        test.assert(config.set(cfg, blob, "idem-keys", "4194305") != 0);
+        test.assert_eq(config.idem_keys(cfg), 4194304);
+        // the switch and the two test knobs
+        test.assert_eq(config.set(cfg, blob, "compact-now", "1"), 0);
+        test.assert(config.compact_now(cfg));
+        test.assert(config.set(cfg, blob, "compact-now", "yes") != 0);
+        test.assert(config.compact_now(cfg));
+        test.assert_eq(config.set(cfg, blob, "retention-ms", "1500"), 0);
+        test.assert_eq(config.retention_ms_knob(cfg), 1500);
+        test.assert_eq(config.set(cfg, blob, "compact-kill-at", "19"), 0);
+        test.assert_eq(config.compact_kill_at(cfg), 19);
+        test.assert(config.set(cfg, blob, "compact-kill-at", "65") != 0);
+        // from a file
+        test.assert_eq(config.parse_file("retention-days = 7\nsegment-bytes = 1048576\nidem-keys=5000\n", cfg, blob), 0);
+        test.assert_eq(config.retention_days(cfg), 7);
+        test.assert_eq(config.segment_bytes(cfg), 1048576);
+        test.assert_eq(config.idem_keys(cfg), 5000);
+    }
+    return 0;
+}

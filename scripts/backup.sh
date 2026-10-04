@@ -1,13 +1,14 @@
 #!/bin/bash
-# Back up a lexsys-hooks data directory: the two logs (events.seg, delivery.seg), endpoints.conf if there is one, and (with
-# --pg-database) a pg_dump of the tables endpoints, attempts and schedules and the sequence endpoint_ids.
+# Back up a lexsys-hooks data directory: the two logs (the events log's segments, events.seg events-1.seg ... with events.first, and
+# delivery.seg), endpoints.conf if there is one, and (with --pg-database) a pg_dump of the tables endpoints, attempts and schedules and the
+# sequence endpoint_ids.
 #
 #   scripts/backup.sh --dir /var/lib/hooks --out /var/backups/hooks --mode stopped|online
 #                     [--stop-cmd 'systemctl stop hooks' --start-cmd 'systemctl start hooks']      (stopped only)
 #                     [--pg-database hooks [--pg-host H] [--pg-port P] [--pg-user U] [--skip-attempts]]
 #
 # The result is one directory, <out>/hooks-backup-<UTC time>/, written under a temporary name and renamed only after it
-# verified: the files, SHA256SUMS, MANIFEST and (if a database was named) hooks.pgdump. It holds every endpoint secret in the
+# verified: the files, SHA256SUMS, MANIFEST (format lexsys-hooks-backup/2) and (if a database was named) hooks.pgdump. It holds every endpoint secret in the
 # clear (as the table and endpoints.conf do): the directory is created 0700, keep it where you keep secrets.
 # A password for the database is not accepted on the command line: use ~/.pgpass or PGPASSWORD, as for any libpq tool.
 #
@@ -18,16 +19,17 @@
 #             process at once; `docs/production.md` 0.4 plans one), so "stop" is SIGTERM and an attempt on the wire is repeated
 #             after the restore: at least once. The script refuses if any process still has a log open (it looks in /proc: run
 #             it as root or as the service's user, or it cannot see the process), and runs --stop-cmd first and --start-cmd last.
-#   online    the service keeps running and no acknowledged event is held back. This is safe because (1) both logs are only
-#             appended to while the service runs (recovery cuts a torn tail only at start, and nothing compacts or rewrites them:
-#             if that ever changes, this mode must be withdrawn), so a copy is a valid prefix plus at most one torn record, and
-#             (2) the copies are taken **delivery.seg first, events.seg second**, so events.seg is never older than what
-#             delivery.seg says was delivered. The reverse order is a disaster, not an inconvenience: a restored service whose
-#             events.seg is shorter than its delivery.seg acknowledges new events under ids it believes delivered and never
-#             delivers them (measured; tests/backup_test.py and docs/runbook.md). The script copies in the safe order, trims the
-#             copies to their valid prefix, and then checks the pair with scripts/logcheck.py: it fails rather than keep a pair that
-#             refers to an event it does not hold. What a restore can repeat is the deliveries recorded after delivery.seg was
-#             copied: at least once, never zero.
+#   online    the service keeps running and no acknowledged event is held back. This is safe because (1) while this script holds
+#             compact.lock the service neither drops a segment nor replaces delivery.seg (retention, docs/retention.md: it tries the
+#             lock without waiting, skips the step and tries again), and rolling, which only adds a file after the ones listed here, is
+#             harmless; so every file copied is a valid prefix of what it is plus at most one torn record, and (2) the copies are taken
+#             **delivery.seg first, the events segments second**, so the events log is never older than what delivery.seg says was
+#             delivered. The reverse order is a disaster, not an inconvenience: a restored service whose events log is shorter than its
+#             delivery.seg acknowledges new events under ids it believes delivered and never delivers them (measured; tests/backup_test.py
+#             and docs/runbook.md). The script copies in the safe order, trims the copy of the last segment to its valid prefix (and
+#             leaves it out if a roll had not got as far as its header), and then checks the pair with scripts/logcheck.py: it fails
+#             rather than keep a pair that refers to an event it does not hold. What a restore can repeat is the deliveries recorded after
+#             delivery.seg was copied: at least once, never zero.
 #
 # Exit status: 0 done; 2 usage; 3 refused (the service is running in stopped mode, the output exists); 4 the copy did not verify;
 # 5 pg_dump failed.
@@ -65,9 +67,17 @@ if [ "$mode" = online ] && { [ -n "$stop_cmd" ] || [ -n "$start_cmd" ]; }; then
 fi
 [ -d "$dir" ] || die 2 "$dir is not a directory"
 dir=$(cd "$dir" && pwd)
-[ -f "$dir/events.seg" ] || die 2 "$dir/events.seg does not exist: is that the --dir the service runs with?"
+# Is this a data directory at all? (A segment can be dropped by the service at any moment until the lock below is held, so which file is the first is
+# decided under the lock, not here.)
+seg_name() { if [ "$1" -eq 0 ]; then echo events.seg; else echo "events-$1.seg"; fi; }
+have_events=0
+for f in "$dir"/events.seg "$dir"/events-[0-9]*.seg "$dir"/events.first; do
+  if [ -e "$f" ]; then have_events=1; fi
+done
+[ "$have_events" = 1 ] || die 2 "$dir has no events log (events.seg, events-N.seg): is that the --dir the service runs with?"
 command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py)"
 command -v sha256sum >/dev/null || die 2 "sha256sum is needed"
+command -v flock >/dev/null || die 2 "flock (util-linux) is needed: the service defers compaction while this script holds compact.lock"
 if [ -n "$pg_db" ]; then command -v pg_dump >/dev/null || die 2 "pg_dump is needed for --pg-database"; fi
 
 # Is a log of $dir open in some process? Prints its pid. /proc only shows other users' processes to root.
@@ -76,7 +86,7 @@ holders() {
   for fd in /proc/[0-9]*/fd/*; do
     target=$(readlink "$fd" 2>/dev/null) || continue
     case $target in
-      "$dir/events.seg"|"$dir/delivery.seg") fd=${fd#/proc/}; echo "${fd%%/*}" ;;
+      "$dir"/events.seg|"$dir"/events-[0-9]*.seg|"$dir/delivery.seg") fd=${fd#/proc/}; echo "${fd%%/*}" ;;
     esac
   done | sort -u
 }
@@ -114,6 +124,12 @@ if [ "$mode" = stopped ]; then
   [ -z "$pids" ] || die 3 "the service still has $dir open (pid $(echo "$pids" | tr '\n' ' ')): stop it first, or use --mode online"
 fi
 
+# Retention (docs/retention.md): the service drops a segment and replaces delivery.seg only while it can take this lock without waiting. Held for
+# the whole copy, it makes the files below stand still. (A service that is stopped does not mind; one that is running skips its step and tries
+# again when this script lets go, which costs nothing but a delay.)
+exec 9>>"$dir/compact.lock"
+flock -w 600 9 || die 3 "could not take $dir/compact.lock in 600 s: something else holds it (another backup, or compact-now)"
+
 # The database first, then the logs. A row the dump has and the logs lack makes the service start that endpoint at the
 # slowest cursor (a repeat, never a loss); the other way round is also a repeat. Either order is safe; this one makes the logs
 # the later (and so the more complete) of the two stores.
@@ -128,26 +144,45 @@ fi
 
 # The logs: delivery.seg FIRST. See MODES above.
 if [ -f "$dir/delivery.seg" ]; then cp "$dir/delivery.seg" "$work/delivery.seg"; else : > "$work/delivery.seg"; fi   # a service that never delivered has none
-cp "$dir/events.seg" "$work/events.seg"
+# The segments are listed after that: the manifest, then every file from the first it names up while they exist (a segment made after this point is
+# simply not in the backup, and the events log it holds is a prefix, which is all the order above needs). The manifest is read again here, under
+# the lock: a service that dropped its first segment between the first look and the lock would otherwise leave this listing empty (found by
+# tests/backup_test.py stage D).
+first_k=0
+if [ -f "$dir/events.first" ]; then first_k=$(tr -dc 0-9 < "$dir/events.first"); fi
+[ -f "$dir/$(seg_name "$first_k")" ] || die 4 "$dir/$(seg_name "$first_k") does not exist, though the lock is held: is something else removing files from $dir?"
+segs=()
+k=$first_k
+while [ -f "$dir/$(seg_name "$k")" ]; do segs+=("$(seg_name "$k")"); k=$((k + 1)); done
+if [ -f "$dir/events.first" ]; then cp "$dir/events.first" "$work/events.first"; fi
+for f in "${segs[@]}"; do cp "$dir/$f" "$work/$f"; done
 if [ -f "$dir/endpoints.conf" ]; then cp "$dir/endpoints.conf" "$work/endpoints.conf"; fi
 
 # A copy taken while the service ran may end in a torn record: cut it, as the service would at start.
 cut_of() { sed -n 's/.*"cut": \([0-9]*\).*/\1/p'; }
 cut_delivery=$(python3 "$logcheck" trim "$work/delivery.seg" | cut_of) || die 4 "delivery.seg: the copy is damaged"
-cut_events=$(python3 "$logcheck" trim "$work/events.seg" | cut_of) || die 4 "events.seg: the copy is damaged"
+# Only the last segment can end in a torn record. One that holds nothing whole (a roll caught between creating the file and its header) is left out.
+last=${segs[${#segs[@]} - 1]}
+cut_events=$(python3 "$logcheck" trim "$work/$last" | cut_of) || die 4 "$last: the copy is damaged"
+if [ "$(wc -c < "$work/$last")" -eq 0 ] && [ "${#segs[@]}" -gt 1 ]; then
+  rm "$work/$last"
+  unset 'segs[${#segs[@]}-1]'
+fi
 kv=$(python3 "$logcheck" check "$work" --kv) || die 4 "the copied pair is not consistent (see above); nothing was kept"
 
 {
-  echo "format=lexsys-hooks-backup/1"
+  echo "format=lexsys-hooks-backup/2"
   echo "mode=$mode"
   echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "source_dir=$dir"
   echo "pg_database=${pg_db:-}"
   echo "torn_bytes_cut_delivery=$cut_delivery"
   echo "torn_bytes_cut_events=$cut_events"
+  echo "events_files=${segs[*]}"
   echo "$kv"
 } > "$work/MANIFEST"
-listed=(events.seg delivery.seg MANIFEST)
+listed=(delivery.seg MANIFEST "${segs[@]}")
+[ ! -f "$work/events.first" ] || listed+=(events.first)
 [ ! -f "$work/endpoints.conf" ] || listed+=(endpoints.conf)
 [ ! -f "$work/hooks.pgdump" ] || listed+=(hooks.pgdump)
 (cd "$work" && sha256sum -- "${listed[@]}" > SHA256SUMS)

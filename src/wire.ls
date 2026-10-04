@@ -27,6 +27,9 @@ import sign;
 // before the time it is valid until).
 
 pub fn request[&h, &b, &k, &x](heap: &!h Heap, id: int, body: &b [byte], key: &k [byte], xt: &x [int], row: int, now_ms: int) -> [heap] buffer.Buffer {
+    // The region is left by falling out of it: one left by a `return` is not given back, and this runs once for every attempt (`docs/lexsys-log-retention.md`, gap 6).
+    let wn = epx.wire_len(xt, row);
+    var q = buffer.empty(heap, len(body) + 448 + wn);
     region a {
         let msg_id = alloc_slice[a](24, byte_of(0));
         msg_id[0] = byte_of('e');
@@ -38,8 +41,7 @@ pub fn request[&h, &b, &k, &x](heap: &!h Heap, id: int, body: &b [byte], key: &k
         let stamp_len = sign.nat_text(now_ms / 1000, stamp);
         let sig = alloc_slice[a](48, byte_of(0));
         sign.signature(heap, key, msg_id[0..id_len], stamp[0..stamp_len], body, sig);
-        let wn = epx.wire_len(xt, row);
-        var q = buffer.append(heap, buffer.empty(heap, len(body) + 448 + wn), "POST /hook HTTP/1.1\r\nHost: receiver\r\nContent-Type: application/json\r\nwebhook-id: ");
+        q = buffer.append(heap, q, "POST /hook HTTP/1.1\r\nHost: receiver\r\nContent-Type: application/json\r\nwebhook-id: ");
         q = buffer.append(heap, q, msg_id[0..id_len]);
         q = buffer.append(heap, q, "\r\nwebhook-timestamp: ");
         q = buffer.append(heap, q, stamp[0..stamp_len]);
@@ -72,6 +74,6 @@ pub fn request[&h, &b, &k, &x](heap: &!h Heap, id: int, body: &b [byte], key: &k
         q = buffer.push_nat(heap, q, len(body));
         q = buffer.append(heap, q, "\r\nConnection: close\r\n\r\n");
         q = buffer.append(heap, q, body);
-        return q;
     }
+    return q;
 }

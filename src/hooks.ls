@@ -30,6 +30,7 @@ import std.json;
 import std.route;
 import http.server;
 import log;
+import evlog;
 import history;
 import view;
 import queries;
@@ -154,6 +155,45 @@ fn open_log[&c, &d, &n, &w, &q](fs: &c Fs(""), dir: &d [byte], name: &n [byte], 
     }
 }
 
+// The same for a log that was just made by this process (the snapshot of the outcomes log, `compact.ls`), by its path: nothing was judged before it, so `log.recover` cuts
+// what there is to cut. (No region here: the caller's path is used, and a function that leaves a region by `return` loses its memory, `docs/lexsys-log-retention.md` gap 6.)
+fn open_tmp_log[&c, &p, &w](fs: &c Fs(""), path: &p [byte], window: &!w [byte]) -> [fs_read(""), fs_write(""), file_read, file_write] Opening {
+    match open_append(fs, path) {
+        Opened::Failed(e) => {
+            return Opening::Failed(e);
+        }
+        Opened::Ok(w) => {
+            match open_rw(fs, path) {
+                Opened::Failed(e) => {
+                    file_close(w);
+                    return Opening::Failed(e);
+                }
+                Opened::Ok(rw0) => {
+                    var rw = rw0;
+                    var rec = (0, 0, 0, 0 - 1, 0 - 1);
+                    borrow mut rw as &!x in {
+                        rec = log.recover(x, window, max_len());
+                    }
+                    file_close(rw);
+                    if rec.0 != 0 {
+                        file_close(w);
+                        return Opening::Failed(rec.0);
+                    }
+                    match open_read(fs, path) {
+                        Opened::Failed(e) => {
+                            file_close(w);
+                            return Opening::Failed(e);
+                        }
+                        Opened::Ok(rd) => {
+                            return Opening::Ok(log.attach(w, rd, rec.1, rec.2, rec.3, rec.4, max_len()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // The handlers
 // ---------------------------------------------------------------------
@@ -204,37 +244,6 @@ fn invalid_event[&h, &b, &y](heap: &!h Heap, body: &b [byte], typ: &!y [int]) ->
     }
     unbox_slice(heap, tape);
     return (reason, tlen);
-}
-
-// The event with id `id`, as a JSON body `{"id":N,"event":<the stored object>}`, or an empty buffer if there is none.
-// A linear scan: the ids are dense from 1 and the log keeps no index yet (`docs/design.md` section 4), which a service with
-// a few thousand events can afford and a large one cannot; the index is the next thing the log needs.
-fn find_event[&h, &l, &w](heap: &!h Heap, lg: &!l log.Log, window: &!w [byte], id: int) -> [heap, file_read] buffer.Buffer {
-    var at = 0;
-    var found = buffer.empty(heap, 0);
-    var going = true;
-    while going {
-        let r = log.read_at(lg, at, window);
-        if r.0 != 0 {
-            going = false;
-        } else if record.ms_of(window, 0) == id {
-            // The first pair's value is the stored body.
-            let p = record.pair_at(window, record.first_pair(0));
-            var w = json.writer(heap, r.1 + 32);
-            w = json.begin_object(heap, w);
-            w = json.put_key(heap, w, "id");
-            w = json.put_int(heap, w, id);
-            w = json.put_key(heap, w, "event");
-            w = json.put_fragment(heap, w, window[p.2..p.2 + p.3]);
-            w = json.end_object(heap, w);
-            buffer.drop(heap, found);
-            found = json.finish(w);
-            going = false;
-        } else {
-            at = at + r.1;
-        }
-    }
-    return found;
 }
 
 // The index of the `Idempotency-Key` header, -1 if there is none, -2 if there is more than one (which one the client meant
@@ -310,23 +319,21 @@ fn event_record[&c, &b, &y, &k](scratch: &!c [byte], ms: int, body: &b [byte], t
 
 // Append the event `body` (already judged) to the log, under `key` if it is `keyed`, and note the key in the index. This is the whole of storing an event: `POST /events`
 // and a schedule's fire (`fire_cron`) both end here, so a fire is an ordinary event. `sum` is the CRC-32C of `body`, `entry` the index entry of a key that is
-// held (an expired one, whose entry is overwritten) or -1. `typ[0..tlen]` is the type the record keeps (`tlen` 0 for none). Answers `(code, id)`: 0 and the event's id, or what `log.append` refused with.
-fn store_event[&c, &b, &t, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], typ: &t [int], tlen: int, key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], now: int) -> [file_write] (int, int) {
+// held or -1 (an entry that had expired has been removed by the caller, and room made). `typ[0..tlen]` is the type the record keeps (`tlen` 0 for none). Answers `(code, id)`: 0 and the event's id, or what `evlog.append` refused with.
+fn store_event[&c, &b, &t, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], typ: &t [int], tlen: int, key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], now: int) -> [] (int, int) {
     var ms = 1;
-    if log.last_ms(lg) >= 1 {
-        ms = log.last_ms(lg) + 1;
+    if evlog.last_id(lg) >= 1 {
+        ms = evlog.last_id(lg) + 1;
     }
     let total = event_record(scratch, ms, body, typ, tlen, key, keyed, now);
-    let code = log.append(lg, scratch[0..total], ms, 0);
+    let code = evlog.append(lg, scratch[0..total], ms);
     if code != 0 {
         return (code, 0);
     }
     if keyed {
-        // Only now that the record is appended: the index never holds a key the log does not.
-        var e = entry;
-        if e < 0 {
-            e = idem.add(ix, arena, key);
-        }
+        // Only now that the record is appended: the index never holds a key the log does not. The caller has made room (an entry that had expired was removed
+        // before: `entry` is -1), so the add cannot fail.
+        let e = idem.add(ix, arena, key);
         idem.set(ix, e, ms, now, sum, len(body));
     }
     return (0, ms);
@@ -349,12 +356,12 @@ fn refuse_event[&h, &m, &s](heap: &!h Heap, out: buffer.Buffer, stats: &!s [int]
 
 // Why the service is not ready (`ops.not_ready`), 0 if it is: the logs are not broken, the data directory took the last probe, a database that was named
 // has a live connection, and the service has not been asked to stop.
-fn readiness[&d, &l, &g](dv: &d [int], lg: &l log.Log, done: &g log.Log) -> [] int {
-    return ops.not_ready(ops_of(dv), log.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.live(dv[off_hq()..off_hq() + history.size()]));
+fn readiness[&d, &l, &g](dv: &d [int], lg: &l evlog.Ev, done: &g log.Log) -> [] int {
+    return ops.not_ready(ops_of(dv), evlog.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.live(dv[off_hq()..off_hq() + history.size()]));
 }
 
 // `GET /readyz`: 200 `{"ready":true}`, or 503 `{"ready":false,"check":...,"reason":...}`. It reads three flags and the last probe; it waits for nothing.
-fn readyz_reply[&h, &d, &l, &g](heap: &!h Heap, dv: &d [int], lg: &l log.Log, done: &g log.Log, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
+fn readyz_reply[&h, &d, &l, &g](heap: &!h Heap, dv: &d [int], lg: &l evlog.Ev, done: &g log.Log, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
     let why = readiness(dv, lg, done);
     var w = json.writer(heap, 256);
     w = json.begin_object(heap, w);
@@ -382,10 +389,10 @@ fn readyz_reply[&h, &d, &l, &g](heap: &!h Heap, dv: &d [int], lg: &l log.Log, do
 
 // The numbers `/metrics` shows, into the arrays `metrics.render` formats: the whole service in `g`, a row for each endpoint in `ep`, a count for each
 // reason in `rs`. Reads only; the one loop that is not constant (the events of each endpoint's window that wait for a retry) is 1,024 cells an endpoint.
-fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [int], dv: &d [int], lg: &l log.Log, done: &m log.Log, ix: &x [int], sg: &j [int], now: int, ready: bool) -> [] int {
+fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [int], dv: &d [int], lg: &l evlog.Ev, done: &m log.Log, ix: &x [int], sg: &j [int], now: int, ready: bool) -> [] int {
     let o = ops_of(dv);
     let hq = dv[off_hq()..off_hq() + history.size()];
-    let last = log.last_ms(lg);
+    let last = evlog.last_id(lg);
     g[metrics.g_uptime_ms()] = now - ops.started(o);
     if ready {
         g[metrics.g_ready()] = 1;
@@ -403,9 +410,9 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
     }
     g[metrics.g_commits_events()] = ops.commits(o, 0);
     g[metrics.g_commits_delivery()] = ops.commits(o, 1);
-    g[metrics.g_size_events()] = log.size(lg);
+    g[metrics.g_size_events()] = evlog.disk_bytes(lg);
     g[metrics.g_size_delivery()] = log.size(done);
-    g[metrics.g_synced_events()] = log.synced(lg);
+    g[metrics.g_synced_events()] = evlog.disk_synced(lg);
     g[metrics.g_synced_delivery()] = log.synced(done);
     if last > 0 {
         g[metrics.g_last_event()] = last;
@@ -473,7 +480,7 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
 }
 
 // `GET /metrics`: the Prometheus text format. The route's scope is in `authz.scope_of` (read); it was open until the scoped tokens of production item 0.3 name a read scope.
-fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l log.Log, done: &g log.Log, ix: &x [int], sg: &j [int], now: int, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
+fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l evlog.Ev, done: &g log.Log, ix: &x [int], sg: &j [int], now: int, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
     let n = dv[c_endpoints()];
     let gv = box_slice(heap, metrics.g_size(), 0);
     let ev = box_slice(heap, (n + 1) * metrics.row(), 0);
@@ -508,7 +515,7 @@ fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l lo
 // One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
 // `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
 // `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l log.Log, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, file_read, file_write] buffer.Buffer {
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, fs_read(""), file_read, file_write] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
@@ -556,6 +563,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             if !idem.valid(key) {
                 return refuse_event(heap, out, stats, 400, "the Idempotency-Key must be 1 to 255 visible ASCII characters", keep);
             }
+            if bytes.starts_with(key, "cron:") {
+                return server.failure(heap, out, 400, "Idempotency-Keys that begin with cron: are the schedules' own", keep);
+            }
             sum = crc.of(body);
             entry = idem.find(ix, arena, key);
             if entry >= 0 && idem.fresh(ix, entry, now) {
@@ -568,8 +578,16 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
                 note[1] = 1;
                 return out;
             }
-            if entry < 0 && idem.count(ix) >= idem.capacity() {
-                return refuse_event(heap, out, stats, 507, "too many Idempotency-Keys are held", keep);
+            // A key that has expired (its window has passed, or retention has dropped its event) is a new key: take the old entry out and go on.
+            if entry >= 0 {
+                idem.remove(ix, entry);
+                entry = 0 - 1;
+            }
+            if !idem.room(ix, len(key)) {
+                idem.evict(ix, now, 4096);
+                if !idem.room(ix, len(key)) {
+                    return refuse_event(heap, out, stats, 507, "too many Idempotency-Keys are held", keep);
+                }
             }
         }
         let stored = store_event(scratch, body, stats[off_ex() + ex_type()..off_ex() + ex_type() + filter.max_type()], tlen, key, keyed, sum, entry, lg, ix, arena, now);
@@ -595,7 +613,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         borrow found as &sz in {
             empty = buffer.size(sz) == 0;
         }
-        if empty {
+        if empty && want < evlog.first_id(lg) {
+            answer = server.failure(heap, answer, 404, "no such event: events past the retention are dropped", keep);
+        } else if empty {
             answer = server.failure(heap, answer, 404, "no such event", keep);
         } else {
             borrow found as &fb in {
@@ -645,6 +665,34 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, sched.skipped(sg));
         w = json.put_key(heap, w, "filtered");
         w = json.put_int(heap, w, stats[off_ex() + ex_filtered()]);
+        w = json.put_key(heap, w, "cron_keys");
+        w = json.put_int(heap, w, idem.count(ix[idem.second_at(ix)..len(ix)]));
+        w = json.put_key(heap, w, "events_first_id");
+        w = json.put_int(heap, w, evlog.first_id(lg));
+        w = json.put_key(heap, w, "events_last_id");
+        w = json.put_int(heap, w, evlog.last_id(lg));
+        w = json.put_key(heap, w, "events_segments");
+        w = json.put_int(heap, w, evlog.segments(lg));
+        w = json.put_key(heap, w, "events_bytes");
+        w = json.put_int(heap, w, evlog.retained_bytes(lg));
+        w = json.put_key(heap, w, "events_dropped");
+        w = json.put_int(heap, w, evlog.dropped_events(lg));
+        w = json.put_key(heap, w, "segments_dropped");
+        w = json.put_int(heap, w, evlog.dropped_segments(lg));
+        w = json.put_key(heap, w, "segments_sealed");
+        w = json.put_int(heap, w, evlog.rolls(lg));
+        w = json.put_key(heap, w, "delivery_bytes");
+        w = json.put_int(heap, w, log.size(done));
+        w = json.put_key(heap, w, "snapshots");
+        w = json.put_int(heap, w, stats[rt_at() + r_snapshots()]);
+        w = json.put_key(heap, w, "maintenance_ms_max");
+        w = json.put_int(heap, w, stats[rt_at() + r_stall_max()]);
+        w = json.put_key(heap, w, "maintenance_errors");
+        w = json.put_int(heap, w, stats[rt_at() + r_errors()]);
+        w = json.put_key(heap, w, "maintenance_lock_skips");
+        w = json.put_int(heap, w, stats[rt_at() + r_lock_skips()]);
+        w = json.put_key(heap, w, "events_skipped");
+        w = json.put_int(heap, w, evlog.clamped(lg));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -687,6 +735,14 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, ops.repair_flag(ops_of(stats)));
         w = json.put_key(heap, w, "rotation-grace-ms");
         w = json.put_int(heap, w, stats[off_ex() + ex_grace()]);
+        w = json.put_key(heap, w, "retention-days");
+        w = json.put_int(heap, w, stats[rt_at() + r_retention_days()]);
+        w = json.put_key(heap, w, "segment-bytes");
+        w = json.put_int(heap, w, evlog.limit(lg));
+        w = json.put_key(heap, w, "delivery-log-bytes");
+        w = json.put_int(heap, w, stats[rt_at() + r_delivery_limit()]);
+        w = json.put_key(heap, w, "idem-keys");
+        w = json.put_int(heap, w, idem.capacity(ix));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -936,7 +992,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         var tstart = 0;
         var tlen = 0;
         if only < 0 {
-            if log.read_at(lg, offset, window).0 == 0 {
+            if evlog.read_at(lg, offset, window).0 == 0 {
                 let t = filter.type_in(window);
                 tstart = t.0;
                 tlen = t.1;
@@ -999,7 +1055,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         if want < 1 {
             return server.failure(heap, out, 400, "the id must be a positive number", keep);
         }
-        if want > log.last_ms(lg) {
+        if want > evlog.last_id(lg) {
             return server.failure(heap, out, 404, "no such event", keep);
         }
         if !history.enabled(stats[off_hq()..off_hq() + history.size()]) {
@@ -1384,8 +1440,9 @@ fn ex_type() -> [] int {
     return 8;
 }
 
+// Retention's block (`compact.ls`) follows the extras.
 fn dv_size() -> [] int {
-    return off_ex() + 8 + filter.max_type();
+    return rt_at() + rt_size();
 }
 
 // A replay attempt's id for the attempt machinery: the event's id plus this, so `finish_attempt` can tell it from a window's.
@@ -1727,7 +1784,8 @@ fn recover_replay[&d](dv: &!d [int], kind: int, e: int, id: int, tries: int, nex
 }
 
 // Read every outcome in `done` and apply it: this is how the cursors, the attempts and the times of the next attempts survive a
-// restart. Answers 0, or the number of records that were not outcomes (a log from something else), in which case the caller
+// restart. (The records of a slot that has an endpoint in the log but not in the table, a dormant one, are applied to its place too, so that a snapshot of the
+// state keeps what it has; its waiting replays are the exception, as they always were: they wait for the endpoint's row.) Answers 0, or the number of records that were not outcomes (a log from something else), in which case the caller
 // refuses to start.
 fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [file_read] int {
     var at = 0;
@@ -1766,7 +1824,7 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                     }
                 }
             } else if o.0 == state.disabled() || o.0 == state.enabled() {
-                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     set_disabled(dv, o.1, o.0 == state.disabled());
                     // Whoever disabled or enabled it, the breaker is not the reason now; and an endpoint a person enabled starts a new run of failures.
                     set_paused(dv, o.1, false);
@@ -1775,19 +1833,19 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                     }
                 }
             } else if o.0 == state.streak() {
-                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     dv[off_streak() + o.1] = o.4;
                 }
             } else if o.0 == state.paused() {
-                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     set_disabled(dv, o.1, true);
                     set_paused(dv, o.1, true);
                 }
             } else if o.0 == state.reason() {
-                if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, o.4 % state.reason_replay());
                 }
-            } else if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
+            } else if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                 if o.0 == state.delivered() {
                     dv[off_streak() + o.1] = 0;
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, 0);
@@ -1801,56 +1859,6 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
         }
     }
     return odd;
-}
-
-// Where each endpoint of the table stands in the events log when the service starts (`docs/design.md` section 31): every one has looked at
-// everything up to its own cursor, so the next record it reads is the first whose id is above it. One pass over the log finds all of them: it
-// ends at the record after the largest cursor, and an endpoint whose cursor is at or past the last record stands at the end of what can be read.
-fn seek_slots[&l, &w, &d](lg: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [file_read] int {
-    let n = dv[c_endpoints()];
-    var pending = 0;
-    var i = 0;
-    while i < n {
-        let e = dv[off_table() + i * endpoints.stride()];
-        if e >= 0 {
-            dv[scan_id(e)] = dv[off_cur() + e];
-            dv[scan_off(e)] = 0 - 1;
-            pending = pending + 1;
-        }
-        i = i + 1;
-    }
-    var at = 0;
-    var going = pending > 0;
-    while going {
-        let r = log.read_at(lg, at, window);
-        if r.0 != 0 {
-            going = false;
-        } else {
-            let id = record.ms_of(window, 0);
-            i = 0;
-            while i < n {
-                let e = dv[off_table() + i * endpoints.stride()];
-                if e >= 0 && dv[scan_off(e)] < 0 && id > dv[off_cur() + e] {
-                    dv[scan_off(e)] = at;
-                    pending = pending - 1;
-                }
-                i = i + 1;
-            }
-            if pending == 0 {
-                going = false;
-            }
-            at = at + r.1;
-        }
-    }
-    i = 0;
-    while i < n {
-        let e = dv[off_table() + i * endpoints.stride()];
-        if e >= 0 && dv[scan_off(e)] < 0 {
-            dv[scan_off(e)] = at;
-        }
-        i = i + 1;
-    }
-    return 0;
 }
 
 // The circuit breaker (`docs/design.md` section 31). An attempt of endpoint `e` that was recorded ended in a delivery or not. A delivery ends the
@@ -1952,25 +1960,6 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
     return ok;
 }
 
-// The offset in the events log of event `id`, or -1 if there is no such event.
-fn find_offset[&l, &w](lg: &!l log.Log, window: &!w [byte], id: int) -> [file_read] int {
-    var at = 0;
-    var going = true;
-    while going {
-        let r = log.read_at(lg, at, window);
-        if r.0 != 0 {
-            going = false;
-        } else if record.ms_of(window, 0) == id {
-            return at;
-        } else if record.ms_of(window, 0) > id {
-            going = false;
-        } else {
-            at = at + r.1;
-        }
-    }
-    return 0 - 1;
-}
-
 // An attempt ended: `code` is what `attempt` answered (an HTTP status, or a negative reason). Count it, write its outcome to
 // `done` (not yet flushed), apply it to the cells, and free the event to be tried again when its time comes. Answers 1 if an
 // outcome record was appended, 0 if the log refused it (then the cells are left alone and a restart repeats the attempt).
@@ -2063,10 +2052,10 @@ fn sweep[&g, &d, &k, &t, &a](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
 // Start an attempt at event `id` for the endpoint in table slot `i`. `loaded` says that the scan has just read the event into `window`
 // (a first attempt: the record is read once, not twice); otherwise it is read from where the endpoint's ring says it starts (a retry).
 // Answers the table and 1 if an outcome was written at once (the connection failed before it began), else 0.
-fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, i: int, id: int, loaded: bool, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, i: int, id: int, loaded: bool, token0: int) -> [heap, fs_read(""), file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
     let e = endpoints.slot_of(dv[off_table()..off_table() + endpoints.table_size()], i);
     if !loaded {
-        let r0 = log.read_at(lg, dv[offs_at(e, id)], window);
+        let r0 = evlog.read_at(lg, dv[offs_at(e, id)], window);
         if r0.0 != 0 || record.ms_of(window, 0) != id {
             return (atab, 0);
         }
@@ -2096,7 +2085,7 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
 
 // Start an attempt at the replay in entry `r`, for the endpoint in table slot `i`. Answers the table and 1 if an outcome was
 // written at once (the connection failed before it began), else 0.
-fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!q [byte], atab: conns.Table, i: int, r: int, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!q [byte], atab: conns.Table, i: int, r: int, token0: int) -> [heap, fs_read(""), file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
     let base = off_rp() + r * rp_stride();
     let id = dv[base + 2];
     let e = dv[base + 1];
@@ -2108,7 +2097,7 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
     if dv[base + 5] < 0 {
         return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
-    let r0 = log.read_at(lg, dv[base + 5], window);
+    let r0 = evlog.read_at(lg, dv[base + 5], window);
     if r0.0 != 0 || record.ms_of(window, 0) != id {
         return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
@@ -2154,13 +2143,13 @@ fn unwanted[&w, &d](window: &w [byte], dv: &d [int], i: int, e: int, id: int) ->
 // endpoint's own scan stands, note where it starts in the endpoint's ring, and move the scan past it. Records before `id` are passed over
 // (a cursor that moved without the scan, which nothing does today, must not stall the endpoint). The record is left in `window`. Answers 1,
 // or 0 if there is no such record yet (it is not flushed) or the log does not hold `id` next, in which case nothing changes.
-fn scan_next[&l, &w, &d](lg: &!l log.Log, window: &!w [byte], dv: &!d [int], e: int, id: int) -> [file_read] int {
+fn scan_next[&l, &w, &d](lg: &!l evlog.Ev, window: &!w [byte], dv: &!d [int], e: int, id: int) -> [fs_read(""), file_read] int {
     var at = dv[scan_off(e)];
     if at < 0 {
         return 0;
     }
     while true {
-        let r = log.read_at(lg, at, window);
+        let r = evlog.read_at(lg, at, window);
         if r.0 != 0 {
             return 0;
         }
@@ -2185,7 +2174,7 @@ fn scan_next[&l, &w, &d](lg: &!l log.Log, window: &!w [byte], dv: &!d [int], e: 
 // the endpoint is about to start it or to pass over it: how far one endpoint has read says nothing about another, and the log is
 // read forward from each endpoint's cursor, bounded only by that endpoint's window. Answers the table and how many outcomes were written
 // at once.
-fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, token0: int) -> [heap, file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
+fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], atab: conns.Table, token0: int) -> [heap, fs_read(""), file_read, file_write, net_out(""), poll, clock] (conns.Table, int) {
     if ops.stopping(dv[off_ops()..off_ops() + ops.size()]) {
         // Asked to stop (`docs/design.md` section 34.4): what is on the wire finishes, and nothing new starts.
         return (atab, 0);
@@ -2261,7 +2250,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
 // One turn of delivery. `ev` holds the `(token, readiness)` pairs the poller reported for handles that are not the server's:
 // the attempts' connections. Move each of those attempts along, end the ones past their deadline, start new ones, and flush the
 // outcomes once. Answers the attempts' connection table and how many outcomes were written.
-fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h Heap, lg: &!l log.Log, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], ev: &e [int], nev: int, token0: int, atab: conns.Table) -> [heap, file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] (conns.Table, int) {
+fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], ev: &e [int], nev: int, token0: int, atab: conns.Table) -> [heap, fs_read(""), file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] (conns.Table, int) {
     var table = atab;
     var written = 0;
     var j = 0;
@@ -2298,17 +2287,23 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
 // stopped between the two, and nothing is appended (this is the whole of "exactly once"; the key is held whatever its age). Answers 0 (the event is in
 // the log, now or before), 1 (the schedule cannot make an event: its type or body is not what the service wrote, or the event is too large), or 2 (the
 // log or the key index would not take it: the row stays due).
-fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l log.Log, ix: &!x [int], arena: &!y [byte]) -> [heap, file_write] int {
+fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte]) -> [heap] int {
     let id = queries.schedules_due_id(rep, row);
     var outcome = 2;
     region a {
         let key_buf = alloc_slice[a](64, byte_of(0));
         let key = key_buf[0..sched.key_into(key_buf, id, second)];
-        if idem.find(ix, arena, key) >= 0 {
+        // The keys of schedules have an index of their own (`docs/retention.md` section 7).
+        let cix = ix[idem.second_at(ix)..len(ix)];
+        let carena = arena[idem.second_arena_at(ix)..len(arena)];
+        if idem.find(cix, carena, key) >= 0 {
             return 0;
         }
-        if idem.count(ix) >= idem.capacity() {
-            return 2;
+        if !idem.room(cix, len(key)) {
+            idem.evict(cix, now, 4096);
+            if !idem.room(cix, len(key)) {
+                return 2;
+            }
         }
         let (ta, tb) = queries.schedules_due_event_type(rep, row);
         let (ba, bb) = queries.schedules_due_body(rep, row);
@@ -2331,7 +2326,7 @@ fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, s
             if len(why) > 0 {
                 outcome = 1;
             } else {
-                let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, ix, arena, now);
+                let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, cix, carena, now);
                 if stored.0 == 0 {
                     outcome = 0;
                 } else if stored.0 == log.too_long() {
@@ -2347,7 +2342,7 @@ fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, s
 // The rows of the tick's select (`rep`): each is judged (`sched.plan`), the ones that fire are appended to the log (not yet flushed), and what each decided is kept
 // in `sg` for `tick_send`. Answers how many rows are kept and how many events are in the log for them. A row whose event the log would not take is left as it
 // is, and so is due again at the next cycle.
-fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms: int, scratch: &!c [byte], lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], sg: &!s [int]) -> [heap, file_write] (int, int) {
+fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], sg: &!s [int]) -> [heap] (int, int) {
     var kept = 0;
     var appended = 0;
     var row = pg.first_row(rep);
@@ -2391,9 +2386,9 @@ fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms
 // One flush for every event the cycle appended, and only after it the updates that say so (`advance_schedule`: a compare-and-set on the row as it was read,
 // so a change made meanwhile is not overwritten). If the flush fails the fires are not recorded and the rows stay due; the keys are in the index, so the
 // next cycle will not append them again.
-fn tick_send[&h, &q, &l, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l log.Log, sg: &!s [int], kept: int, appended: int, mono_ms: int) -> [heap, file_write] int {
+fn tick_send[&h, &q, &l, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l evlog.Ev, sg: &!s [int], kept: int, appended: int, mono_ms: int) -> [heap, fs_write(""), file_write] int {
     var flushed = true;
-    if appended > 0 && log.flush(lg) != 0 {
+    if appended > 0 && evlog.flush(lg) != 0 {
         flushed = false;
         sched.count_error(sg);
     }
@@ -2429,7 +2424,7 @@ fn tick_send[&h, &q, &l, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l log.Log,
 
 // The pool has answered a request the tick sent: the select (part 0) names what is due, an update (part 1 and up) only counts the cycle down. An answer to a
 // cycle that was given up (it took too long) is not this cycle's and is dropped.
-fn tick_answer[&h, &q, &l, &x, &y, &c, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l log.Log, ix: &!x [int], arena: &!y [byte], scratch: &!c [byte], sg: &!s [int], tag: int, unix_ms: int, mono_ms: int) -> [heap, file_write] int {
+fn tick_answer[&h, &q, &l, &x, &y, &c, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], scratch: &!c [byte], sg: &!s [int], tag: int, unix_ms: int, mono_ms: int) -> [heap, fs_write(""), file_write] int {
     let part = sched.tick_part(sg, tag);
     if part < 0 {
         return 0;
@@ -2492,7 +2487,9 @@ fn signal_token() -> [] int {
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g log.Log, done: &!d log.Log, window: &!w [byte], net: &n Net(""), fs: &f Fs(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
+fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
+    // The outcomes log is owned here, by value: a snapshot replaces it (`compact.ls`), and a resource can only be replaced by its owner.
+    var done = done0;
     match poller_new() {
         Polling::Ok(p) => {
             var srv = server.open(heap, p, listener, max_len() + 4096, 0, 9);
@@ -2534,7 +2531,11 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                 }
             }
             var held = ops.Held::Live(watched);
-            ops.begin(ops_of_mut(dv), clock_unix_ms(clock), log.synced(lg), log.synced(done));
+            var done_synced = 0;
+            borrow done as &dr0 in {
+                done_synced = log.synced(dr0);
+            }
+            ops.begin(ops_of_mut(dv), clock_unix_ms(clock), evlog.synced(lg), done_synced);
             var running = true;
             while running {
                 srv = server.wait(heap, srv, clock, listener, 50);
@@ -2558,7 +2559,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                     }
                 }
                 if ops.probe_due(ops_of(dv), clock_ms(clock)) {
-                    ops.probe_set(ops_of_mut(dv), ops.probe_write(fs, dir, ops.probe_round(ops_of(dv))), clock_ms(clock));
+                    ops.probe_set(ops_of_mut(dv), ops.probe_write(evlog.lend(lg), dir, ops.probe_round(ops_of(dv))), clock_ms(clock));
                 }
                 var held = 0;
                 var more = true;
@@ -2578,7 +2579,9 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
                                     borrow mut note as &!nw in {
-                                        out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, done, window, contents(cw), contents(nw), dv[0..dv_size()], ix, arena, sg, clock_unix_ms(clock), out);
+                                        borrow mut done as &!dgw in {
+                                            out = handle(heap, router, server.head(sr), server.parsed(sr), contents(pw), server.body(sr), lg, dgw, window, contents(cw), contents(nw), dv[0..dv_size()], ix, arena, sg, clock_unix_ms(clock), out);
+                                        }
                                     }
                                 }
                             }
@@ -2615,7 +2618,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                                 made = 0 - 1;
                             }
                             if made == 0 && dv[off_mg() + manage.mg_make()] == 1 {
-                                made = manage.make_secret(heap, fs, dv[off_mg()..off_mg() + manage.mg_size()]);
+                                made = manage.make_secret(heap, evlog.lend(lg), dv[off_mg()..off_mg() + manage.mg_size()]);
                             }
                             if made == 0 {
                                 region ra {
@@ -2753,7 +2756,7 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                 }
                 if held > 0 {
                     // One flush for the turn, then the acknowledgements.
-                    let stored = log.flush(lg);
+                    let stored = evlog.flush(lg);
                     var n = 0;
                     while n < held {
                         var ticket = 0;
@@ -2819,8 +2822,10 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                             borrow mut req as &!qw in {
                                 borrow mut resp as &!pw in {
                                     borrow events as &er in {
-                                        let (grown, written) = delivery_turn(heap, lg, done, window, dv, blob, net, clock, server.poller(sw), contents(aw), contents(qw), contents(pw), contents(er), nev, token0, atab);
-                                        atab = grown;
+                                        borrow mut done as &!dgw in {
+                                            let (grown, written) = delivery_turn(heap, lg, dgw, window, dv, blob, net, clock, server.poller(sw), contents(aw), contents(qw), contents(pw), contents(er), nev, token0, atab);
+                                            atab = grown;
+                                        }
                                     }
                                 }
                             }
@@ -2829,6 +2834,11 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                     if dv[c_tripped()] != 0 {
                         report_trips(io, dv);
                     }
+                }
+                // Retention (`docs/retention.md`): at most one step a turn, and what it did said once.
+                done = rt_maintain(heap, lg, done, dv, ix, arena, sg, clock, window);
+                if dv[rt_at() + r_msg()] != 0 {
+                    rt_report(io, dv);
                 }
                 // The history: what the poller said about the database's connections, the answers, the rows that ended attempts
                 // left, and one write for the turn. Nothing here waits for the database.
@@ -2849,7 +2859,11 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                             while tag >= 0 {
                                 if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
                                     // the database has answered the insert of a new endpoint
-                                    let created = finish_change(heap, dv, blob, lg, done, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                    var created = buffer.empty(heap, 0);
+                                    borrow mut done as &!dgw in {
+                                        buffer.drop(heap, created);
+                                        created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                    }
                                     borrow created as &cb in {
                                         server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
                                     }
@@ -2962,8 +2976,12 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
                 // The end of the turn: a flush that made a log's new records durable is a group commit (`/metrics` counts them); and if the service
                 // was asked to stop, the loop ends when nothing is on the wire and the history has been handed to the database, or when the
                 // deadline has passed.
-                ops.look_at_log(ops_of_mut(dv), 0, log.synced(lg));
-                ops.look_at_log(ops_of_mut(dv), 1, log.synced(done));
+                ops.look_at_log(ops_of_mut(dv), 0, evlog.synced(lg));
+                var done_at = 0;
+                borrow done as &dr1 in {
+                    done_at = log.synced(dr1);
+                }
+                ops.look_at_log(ops_of_mut(dv), 1, done_at);
                 if ops.stopping(ops_of(dv)) {
                     var on_wire = 0;
                     borrow atab as &tt in {
@@ -2984,10 +3002,12 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
             }
             ops.release_claim(held);
             // Whatever the loop ended on, what the logs hold is made durable once more before they are closed.
-            log.flush(done);
-            log.flush(lg);
+            borrow mut done as &!dfw in {
+                log.flush(dfw);
+            }
+            evlog.flush(lg);
             if ops.stopping(ops_of(dv)) {
-                ops.probe_clean(fs, dir);
+                ops.probe_clean(evlog.lend(lg), dir);
                 var on_wire = 0;
                 borrow atab as &tt in {
                     on_wire = conns.live(tt);
@@ -3019,11 +3039,13 @@ fn run[&h, &r, &k, &l, &g, &d, &w, &n, &f, &x, &v, &i, &a, &j, &o, &y](heap: &!h
             unbox_slice(heap, tickets);
             unbox_slice(heap, ids);
             unbox_slice(heap, keeps);
+            log.close(done);
             return 0;
         }
         Polling::Failed(e) => {
             ops.release_claim(ops.Held::Live(claim));
             pool.close(heap, pl0);
+            log.close(done);
             return 4;
         }
     }
@@ -3083,57 +3105,9 @@ fn load_endpoints[&h, &c, &d, &v, &b](heap: &!h Heap, fs: &c Fs(""), dir: &d [by
     return result;
 }
 
-// Rebuild the idempotency index from the events log: every keyed record, in order, the later one of two with the same key
-// winning (as it does when the service is running). Answers 0, or a status for `main` to exit with: the log has a record this
-// code does not understand, or more keys than the index holds.
-fn rebuild[&g, &w, &x, &y](lg: &!g log.Log, window: &!w [byte], ix: &!x [int], arena: &!y [byte]) -> [file_read] int {
-    var at = 0;
-    while true {
-        let r = log.read_at(lg, at, window);
-        if r.0 == 1 {
-            return 0;
-        }
-        if r.0 != 0 {
-            return 16;
-        }
-        // The pairs are found by name: the body, then its type if it has one (`typ`, section 35), then for a keyed event `key` and `t`. A log from
-        // before the type existed has records of one pair or of three, and reads as it always did.
-        var after = 0;
-        var left = record.fields_of(window, 0) - 1;
-        if left >= 1 {
-            let ev0 = record.pair_at(window, record.first_pair(0));
-            after = ev0.4;
-            let ty = record.pair_at(window, after);
-            if ty.1 == 3 && window[ty.0] == byte_of('t') && window[ty.0 + 1] == byte_of('y') && window[ty.0 + 2] == byte_of('p') {
-                after = ty.4;
-                left = left - 1;
-            }
-        }
-        if left >= 2 {
-            let ev = record.pair_at(window, record.first_pair(0));
-            let k = record.pair_at(window, after);
-            let t = record.pair_at(window, k.4);
-            if k.1 != 3 || window[k.0] != byte_of('k') || t.1 != 1 || window[t.0] != byte_of('t') || t.3 != 8 {
-                return 16;
-            }
-            let key = window[k.2..k.2 + k.3];
-            var entry = idem.find(ix, arena, key);
-            if entry < 0 {
-                entry = idem.add(ix, arena, key);
-            }
-            if entry < 0 {
-                return 16;
-            }
-            idem.set(ix, entry, record.ms_of(window, 0), record.get_u64(window, t.2), crc.of(window[ev.2..ev.2 + ev.3]), ev.3);
-        }
-        at = at + r.1;
-    }
-    return 0;
-}
-
 // Everything delivery needs before the loop starts: the schedule, the endpoints, the outcomes of earlier runs replayed, and the
 // place of each endpoint in the events log found. Answers 0, or a status for `main` to exit with.
-fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &c Fs(""), dir: &d [byte], lg: &!g log.Log, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool, open: bool) -> [heap, fs_read(""), file_read, file_write] int {
+fn prepare[&h, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, dir: &d [byte], lg: &!g evlog.Ev, done: &!l log.Log, window: &!w [byte], dv: &!v [int], blob: &!b [byte], schedule: &t [byte], deadline_ms: int, ix: &!x [int], arena: &!y [byte], etext: &e [byte], from_db: bool, open: bool, now: int) -> [heap, fs_read(""), file_read, file_write] int {
     default_schedule(dv[off_sched()..off_sched() + 17]);
     dv[c_private()] = 0;
     if open {
@@ -3146,16 +3120,21 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
     if len(schedule) > 0 && parse_schedule(schedule, dv[off_sched()..off_sched() + 17]) < 0 {
         return 14;
     }
-    let rebuilt = rebuild(lg, window, ix, arena);
+    let rebuilt = rebuild(lg, ix, arena, now);
     if rebuilt != 0 {
         return rebuilt;
+    }
+    // The outcomes log's format (`docs/retention.md` section 4): a new one gets its header, an unknown version is refused.
+    let format = rt_check_format(done, window, now);
+    if format != 0 {
+        return format;
     }
     // The endpoints: the database's, as `roster.fetch` wrote them, or `endpoints.conf`.
     var n = 0;
     if from_db {
         n = endpoints.parse_x(etext, dv[off_table()..off_table() + endpoints.table_size()], blob, open, dv[off_xt()..off_xt() + epx.xt_size()]);
     } else {
-        n = load_endpoints(heap, fs, dir, dv, blob, open);
+        n = load_endpoints(heap, evlog.lend(lg), dir, dv, blob, open);
     }
     if n < 0 {
         return 13;
@@ -3175,6 +3154,8 @@ fn prepare[&h, &c, &d, &g, &l, &w, &v, &b, &t, &x, &y, &e](heap: &!h Heap, fs: &
         if dv[c_seq()] < 1 {
             dv[c_seq()] = 1;
         }
+        // An endpoint that was away while events were dropped starts at the oldest that is left.
+        rt_clamp(lg, dv);
         seek_slots(lg, window, dv);
     }
     return 0;
@@ -3359,7 +3340,7 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
     return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
 }
 
-fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return finish_delete(heap, dv, blob, done, rep, status, keep);
     }
@@ -3601,7 +3582,7 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
     return server.failure(heap, out, 507, "the change was stored in the database but the service has no room for it (restart it)", keep);
 }
 
-fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l log.Log, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
     let out = buffer.empty(heap, 512);
     if status != 0 || pg.failure(rep) >= 0 {
         return server.failure(heap, out, 503, "the database did not store the endpoint", keep);
@@ -3642,7 +3623,7 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
             k = k + 1;
         }
         let slot = take_slot(done, dv, ident);
-        var start = log.last_ms(lg);
+        var start = evlog.last_id(lg);
         if start < 0 {
             start = 0;
         }
@@ -3653,7 +3634,7 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         clear_slot(dv, slot);
         // It starts from now: it has looked at everything up to the last event, and the next record is at the end of the log.
         dv[scan_id(slot)] = start;
-        dv[scan_off(slot)] = log.size(lg);
+        dv[scan_off(slot)] = evlog.tail(lg);
         dv[off_flying() + slot] = 0;
         dv[off_slotid() + slot] = ident;
         let count = dv[c_endpoints()];
@@ -3757,6 +3738,7 @@ fn main(world: World) -> [] int {
     // profile only). How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
     let libc = narrow(ffi, "libc");
     let stop = narrow(signals, "INT,TERM");
+    var fs = fs;
     var port = 0 - 1;
     var status = 2;
     region a {
@@ -4006,145 +3988,189 @@ fn main(world: World) -> [] int {
                 var wbuf = buffer.empty(h, max_len() + 4096);
                 let dvb = box_slice(h, dv_size(), 0);
                 let blob = box_slice(h, endpoints.text_limit(), byte_of(0));
-                let ixb = box_slice(h, idem.ix_size(), 0);
-                let arenab = box_slice(h, idem.arena_size(), byte_of(0));
+                // Two indexes of idempotency keys: clients' (`idem-keys`) and the schedules' (a quarter of that, at least 16).
+                let keys = config.idem_keys(cfg);
+                var cron_keys = keys / 4;
+                if cron_keys < 16 {
+                    cron_keys = 16;
+                }
+                let ixb = box_slice(h, idem.ix_size(keys) + idem.ix_size(cron_keys), 0);
+                let arenab = box_slice(h, idem.arena_size(keys) + idem.arena_size(cron_keys), byte_of(0));
                 let sgb = box_slice(h, sched.size(), 0);
+                // Both logs are looked at, and the pair judged, before either is changed (section 34.5).
+                var gate = 0;
+                borrow mut wbuf as &!wb0 in {
+                    borrow fs as &fsp in {
+                        gate = logguard.preflight(fsp, dir_buf[0..dir_len], buffer.room(wb0), max_len(), config.repair_logs(cfg), report);
+                    }
+                }
+                // The events log holds the capability for the file system from here on (`evlog.lend` lends it back): a resource cannot be shared.
+                var ev = evlog.new(h, fs, dir_buf[0..dir_len], config.segment_bytes(cfg), config.compact_kill_at(cfg));
+                var now0 = 0;
+                borrow clock as &ck0 in {
+                    now0 = clock_unix_ms(ck0);
+                }
                 borrow mut wbuf as &!wb in {
-                    borrow fs as &fsr in {
-                        // Both logs are looked at, and the pair judged, before either is changed (section 34.5).
-                        let gate = logguard.preflight(fsr, dir_buf[0..dir_len], buffer.room(wb), max_len(), config.repair_logs(cfg), report);
-                        match open_log(fsr, dir_buf[0..dir_len], "events.seg", buffer.room(wb), config.repair_logs(cfg), report[0..logguard.rep_size()], gate) {
-                            Opening::Failed(e) => {
-                                status = 10;
-                                if e == 3018 {
-                                    status = 18;
-                                    borrow mut io as &!i in {
-                                        logguard.say_pair(i, report[logguard.pair_at()..logguard.pair_at() + 2]);
-                                    }
-                                }
-                                if e == 3019 || e == logguard.not_kept() {
-                                    // Damage in the middle of a log (section 34.5): refused, with where and how much.
-                                    status = 19;
-                                    borrow mut io as &!i in {
-                                        logguard.say_damage_of(i, report, e);
-                                    }
+                    borrow mut ev as &!lw in {
+                        // The events log is judged before anything is changed (section 34.5, `docs/retention.md` section 5), and then opened; `gate` is what the judgement said.
+                        status = 0;
+                        if gate != 0 {
+                            status = gate;
+                            borrow mut io as &!i in {
+                                if gate == 18 {
+                                    logguard.say_pair(i, report[logguard.pair_at()..logguard.pair_at() + 2]);
+                                } else {
+                                    logguard.say_damage_of(i, report, 0);
                                 }
                             }
-                            Opening::Ok(lg0) => {
-                                var lg = lg0;
-                                match open_log(fsr, dir_buf[0..dir_len], "delivery.seg", buffer.room(wb), config.repair_logs(cfg), report[logguard.rep_size()..2 * logguard.rep_size()], gate) {
-                                    Opening::Failed(e) => {
-                                        status = 12;
-                                        if e == logguard.not_kept() {
-                                            status = 19;
-                                            borrow mut io as &!i in {
-                                                logguard.say_damage_of(i, report, e);
-                                            }
+                        } else {
+                            status = evlog.open(lw, now0, config.repair_logs(cfg), report[0..logguard.rep_size()]);
+                            if status == logguard.refused() || status == logguard.not_kept() {
+                                // Damage in the middle of the log (section 34.5): refused, with where and how much.
+                                borrow mut io as &!i in {
+                                    logguard.say_damage_of(i, report, status);
+                                }
+                                status = 19;
+                            }
+                        }
+                        if status == 0 {
+                            // The pair, judged again against the last event the open log holds (a last segment with no event says nothing before it is open).
+                            if report[logguard.pair_at()] > evlog.last_id(lw) {
+                                status = 18;
+                                report[logguard.pair_at() + 1] = evlog.last_id(lw);
+                                borrow mut io as &!i in {
+                                    logguard.say_pair(i, report[logguard.pair_at()..logguard.pair_at() + 2]);
+                                }
+                            }
+                        }
+                        if status == 0 {
+                            match open_delivery(lw, dir_buf[0..dir_len], buffer.room(wb), config.repair_logs(cfg), report[logguard.rep_size()..2 * logguard.rep_size()], gate) {
+                                Opening::Failed(e) => {
+                                    status = 12;
+                                    if e == logguard.not_kept() {
+                                        status = 19;
+                                        borrow mut io as &!i in {
+                                            logguard.say_damage_of(i, report, e);
                                         }
                                     }
-                                    Opening::Ok(dl0) => {
-                                        var dl = dl0;
-                                        borrow mut dvb as &!dvw in {
-                                            borrow mut blob as &!bw in {
-                                                borrow mut ixb as &!ixw in {
-                                                    borrow mut arenab as &!arw in {
-                                                        borrow mut lg as &!lw in {
-                                                            borrow mut dl as &!dw in {
-                                                                contents(ixw)[1] = window_ms;
-                                                                ops.init(ops_of_mut(contents(dvw)));
-                                                                ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
-                                                                status = prepare(h, fsr, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db, config.allow_private_hosts(cfg));
-                                                                if status == 0 && config.production(cfg) {
-                                                                    // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).
-                                                                    var found = (0, 0);
-                                                                    borrow libc as &lh in {
-                                                                        found = perm.files(lh, fsr, dir_buf[0..dir_len], probe);
-                                                                    }
-                                                                    if found.0 != 0 {
-                                                                        status = found.0;
-                                                                        borrow mut io as &!i in {
-                                                                            say_unsafe(i, found.0, dir_buf[0..dir_len], perm.name_of(found.1));
+                                }
+                                Opening::Ok(dl0) => {
+                                    var dl = dl0;
+                                    borrow mut dvb as &!dvw in {
+                                        borrow mut blob as &!bw in {
+                                            borrow mut ixb as &!ixw in {
+                                                borrow mut arenab as &!arw in {
+                                                    idem.init(contents(ixw), keys, idem.arena_size(keys), window_ms);
+                                                    idem.init(contents(ixw)[idem.ix_size(keys)..len(contents(ixw))], cron_keys, idem.arena_size(cron_keys), 1152921504606846976);
+                                                    contents(ixw)[1] = window_ms;
+                                                    ops.init(ops_of_mut(contents(dvw)));
+                                                    ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
+                                                    borrow mut dl as &!dw in {
+                                                        status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db, config.allow_private_hosts(cfg), now0);
+                                                    }
+                                                    if status == 0 && config.production(cfg) {
+                                                        // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).
+                                                        var found = (0, 0);
+                                                        borrow libc as &lh in {
+                                                            found = perm.files(lh, evlog.lend(lw), dir_buf[0..dir_len], probe);
+                                                        }
+                                                        if found.0 != 0 {
+                                                            status = found.0;
+                                                            borrow mut io as &!i in {
+                                                                say_unsafe(i, found.0, dir_buf[0..dir_len], perm.name_of(found.1));
+                                                            }
+                                                        }
+                                                    }
+                                                    if status == 0 {
+                                                        borrow mut io as &!iwr in {
+                                                            rt_say_start(iwr, lw);
+                                                        }
+                                                    }
+                                                    if status != 0 {
+                                                        log.close(dl);
+                                                    } else if config.compact_now(cfg) {
+                                                        rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
+                                                        borrow mut io as &!iw0 in {
+                                                            status = compact_once(h, lw, dl, contents(dvw), contents(ixw), contents(arw), buffer.room(wb), now0, iw0);
+                                                        }
+                                                    } else {
+                                                        rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
+                                                        borrow net as &nn in {
+                                                            match tcp_listen(nn, port, 1024, 0) {
+                                                                Listening::Ok(l) => {
+                                                                    var listener = l;
+                                                                    borrow mut listener as &!lh in {
+                                                                        listener_nonblocking(lh);
+                                                                        let router = routes(h);
+                                                                        put_token(contents(dvw), off_token(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
+                                                                        put_token(contents(dvw), off_token() + authz.ingest_at(), cblob[config.ingest_token_at()..config.ingest_token_at() + config.ingest_token_len(cfg)]);
+                                                                        if config.read_token_len(cfg) > 0 {
+                                                                            put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.read_token_at()..config.read_token_at() + config.read_token_len(cfg)]);
+                                                                        } else if config.production(cfg) {
+                                                                            // No read token: in production the reads need the admin token.
+                                                                            put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
                                                                         }
-                                                                    }
-                                                                }
-                                                                if status == 0 {
-                                                                    borrow net as &nn in {
-                                                                        match tcp_listen(nn, port, 1024, 0) {
-                                                                            Listening::Ok(l) => {
-                                                                                var listener = l;
-                                                                                borrow mut listener as &!lh in {
-                                                                                    listener_nonblocking(lh);
-                                                                                    let router = routes(h);
-                                                                                    put_token(contents(dvw), off_token(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
-                                                                                    put_token(contents(dvw), off_token() + authz.ingest_at(), cblob[config.ingest_token_at()..config.ingest_token_at() + config.ingest_token_len(cfg)]);
-                                                                                    if config.read_token_len(cfg) > 0 {
-                                                                                        put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.read_token_at()..config.read_token_at() + config.read_token_len(cfg)]);
-                                                                                    } else if config.production(cfg) {
-                                                                                        // No read token: in production the reads need the admin token.
-                                                                                        put_token(contents(dvw), off_token() + authz.read_at(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
-                                                                                    }
-                                                                                    contents(dvw)[c_breaker()] = config.breaker_days(cfg);
-                                                                                    if config.production(cfg) {
-                                                                                        contents(dvw)[c_production()] = 1;
-                                                                                    }
-                                                                                    contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
-                                                                                    // The database for the history, if one was named: connect and log in here, before the loop, and go on
-                                                                                    // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
-                                                                                    var hpool = pool.empty(h, 1, 1, 4096, 4096);
-                                                                                    if config.pg_host_len(cfg) > 0 {
-                                                                                        let (opened, lanes) = history.open(h, nn, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], 2, fsr);
-                                                                                        pool.close(h, hpool);
-                                                                                        hpool = opened;
-                                                                                        history.enable(contents(dvw)[off_hq()..off_hq() + history.size()], lanes);
-                                                                                        if lanes < 2 {
-                                                                                            borrow mut io as &!i in {
-                                                                                                let nb = alloc_slice[a](12, byte_of(0));
-                                                                                                say(i, "hooks: the database: ");
-                                                                                                say(i, nb[0..digits_of(lanes, nb)]);
-                                                                                                say(i, " of 2 connections opened; history is written over those\n");
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                    borrow mut io as &!i in {
-                                                                                        io.error_all(i, "listening\n");
-                                                                                        // A torn tail cut at this start, or damage `repair-logs` cut, is said after `listening` (section 34.5).
-                                                                                        logguard.say_cut(i, "events.seg", report[0..logguard.rep_size()]);
-                                                                                        logguard.say_cut(i, "delivery.seg", report[logguard.rep_size()..2 * logguard.rep_size()]);
-                                                                                    }
-                                                                                    borrow mut sgb as &!sgw in {
-                                                                                        sched.init(contents(sgw), config.cron_catchup(cfg), config.cron_seconds(cfg));
-                                                                                        borrow router as &r in {
-                                                                                            borrow clock as &c in {
-                                                                                                borrow mut io as &!iw in {
-                                                                                                    // The claim on the two signals is made here, after the recovery (a stop during it is the default action, as it
-                                                                                                    // always was) and before anything else could start a thread (nothing does).
-                                                                                                    borrow stop as &sr in {
-                                                                                                        match signals_watch(sr) {
-                                                                                                            Watching::Ok(claim) => {
-                                                                                                                status = run(h, r, c, lh, lw, dw, buffer.room(wb), nn, fsr, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg));
-                                                                                                            }
-                                                                                                            Watching::Failed(e) => {
-                                                                                                                say(iw, "hooks: SIGINT and SIGTERM cannot be claimed (errno ");
-                                                                                                                ops.say_number(iw, e);
-                                                                                                                say(iw, "): the service would not hear a request to stop\n");
-                                                                                                                pool.close(h, hpool);
-                                                                                                                status = 5;
-                                                                                                            }
-                                                                                                        }
-                                                                                                    }
+                                                                        contents(dvw)[c_breaker()] = config.breaker_days(cfg);
+                                                                        if config.production(cfg) {
+                                                                            contents(dvw)[c_production()] = 1;
+                                                                        }
+                                                                        contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
+                                                                        // The database for the history, if one was named: connect and log in here, before the loop, and go on
+                                                                        // without it if it is not there (delivery does not depend on it; `docs/design.md` section 24).
+                                                                        var hpool = pool.empty(h, 1, 1, 4096, 4096);
+                                                                        if config.pg_host_len(cfg) > 0 {
+                                                                            let (opened, lanes) = history.open(h, nn, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], 2, evlog.lend(lw));
+                                                                            pool.close(h, hpool);
+                                                                            hpool = opened;
+                                                                            history.enable(contents(dvw)[off_hq()..off_hq() + history.size()], lanes);
+                                                                            if lanes < 2 {
+                                                                                borrow mut io as &!i in {
+                                                                                    let nb = alloc_slice[a](12, byte_of(0));
+                                                                                    say(i, "hooks: the database: ");
+                                                                                    say(i, nb[0..digits_of(lanes, nb)]);
+                                                                                    say(i, " of 2 connections opened; history is written over those\n");
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        borrow mut io as &!i in {
+                                                                            io.error_all(i, "listening\n");
+                                                                            // A torn tail cut at this start, or damage `repair-logs` cut, is said after `listening` (section 34.5).
+                                                                            logguard.say_cut_events(i, report);
+                                                                            logguard.say_cut(i, "delivery.seg", report[logguard.rep_size()..2 * logguard.rep_size()]);
+                                                                        }
+                                                                        borrow mut sgb as &!sgw in {
+                                                                            sched.init(contents(sgw), config.cron_catchup(cfg), config.cron_seconds(cfg));
+                                                                            borrow router as &r in {
+                                                                                borrow clock as &c in {
+                                                                                    borrow mut io as &!iw in {
+                                                                                        // The claim on the two signals is made here, after the recovery (a stop during it is the default action, as it
+                                                                                        // always was) and before anything else could start a thread (nothing does).
+                                                                                        borrow stop as &sr in {
+                                                                                            match signals_watch(sr) {
+                                                                                                Watching::Ok(claim) => {
+                                                                                                    status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg));
+                                                                                                }
+                                                                                                Watching::Failed(e) => {
+                                                                                                    say(iw, "hooks: SIGINT and SIGTERM cannot be claimed (errno ");
+                                                                                                    ops.say_number(iw, e);
+                                                                                                    say(iw, "): the service would not hear a request to stop\n");
+                                                                                                    pool.close(h, hpool);
+                                                                                                    log.close(dl);
+                                                                                                    status = 5;
                                                                                                 }
                                                                                             }
                                                                                         }
                                                                                     }
-                                                                                    route.drop(h, router);
                                                                                 }
-                                                                                listener_close(listener);
-                                                                            }
-                                                                            Listening::Failed(e) => {
-                                                                                status = 11;
                                                                             }
                                                                         }
+                                                                        route.drop(h, router);
                                                                     }
+                                                                    listener_close(listener);
+                                                                }
+                                                                Listening::Failed(e) => {
+                                                                    status = 11;
+                                                                    log.close(dl);
                                                                 }
                                                             }
                                                         }
@@ -4152,20 +4178,30 @@ fn main(world: World) -> [] int {
                                                 }
                                             }
                                         }
-                                        log.close(dl);
                                     }
                                 }
-                                log.close(lg);
                             }
                         }
                     }
                 }
+                fs = evlog.close(h, ev);
                 buffer.drop(h, wbuf);
                 unbox_slice(h, dvb);
                 unbox_slice(h, blob);
                 unbox_slice(h, ixb);
                 unbox_slice(h, arenab);
                 unbox_slice(h, sgb);
+            }
+        }
+        if status == 40 || status == 41 || status == 42 {
+            borrow mut io as &!i in {
+                if status == 40 {
+                    say(i, "hooks: the events log has a segment in a format this version does not understand (it understands format 2); nothing was changed\n");
+                } else if status == 41 {
+                    say(i, "hooks: delivery.seg is in a format this version does not understand (it understands format 2); nothing was changed\n");
+                } else {
+                    say(i, "hooks: the events log has a hole or a break in its chain of segments (events.first, events-N.seg); nothing was changed\n");
+                }
             }
         }
     }

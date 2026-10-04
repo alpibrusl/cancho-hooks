@@ -106,6 +106,13 @@ pub fn reason_replay() -> [] int {
     return 256;
 }
 
+// The header of a log written since there were formats (`docs/retention.md` section 4; kind 14 is the reason of a failed attempt): its `event` is the format's number, `next_at` the Unix ms
+// it was written, and its endpoint is `max_endpoints()`, which is no slot, so nothing that replays outcomes by endpoint takes it for one. The
+// previous version took it for a record that is not an outcome and refused the log.
+pub fn format() -> [] int {
+    return 15;
+}
+
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
 pub fn day_ms() -> [] int {
     return 86400000;
@@ -207,6 +214,9 @@ pub fn reset[&w, &c](w: &!w [int], cur: &!c [int], e: int, start: int) -> [] int
 // An outcome as a log record at `at` in `out`, with sequence number `seq` as its id: one pair, `o`, whose value is five
 // 8-byte integers: kind, endpoint, event, attempts, next attempt. Answers the record's size.
 pub fn put_outcome[&o](out: &!o [byte], at: int, seq: int, kind: int, e: int, id: int, attempts: int, next_at: int) -> [] int {
+    // The region is left by falling out of it, not by `return`: a region left by a `return` is not given back, and this runs once for every
+    // delivery (about 3.5 KB lost each time, measured: docs/lexsys-log-retention.md gap 6).
+    var size = 0;
     region a {
         let value = alloc_slice[a](40, byte_of(0));
         record.put_u64(value, 0, kind);
@@ -216,8 +226,9 @@ pub fn put_outcome[&o](out: &!o [byte], at: int, seq: int, kind: int, e: int, id
         record.put_u64(value, 32, next_at);
         let p = record.begin(out, at, seq, 0, 1);
         let end = record.put_pair(out, p, "o", value);
-        return record.seal(out, at, end);
+        size = record.seal(out, at, end);
     }
+    return size;
 }
 
 // The outcome in the record at `at` in `buf`: `(kind, endpoint, event, attempts, next_at)`, or kind 0 if the record is not
@@ -231,7 +242,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 14 {
+    if kind < 1 || kind > 15 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

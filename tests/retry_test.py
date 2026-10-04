@@ -90,7 +90,9 @@ def durable_outcomes(datadir):
         data = data[: struct.unpack("<q", open(side, "rb").read(8))[0]]
     # The slot records (kinds 10 and 11: an endpoint was given a slot) are written when the service first sees an endpoint, before any
     # attempt: they are not outcomes, and counting them made this return early and the test kill the service before the failure was durable.
-    return len([1 for _, pairs in chaos.read_log(data)[0] if struct.unpack("<5q", dict(pairs)[b"o"])[0] not in (10, 11)])
+    # Nor are 12 and 13 (a run of failures began, an endpoint was paused: written beside the first failure, so that the second attempt's wait
+    # was already "durable" and a loaded machine killed the service before that attempt was recorded) or 14 (the log's header).
+    return len([1 for _, pairs in chaos.read_log(data)[0] if struct.unpack("<5q", dict(pairs)[b"o"])[0] not in (10, 11, 12, 13, 14)])
 
 
 def wait_for(cond, secs):

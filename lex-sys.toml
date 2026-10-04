@@ -80,6 +80,11 @@ sources = ["tests/epx_test.ls", "src/epx.ls", "src/filter.ls", "src/hdrs.ls"]
 std = true
 
 [[test]]
+name = "retain"
+sources = ["tests/retain_test.ls", "src/retain.ls", "src/evlog.ls", "src/store.ls", "src/logguard.ls", "src/state.ls"]
+std = true
+
+[[test]]
 name = "config"
 sources = ["tests/config_test.ls", "src/config.ls"]
 std = true

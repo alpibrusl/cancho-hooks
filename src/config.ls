@@ -28,6 +28,12 @@ import std.bytes;
 //     stop-deadline-ms  how long attempts on the wire may take to finish after SIGTERM or SIGINT   default 5000 (section 34.4)
 //     repair-logs  `1`: cut a log that has damage in the middle at the damage instead of refusing to start; the cut is reported   default 0 (section 34.5)
 //     rotation-grace-ms  how long the previous secret is still signed with after `PATCH ... {"keep_old": true}` (1 to 2592000000)   default 86400000, a day (section 35)
+//     retention-days  drop events that are final everywhere and older than this; 0 keeps them for ever   default 30 (`docs/retention.md`)
+//     segment-bytes  seal the active events segment at this size   default 67108864
+//     delivery-log-bytes  replace the outcomes log by a snapshot at this size   default 33554432
+//     idem-keys  how many idempotency keys the index holds   default 262144
+//     compact-now  `1`: compact once and exit   default 0
+//     retention-ms, compact-kill-at  **test knobs**: retention in ms instead of days; stop at a numbered step of a compaction   default 0
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -40,13 +46,14 @@ import std.bytes;
 //     cfg[7] pg-host length   cfg[8] pg-user length   cfg[9] pg-database length   cfg[10] pg-password length   cfg[11] import-endpoints (0 or 1)   cfg[12] admin-token length   cfg[13] allow-private-hosts (0 or 1)   cfg[14] breaker-days (0 to 36500)
 //     cfg[15] cron-catchup (0 or 1; 1 until set)   cfg[16] cron-seconds (0 or 1)   cfg[17] stop-deadline-ms (5000 until set)   cfg[18] repair-logs (0 or 1)
 //     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)   cfg[22] rotation-grace-ms (86400000 until set)
+//     cfg[40] retention-days   cfg[41] segment-bytes   cfg[42] delivery-log-bytes   cfg[43] idem-keys   cfg[44] compact-now   cfg[45] retention-ms   cfg[46] compact-kill-at
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
 //     token (256), at `token_at()`, `ingest_token_at()` and `read_token_at()`
 
 pub fn size() -> [] int {
-    return 23;
+    return 48;
 }
 
 pub fn blob_size() -> [] int {
@@ -194,6 +201,35 @@ pub fn rotation_grace_ms[&c](cfg: &c [int]) -> [] int {
     return cfg[22];
 }
 
+// Retention (`docs/retention.md` section 3).
+pub fn retention_days[&c](cfg: &c [int]) -> [] int {
+    return cfg[40];
+}
+
+pub fn segment_bytes[&c](cfg: &c [int]) -> [] int {
+    return cfg[41];
+}
+
+pub fn delivery_log_bytes[&c](cfg: &c [int]) -> [] int {
+    return cfg[42];
+}
+
+pub fn idem_keys[&c](cfg: &c [int]) -> [] int {
+    return cfg[43];
+}
+
+pub fn compact_now[&c](cfg: &c [int]) -> [] bool {
+    return cfg[44] == 1;
+}
+
+pub fn retention_ms_knob[&c](cfg: &c [int]) -> [] int {
+    return cfg[45];
+}
+
+pub fn compact_kill_at[&c](cfg: &c [int]) -> [] int {
+    return cfg[46];
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -207,6 +243,10 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[15] = 1;
     cfg[17] = 5000;
     cfg[22] = 86400000;
+    cfg[40] = 30;
+    cfg[41] = 67108864;
+    cfg[42] = 33554432;
+    cfg[43] = 262144;
     return 0;
 }
 
@@ -460,6 +500,56 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[18] = 0;
         } else {
             why = why_value();
+        }
+    } else if bytes.equal(key, "retention-days") {
+        let n = number(value);
+        if n < 0 || n > 36500 {
+            why = why_value();
+        } else {
+            cfg[40] = n;
+        }
+    } else if bytes.equal(key, "segment-bytes") {
+        let n = number(value);
+        if n < 262144 {
+            why = why_value();
+        } else {
+            cfg[41] = n;
+        }
+    } else if bytes.equal(key, "delivery-log-bytes") {
+        let n = number(value);
+        if n < 65536 {
+            why = why_value();
+        } else {
+            cfg[42] = n;
+        }
+    } else if bytes.equal(key, "idem-keys") {
+        let n = number(value);
+        if n < 16 || n > 4194304 {
+            why = why_value();
+        } else {
+            cfg[43] = n;
+        }
+    } else if bytes.equal(key, "compact-now") {
+        if bytes.equal(value, "1") {
+            cfg[44] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[44] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "retention-ms") {
+        let n = number(value);
+        if n < 0 {
+            why = why_value();
+        } else {
+            cfg[45] = n;
+        }
+    } else if bytes.equal(key, "compact-kill-at") {
+        let n = number(value);
+        if n < 0 || n > 64 {
+            why = why_value();
+        } else {
+            cfg[46] = n;
         }
     } else if bytes.equal(key, "import-endpoints") {
         if bytes.equal(value, "1") {
