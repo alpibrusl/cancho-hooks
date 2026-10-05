@@ -69,6 +69,7 @@ ROUTES = {
     ("POST", "/endpoints/:id/replay-dead"): ("admin", "POST", "/endpoints/1/replay-dead", None, 404, False),
     ("DELETE", "/events/:id/replay/:endpoint"): ("admin", "DELETE", "/events/1/replay/1", None, 404, False),
     ("DELETE", "/endpoints/:id/replays"): ("admin", "DELETE", "/endpoints/1/replays", None, 404, False),
+    ("DELETE", "/events/:id"): ("admin", "DELETE", "/events/99", None, 404, False),
     ("GET", "/readyz"): ("open", "GET", "/readyz", None, 200, False),
     ("GET", "/metrics"): ("read", "GET", "/metrics", None, 200, False),
 }
