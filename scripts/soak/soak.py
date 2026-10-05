@@ -138,6 +138,7 @@ class Run:
             self.quiet_s = max(self.quiet_s, 1800.0)
         self.receivers = self.probe = self.proxy = self.poster = self.checker = self.watcher = self.svc = None
         self.final = {}
+        self.phase = 0               # 0 the run, 1 the drain, 2 after the clean stop
         self.service_cpus = self.harness_cpus = None
         self.threads = []
         self.tmpfs = None
@@ -153,6 +154,8 @@ class Run:
         self.ctl_port = None
         self.dns = None
         self.cron_ids = {}
+        self.saved_fault_counts = {}
+        self.faults = None
 
     # ---- small things
     def elapsed(self):
@@ -272,7 +275,7 @@ class Run:
             st = {"t": time.time(), "elapsed": self.elapsed(), "inc": self.svc.inc if self.svc else 0, "service_pid": self.svc.pid if self.svc else None,
                   "receivers_pid": self.receivers.pid if self.receivers else None, "probe_pid": self.probe.pid if self.probe else None, "n_next": self.poster.n_next if self.poster else 1,
                   "next_idx": self.next_idx, "port": self.port, "ctl_port": self.ctl_port, "cron": self.cron_ids, "dns": self.dns,
-                  "eps": {k: v.state() for k, v in self.eps.items()}, "counts": dict(self.counts), "taken": sorted(self.taken),
+                  "eps": {k: v.state() for k, v in self.eps.items()}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
                   "settled": {k: self.verifier.by_label[k].settled for k in self.eps if k in self.verifier.by_label}, "kills": self.verifier.kills[-50:]}
             tmp = self.path("state.json.tmp")
             with open(tmp, "w") as f:
@@ -451,7 +454,7 @@ class Run:
             ep.svc_id, ep.c0 = int(ans["id"]), int(ans["cursor"])
             self.label_of[ep.svc_id] = ep.label
             self.verifier.activate(ep.label, ep.c0, time.time())
-        for expr, period in (("* * * * * *", 1), ("*/5 * * * * *", 5)):
+        for expr, period in (("* * * * * *", 1), ("*/5 * * * * *", 5))[:a.schedules]:
             s, ans = self.admin("POST", "/schedules", {"expr": expr, "type": "cron.tick"}, timeout=15)
             if s != 201:
                 raise SystemExit(f"POST /schedules answered {s}: {ans}")
@@ -515,6 +518,7 @@ class Run:
         self.cron_ids = st["cron"]
         self.dns = st.get("dns")
         self.counts.update(st.get("counts", {}))
+        self.saved_fault_counts = st.get("faults_count", {})
         for pid_key, needle in (("service_pid", os.path.basename(a.binary)), ("receivers_pid", "receivers.py"), ("probe_pid", "probe.py")):
             pid = st.get(pid_key)
             if pid and os.path.exists(f"/proc/{pid}/cmdline"):
@@ -570,7 +574,9 @@ class Run:
         for label, ep in self.eps.items():
             if label.startswith("churn") and ep.svc_id is not None and st["eps"][label]["active"]:
                 self.admin("DELETE", f"/endpoints/{ep.svc_id}", None)
-        self.poster_start_n = st["n_next"]
+        # the numbers (and so the idempotency keys) of events posted since the last heartbeat are in the poster's ledger, not in state.json: go past them
+        recs, _ = common.read_records(self.path("acked.bin"), max(0, os.path.getsize(self.path("acked.bin")) - 200000 * ACK.size), ACK) if os.path.exists(self.path("acked.bin")) else ([], 0)
+        self.poster_start_n = max([st["n_next"]] + [r[2] + 1 for r in recs]) + 100
 
     # ---- the run
     def start_workload(self):
@@ -590,11 +596,15 @@ class Run:
                 self.log("fault-injected", mutant=a.fault, faults=f)
         threading.Thread(target=self.heartbeat, daemon=True).start()
         if not a.calibrate:
-            self.threads = [workers.Replayer(self), workers.Enabler(self)] + [workers.Churn(self, k) for k in range(a.churn)] + [faults.Faults(self)]
+            self.threads = [workers.Replayer(self), workers.Enabler(self)] + [workers.Churn(self, k) for k in range(a.churn)] + [self.make_faults()]
         else:
             self.threads = [workers.Enabler(self)]
         for t in self.threads:
             t.start()
+
+    def make_faults(self):
+        self.faults = faults.Faults(self)
+        return self.faults
 
     def heartbeat(self):
         while not self.stop_all.wait(5.0):
@@ -639,6 +649,19 @@ class Run:
         for t in self.threads:
             t.join(timeout=100)
         self.proxy.restore()
+        if self.fatal:
+            # the service cannot be started on its own data directory: there is nothing to drain; what the directory holds is still checked against what was acknowledged
+            self.log("finish", step="fatal", why=self.fatal)
+            self.final = {"fatal": self.fatal}
+            self.check_log_durability()
+            self.stop_all.set()
+            self.checker.join(5)
+            self.watcher.join(5)
+            for p in (self.probe, self.receivers):
+                if p and p.poll() is None:
+                    p.terminate()
+            self.save_state()
+            return
         for ep in self.eps.values():
             if ep.active:
                 self.recv({"op": "mode", "label": ep.label, "mode": "normal", "until": 0})
@@ -648,6 +671,7 @@ class Run:
             self.reap()
         # drain: every endpoint reaches the newest event
         self.log("finish", step="drain")
+        self.phase = 1
         end = time.time() + a.drain_s
         last_id = 0
         caught = False
@@ -692,6 +716,7 @@ class Run:
             self.counts["final_last_id"] = last_id
         # the stop: SIGTERM, exit 0, logs that logcheck accepts, and a restart that repeats nothing recorded
         self.log("finish", step="clean stop")
+        self.phase = 2
         before = self.violations.count["B_repeat"] + self.violations.count["B_restart_repeat"]
         t, code, lines = self.svc.term(a.stop_deadline_s + 10)
         self.excused.append((t - 0.5, t + 1e9))      # from here the service is stopped, started once to be watched, and stopped: nothing the probe sees counts
@@ -700,6 +725,7 @@ class Run:
             m = re.search(r"hooks: stopped: (\d+) attempts? (?:was|were) still on the wire", l) or m
         with self.vlock:
             v.note_stop(t, int(m.group(1)) if m else 0)
+            v.note_restart(self.svc.inc + 1, t, "term")
         self.final = {"stop_exit": code, "stop_lines": lines[-3:]}
         if code != 0:
             self.violate("J_stop_exit", exit=code, during="end", lines=lines[-3:])
@@ -843,6 +869,7 @@ def parse(argv):
     p.add_argument("--burst-rate", type=float, default=120.0, help="events a second in a burst (about the capacity of the mix: see --calibrate)")
     p.add_argument("--endpoints", type=int, default=12, help="long-lived endpoints (1 to 59), the classes of docs/soak.md in order")
     p.add_argument("--churn", type=int, default=3, help="threads that create, change and delete endpoints")
+    p.add_argument("--schedules", type=int, default=2, choices=[0, 1, 2], help="cron schedules to make (every second; every fifth second)")
     p.add_argument("--workers", type=int, default=6, help="threads of the poster")
     p.add_argument("--pg", default=os.environ.get("HOOKS_PG", ""), help="host:port:user:database (default $HOOKS_PG); the database is truncated")
     p.add_argument("--out", default="soak-out")
@@ -860,6 +887,7 @@ def parse(argv):
     p.add_argument("--no-pin", action="store_true")
     p.add_argument("--shim", default="", help="the fsync shim of the power cuts (default: fsync_shim.so beside the binary)")
     p.add_argument("--no-power-cut", action="store_true", help="a kill is a process kill only")
+    p.add_argument("--pg-restart-cmd", default="", help="a command that stops and starts the PostgreSQL server and returns when it takes connections (adds the `restart` database fault; for a server that is the run's own)")
     p.add_argument("--tmpfs-data", type=int, default=0, metavar="MB", help="make the data directory a tmpfs of this size and add the disk-full fault (needs root or sudo -n)")
     p.add_argument("--service-arg", action="append", default=[], help="an extra argument for the service (repeat)")
     p.add_argument("--keep-stop-copies", action="store_true", help="keep a copy of the data directory after each stop of the service, before it is started again (for looking at a finding)")
@@ -907,6 +935,8 @@ def finalize_args(a, p):
 
 def run_main(a):
     run = Run(a)
+    if a.calibrate:
+        a.sample_s = 3600.0
     atexit.register(lambda: [p.kill() for p in (run.receivers, run.probe, run.svc.proc if run.svc else None) if p and p.poll() is None])
     signal.signal(signal.SIGTERM, lambda *_: run.stop.set())
     run.setup()
@@ -914,6 +944,7 @@ def run_main(a):
     print(f"soak: {run.duration:.0f} s, seed {a.seed}, rate {a.rate}/s (burst {a.burst_rate}/s), {a.endpoints} endpoints, out {run.out}; service pinned to {sorted(run.service_cpus or [])}, "
           f"harness to {sorted(run.harness_cpus or [])}", flush=True)
     if a.calibrate:
+        run.watcher.rows.clear()
         return calibrate(run)
     try:
         run.run_loop()
@@ -930,37 +961,42 @@ def run_main(a):
 
 
 def calibrate(run):
-    """Steps of rising rate with no fault: for each, what was achieved, the worst lag, the CPU of the service and of the harness."""
+    """Steps of rising rate with no fault: for each, what was achieved, the worst lag of the endpoints that do not fail on purpose, the CPU of the service and of the harness, and the
+    sender's and the delivery's latency. The mix sustains the highest rate at which 95 % of it was achieved, no steady endpoint was more than 500 ids behind, and the receivers' loop
+    was never 100 ms late."""
     a = run.args
     steps = []
-    rates = [r for r in (50, 100, 200, 400, 800, 1600, 3200) if r >= a.rate / 2] if a.rate else [100, 200, 400, 800]
+    rates = [r for r in (25, 50, 100, 200, 300, 400, 600, 800, 1200, 1600) if r >= a.rate / 2] if a.rate else [50, 100, 200, 400, 800]
     best = None
+    steady = ("oracle", "healthy", "healthy2", "filter", "https", "slow")      # not `rate`: it is limited on purpose
     for rate in rates:
         run.poster.rate = rate
         time.sleep(6)
+        run.poster.window()
+        run.recv({"op": "stats"})                      # the window starts here: the receivers keep their percentiles from this call to the next
         s0 = run.poster.counts["acked"]
         c0, w0 = run.svc.cpu_s(), time.time()
         rc0 = run.recv({"op": "stats"}).get("cpu_s", 0)
         lag_max = 0
-        loop_lag = 0
         t_end = time.time() + 20
         while time.time() < t_end:
             time.sleep(1.0)
             s, text = run.read("/metrics", timeout=4, raw=True)
             if s == 200:
-                lag = monitor.parse_series(text, "hooks_endpoint_lag_events")
-                lag_max = max([lag_max] + list(lag.values()))
-            loop_lag = max(loop_lag, run.recv({"op": "stats"}).get("loop_lag_max_ms", 0))
+                for sid, v in monitor.parse_series(text, "hooks_endpoint_lag_events").items():
+                    if run.eps.get(run.label_of.get(sid, ""), None) is not None and run.eps[run.label_of[sid]].cls in steady:
+                        lag_max = max(lag_max, v)
         dt = time.time() - w0
         acked = run.poster.counts["acked"] - s0
         rs = run.recv({"op": "stats"})
         w = run.poster.window()
-        step = {"rate": rate, "achieved_per_s": round(acked / dt, 1), "lag_max": lag_max, "service_cpu_pct": round((run.svc.cpu_s() - c0) / dt * 100, 1),
-                "receivers_cpu_pct": round((rs.get("cpu_s", 0) - rc0) / dt * 100, 1), "receivers_loop_lag_max_ms": round(loop_lag, 1), "ingest_p50_ms": round(w["p50"], 2),
-                "ingest_p99_ms": round(w["p99"], 2), "deliv_lat_p50_ms": rs.get("lat_p50"), "deliv_lat_p99_ms": rs.get("lat_p99"), "rss_kb": (run.svc.proc_info() or [0])[0]}
+        step = {"rate": rate, "achieved_per_s": round(acked / dt, 1), "lag_max_steady_endpoints": lag_max, "service_cpu_pct": round((run.svc.cpu_s() - c0) / dt * 100, 1),
+                "receivers_cpu_pct": round((rs.get("cpu_s", 0) - rc0) / dt * 100, 1), "receivers_loop_lag_max_ms": round(rs.get("loop_lag_max_ms", 0), 1), "ingest_p50_ms": round(w["p50"], 2),
+                "ingest_p99_ms": round(w["p99"], 2), "ingest_max_ms": round(w["max"], 1), "deliv_lat_p50_ms": rs.get("lat_p50"), "deliv_lat_p99_ms": rs.get("lat_p99"),
+                "deliv_lat_max_ms": rs.get("lat_max"), "rss_kb": (run.svc.proc_info() or [0])[0], "loadavg1": round(os.getloadavg()[0], 2)}
         steps.append(step)
         print(json.dumps(step), flush=True)
-        ok = step["achieved_per_s"] >= 0.95 * rate and lag_max < 500 and loop_lag < 100
+        ok = step["achieved_per_s"] >= 0.95 * rate and lag_max < 500 and step["receivers_loop_lag_max_ms"] < 100
         if ok:
             best = step
         else:
@@ -972,10 +1008,13 @@ def calibrate(run):
     for p in (run.probe, run.receivers):
         if p and p.poll() is None:
             p.terminate()
-    out = {"steps": steps, "sustained_events_per_s": best["rate"] if best else None, "limited_by": None, "endpoints": a.endpoints, "machine": machine()}
+    out = {"steps": steps, "sustained_events_per_s": best["rate"] if best else None, "limited_by": None, "endpoints": a.endpoints, "schedules": a.schedules, "machine": machine(),
+           "binary_sha256": sha256(a.binary)}
     if steps:
         last = steps[-1]
-        out["limited_by"] = "the service (one core)" if last["service_cpu_pct"] >= 85 else ("the harness's receivers" if last["receivers_cpu_pct"] >= 85 or last["receivers_loop_lag_max_ms"] >= 100 else "neither is saturated")
+        out["limited_by"] = ("the service (one core)" if last["service_cpu_pct"] >= 85 else
+                             ("the harness's receivers" if last["receivers_cpu_pct"] >= 85 or last["receivers_loop_lag_max_ms"] >= 100 else
+                              ("a lag among the steady endpoints (see the step)" if last["lag_max_steady_endpoints"] >= 500 else "neither is saturated")))
     with open(run.path("calibration.json"), "w") as f:
         json.dump(out, f, indent=1)
     print("calibration:", json.dumps({k: out[k] for k in ("sustained_events_per_s", "limited_by")}))
@@ -999,7 +1038,7 @@ def selftest(a):
     os.makedirs(base)
     secs = a.duration_s or 180.0
     common_args = ["--binary", a.binary, "--pg", a.pg, "--duration-s", str(secs), "--seed", str(a.seed or 11), "--rate", str(min(a.rate, 40.0)), "--burst-rate", str(min(a.burst_rate, 120.0)), "--restart-scale", "0.25",
-                   "--endpoints", str(a.endpoints), "--lenient-validity", "--sample-s", "5", "--progress-s", "30", "--drain-s", "180", "--after-stop-s", "8", "--min-incarnation-s", "600"] + ([] if a.selftest_strict else ["--waive", "B_restart_repeat"]) + \
+                   "--endpoints", str(a.endpoints), "--lenient-validity", "--sample-s", "5", "--progress-s", "30", "--drain-s", "180", "--after-stop-s", "8", "--min-incarnation-s", "600"] + ([] if a.selftest_strict else ["--waive", "B_restart_repeat,J_repeat"]) + \
                   (["--no-pin"] if a.no_pin else []) + (["--shim", a.shim] if a.shim else [])
     plan = [("clean", [], None)]
     names = ["lose", "dup", "liar"] if a.selftest_mutants == "all" else [x for x in a.selftest_mutants.split(",") if x]

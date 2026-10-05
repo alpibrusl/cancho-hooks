@@ -5,6 +5,7 @@ away tell the checker.
 """
 import os
 import random
+import subprocess
 import threading
 import time
 import zlib
@@ -25,7 +26,7 @@ ACTIONS = {
     "backup": (600, 60, False),
     "disk-full": (1800, 300, True),
 }
-PG_KINDS = ["cut", "freeze", "blackhole", "hold", "kill-backends"]
+PG_KINDS = ["cut", "freeze", "blackhole", "hold", "kill-backends"]      # and "restart" with --pg-restart-cmd
 RESTARTS = ("kill9", "kill9-compaction", "sigterm", "disk-full")
 
 
@@ -40,7 +41,8 @@ class Faults(threading.Thread):
         self.rngs = {n: random.Random(zlib.crc32(f"{run.seed}/{n}".encode())) for n in ACTIONS}
         self.next = {}
         self.running = set()
-        self.count = {n: 0 for n in ACTIONS}
+        self.last_outage = {}
+        self.count = {n: run.saved_fault_counts.get(n, 0) for n in ACTIONS}
         now = time.time()
         for n in self.enabled:
             self.next[n] = now + self.interval(n) * 0.5 if n != "backup" else now + 60 * min(1.0, max(self.scale, 0.2))
@@ -110,15 +112,15 @@ class Faults(threading.Thread):
                 elif name == "disk-full":
                     self.disk_full(rng)
         elif name == "receiver-vanish":
-            labels = self.pick(rng, rng.randint(1, 3))
             d = rng.uniform(3.0, 10.0)
+            labels = self.pick(rng, rng.randint(1, 3), d)
             for lb in labels:
                 r.recv({"op": "mode", "label": lb, "mode": "vanish", "until": time.time() + d})
             r.log("receiver-vanish", labels=labels, seconds=round(d, 1))
         elif name == "receiver-slow":
-            labels = self.pick(rng, rng.randint(2, 5))
             kind = rng.choice(["slow", "late", "hold"])
             d = rng.uniform(5.0, 10.0)
+            labels = self.pick(rng, rng.randint(2, 5), d)
             until = time.time() + d
             for lb in labels:
                 if kind == "slow":
@@ -147,10 +149,16 @@ class Faults(threading.Thread):
             with r.backup_lock:
                 workers.run_backup(r, restore=(k % 4 == 1))
 
-    def pick(self, rng, k):
-        cands = [e.label for e in self.r.eps.values() if e.active and e.cls in workers.MUST + ("flapping",)]
+    def pick(self, rng, k, seconds=10.0):
+        """Endpoints to make fail for `seconds`: not one that is failing already (a flapping endpoint, or one that was made to fail in the last 45 s), so that the outages an endpoint is put
+        through never add up to more than the retry schedule is meant to carry. (In a compressed run they would: four outages of 5 s in 65 s kill an event that has nine attempts.)"""
+        now = time.time()
+        cands = [e.label for e in self.r.eps.values() if e.active and e.cls in workers.MUST and e.cls != "flapping" and now - self.last_outage.get(e.label, 0) > 45.0]
         rng.shuffle(cands)
-        return cands[:k]
+        out = cands[:k]
+        for lb in out:
+            self.last_outage[lb] = now + seconds
+        return out
 
     def kill_in_compaction(self, rng):
         r = self.r
@@ -179,7 +187,8 @@ class Faults(threading.Thread):
 
     def pg_fault(self, rng):
         r = self.r
-        kind = rng.choice(PG_KINDS)
+        kinds = PG_KINDS + (["restart"] if r.args.pg_restart_cmd else [])
+        kind = rng.choice(kinds)
         d = rng.uniform(2.0, 20.0)
         px = r.proxy
         t0 = time.time()
@@ -192,6 +201,11 @@ class Faults(threading.Thread):
             px.blackhole()
         elif kind == "hold":
             px.mode = "hold"
+        elif kind == "restart":
+            # a real stop and start of the server, by the command the person gave: it returns when the server takes connections again
+            c = subprocess.run(r.args.pg_restart_cmd, shell=True, capture_output=True, text=True, timeout=300)
+            r.log("pg", which=kind, status=c.returncode, stderr=c.stderr[-200:])
+            d = 0.0
         elif kind == "kill-backends":
             n = px.kill_backends(r.psql_rows)
             r.log("pg", which=kind, killed=n)

@@ -40,7 +40,7 @@ def percentile(sorted_v, p):
 def incarnations(rows):
     out = {}
     for r in rows:
-        if r.get("up") in (1, "1", True) and r.get("rss_kb") not in (None, ""):
+        if r.get("up") in (1, "1", True) and r.get("rss_kb") not in (None, "") and str(r.get("phase", "0")) != "2":      # phase 2: after the clean stop, the service started once more to be watched
             out.setdefault(int(r["inc"]), []).append(r)
     return out
 
