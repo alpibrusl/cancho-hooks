@@ -237,13 +237,32 @@ windows, and the harness's own CPU.
 
 ## 6. Resuming
 
-The data directory, the two ledgers and `state.json` persist in `--out`. `soak.py --resume DIR` reads the parameters from `DIR/run.json` (the seed, the
-rate, the endpoints, the ports and secrets) and then, in this order: stops a service of the previous harness still running (found by the pid in
-`state.json`, and only if its command line is this binary on this data directory), treats the stop as a power cut (**a kill at the time of the last
-heartbeat**, so repeats just after it are excused), starts the service on the same data directory, brings the receivers back on the same ports, reads the
-ledger tail again to rebuild the open window, and runs for the time that was left. A resumed run says so in its report, and the report counts the
-resume as a kill. The poster continues the numbering of `n`; the chaos generator is fast-forwarded by the number of actions already taken, so the sequence
-is the one the seed gives.
+A run of 24 hours outlives machines: a container or a virtual machine is restarted every few hours and takes the harness, the receivers and the service with it. What is on disk, in `--out`,
+is enough to go on: the data directory, the two ledgers (`acked.bin`, `ledger/recv.bin`), `chaos.jsonl`, `violations.jsonl`, `metrics.csv`, `samples.jsonl`, `probe.jsonl`, `run.json` (the arguments)
+and `state.json` (written every five seconds: the endpoints with their ports and secrets, the numbers of the poster, the cursors the checker has settled, **what the checker has been told and what
+it holds open**: kills, stops, absences, replays, the windows in which an endpoint was made to fail, the dead letters it waits for, the stretches excused from the loop's bound).
+
+```sh
+# the same command, again and again, until the run has finished (put it under a supervisor, or run it by hand after a restart)
+export HOOKS_PG=127.0.0.1:5432:postgres:hooks_soak      # and HOOKS_PG_PASSWORD: the database of the run, with its contents
+scripts/soak/continue.sh soak-out --binary build/hooks --hours 24 --seed 1
+# which is, once the first start has been interrupted:
+python3 scripts/soak/soak.py --resume soak-out
+```
+
+The conditions: the output directory is intact; **the PostgreSQL database is the one the run used, with its contents** (the endpoints of the run are rows in it, and a resume does not truncate it: if the
+database was lost with the machine, begin again); the binary is the same build (a resume refuses a binary whose SHA-256 is not the run's: `--force` goes on anyway, and the report says so). `--resume` takes
+its parameters from `run.json` (the seed, the rate, the endpoints, the ports, the secrets); `--binary` and `--pg` can be given again if the build or the database moved. A run that has a `verdict.json` is finished.
+
+What a resume does, in this order: stops a process of the previous harness that is still running (the service, the receivers, the probe: found by the pids in `state.json`, and only if the command line is
+this binary on this data directory); treats the interruption as a power cut (**a kill at the time of the last heartbeat**: the files are cut as the `fsync` shim cuts them, so repeats just after it are
+excused); restores what the checker was told, and reads the tail of both ledgers again to rebuild the window of events that are still open (without counting again what was judged before); starts the service
+on the same data directory; brings the receivers back on the same ports, and deletes the endpoints that the churn threads had open (the churn starts again); and runs for the time that was left. The
+**time the harness was not running does not count** towards the duration, and the cron schedules, which the service keeps in the database, are excused for the time the service was away. The poster
+continues the numbering of `n` past what its ledger holds, so that an idempotency key is never used for two events; the chaos generator is fast-forwarded by the number of actions already taken, so the
+sequence of kinds is the one the seed gives. The violations found before the interruption are part of the verdict. A resumed run says so in its report and counts each resume as a kill.
+
+A resume that is interrupted again is resumed again.
 
 ## 7. What this test does not cover
 
