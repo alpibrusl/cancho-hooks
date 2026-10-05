@@ -155,6 +155,7 @@ def main():
         ("2. a certificate that is not valid yet", pki.not_yet_valid("hooks.test"), "cert_expired", {}),
         ("2. a certificate for another name", pki.leaf("other.test"), "cert_hostname", {}),
         ("2. a chain to another authority", pki.other_leaf("hooks.test"), "cert_untrusted", {}),
+        ("2. a certificate whose signature was changed (one bit)", pki.damaged("hooks.test"), "cert_invalid", {}),
         ("2. a certificate that may be used to authenticate a client and not a server", pki.wrong_purpose("hooks.test"), "cert_invalid", {}),
         ("2. a self-signed certificate", pki.selfsigned("hooks.test"), "cert_untrusted", {}),
         ("2. a good chain, but no tls-ca-file: the system's store does not hold the test authority", good, "cert_untrusted", {"ca": False}),

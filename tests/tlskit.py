@@ -4,7 +4,9 @@ and a name server (DNS over TCP, which is what the service speaks) that answers 
 
 Not a test. `tests/https_test.py` and `tests/names_test.py` import it. Nothing here is the thing under test; none of it is in the service.
 """
+import base64
 import os
+import re
 import socket
 import ssl
 import struct
@@ -82,6 +84,22 @@ class Pki:
         sh(OPENSSL, "x509", "-req", "-in", csr, "-CA", cert, "-CAkey", cakey, "-CAcreateserial", "-out", pem, "-days", "365", "-extfile", self._ext(label, san), cwd=self.dir)
         self._made[label] = (pem, key)
         return pem, key
+
+    def damaged(self, san="hooks.test"):
+        """The certificate `leaf(san)` makes with the last bit of its signature changed: the authority's key does not verify it, and the receiver's key still matches it, so the
+        receiver can serve it."""
+        label = f"damaged-{san}"
+        if label in self._made:
+            return self._made[label]
+        pem, key = self.leaf(san)
+        body = re.search(r"-----BEGIN CERTIFICATE-----\n(.*?)-----END CERTIFICATE-----", open(pem).read(), re.S).group(1)
+        der = bytearray(base64.b64decode(body))
+        der[-1] ^= 0x01
+        out = os.path.join(self.dir, f"{label}.pem")
+        with open(out, "w") as f:
+            f.write("-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(bytes(der)).decode() + "-----END CERTIFICATE-----\n")
+        self._made[label] = (out, key)
+        return out, key
 
     def other_leaf(self, san="hooks.test"):
         return self.leaf(san, label=f"other-{san}", ca=(self.other_ca_pem, self.other_ca_key))

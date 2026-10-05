@@ -7,6 +7,7 @@
 #
 #   scripts/check-authority.sh             compare; exit 0 if the report is the committed one, 1 (and show the diff) if not
 #   scripts/check-authority.sh --update    write docs/authority.json (after reading what changed)
+#   scripts/check-authority.sh --pure      the same for the build with lex-sys's own TLS: docs/authority-pure.json (`--update` writes it)
 #
 #   LEX_SYS   the lex-sys compiler binary        (default: lex-sys on PATH; the commit lex-sys.toml pins)
 #
@@ -17,29 +18,43 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 LEX_SYS=${LEX_SYS:-lex-sys}
-pinned=$here/docs/authority.json
 
 mode=compare
-case "${1:-}" in
-  "") ;;
-  --update) mode=update ;;
-  *) echo "usage: $0 [--update]" >&2; exit 2 ;;
-esac
+variant=default
+for arg in "$@"; do
+  case "$arg" in
+    --update) mode=update ;;
+    --pure) variant=pure ;;
+    *) echo "usage: $0 [--update] [--pure]" >&2; exit 2 ;;
+  esac
+done
 
-cd "$here"
+# The default build (OpenSSL), or with `--pure` the build with lex-sys's own TLS (`pure/`, docs/pure-tls.md): its own project, bin and pinned report.
+if [ "$variant" = pure ]; then
+  project=$here/pure
+  bin=hooks-pure
+  pinned=$here/docs/authority-pure.json
+  python3 "$here/scripts/make_pure.py" >&2
+else
+  project=$here
+  bin=hooks
+  pinned=$here/docs/authority.json
+fi
+
+cd "$project"
 "$LEX_SYS" install >&2
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # The files of the program, as `lex-sys build` would be given them: the bin's sources (a directory is its .ls files), then the libraries.
-python3 - "$here" > "$work/files" <<'PY'
+python3 - "$project" "$bin" > "$work/files" <<'PY'
 import glob, os, sys, tomllib
 here = sys.argv[1]
 project = tomllib.load(open(os.path.join(here, "lex-sys.toml"), "rb"))
-bins = [b for b in project["bin"] if b["name"] == "hooks"]
+bins = [b for b in project["bin"] if b["name"] == sys.argv[2]]
 if len(bins) != 1:
-    sys.exit("lex-sys.toml has no [[bin]] named hooks")
+    sys.exit(f"lex-sys.toml has no [[bin]] named {sys.argv[2]}")
 files = []
 for source in bins[0]["sources"]:
     path = os.path.join(here, source)
@@ -68,12 +83,12 @@ PY
 
 if [ "$mode" = update ]; then
   cp "$work/report.json" "$pinned"
-  echo "check-authority: wrote docs/authority.json" >&2
+  echo "check-authority: wrote ${pinned#"$here"/}" >&2
   exit 0
 fi
 
 if [ ! -f "$pinned" ]; then
-  echo "check-authority: docs/authority.json does not exist; run scripts/check-authority.sh --update and commit it" >&2
+  echo "check-authority: ${pinned#"$here"/} does not exist; run scripts/check-authority.sh --update${variant:+ }$([ "$variant" = pure ] && echo --pure) and commit it" >&2
   exit 1
 fi
 if diff -u "$pinned" "$work/report.json" > "$work/diff"; then
@@ -83,6 +98,6 @@ fi
 cat "$work/diff"
 echo >&2
 echo "check-authority: the authority report changed. If the new foreign call or capability is intended, read the diff above, run" >&2
-echo "  scripts/check-authority.sh --update" >&2
-echo "and commit docs/authority.json: that commit is the approval." >&2
+echo "  scripts/check-authority.sh --update$([ "$variant" = pure ] && echo " --pure")" >&2
+echo "and commit ${pinned#"$here"/}: that commit is the approval." >&2
 exit 1
