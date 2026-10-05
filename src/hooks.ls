@@ -41,6 +41,7 @@ import roster;
 import record;
 import attempt;
 import thp;
+import dbname;
 import crc;
 import idem;
 import std.conns;
@@ -733,6 +734,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "database_lookups");
+        w = json.put_int(heap, w, dbname.lookups(stats[off_dbn()..off_dbn() + dbname.size()]));
+        w = json.put_key(heap, w, "database_lookup_failures");
+        w = json.put_int(heap, w, dbname.failures(stats[off_dbn()..off_dbn() + dbname.size()]));
         w = json.put_key(heap, w, "endpoints_loaded");
         w = json.put_bool(heap, w, history.endpoints_known(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "database_reconnects");
@@ -1984,8 +1989,13 @@ fn off_lag() -> [] int {
     return off_adv() + state.max_endpoints();
 }
 
-fn off_token() -> [] int {
+// The database's host, when it is a name, resolved by the service (`dbname.ls`, `docs/design.md` section 45).
+fn off_dbn() -> [] int {
     return off_lag() + state.max_endpoints();
+}
+
+fn off_token() -> [] int {
+    return off_dbn() + dbname.size();
 }
 
 fn off_mg() -> [] int {
@@ -3419,6 +3429,11 @@ fn signal_token() -> [] int {
     return attempt.slots() + 16;
 }
 
+// The poller token of the lookup of the database's host (`dbname.ls`), after the claim's.
+fn dbname_token() -> [] int {
+    return attempt.slots() + 17;
+}
+
 // Why the service ends because the endpoints could not be read from the database after the start (section 37.2), on stderr: `status` is 20 and `detail` a reason
 // of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log.
 fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int {
@@ -3480,6 +3495,10 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             let resp = box_slice(heap, attempt.resp_size(), byte_of(0));
             let events = box_slice(heap, 256, 0);
             var atab = conns.empty(heap, attempt.slots());
+            // The database's host, when it is a name, is resolved by the service (`dbname.ls`, section 45): the lookup's one connection, and its query and answer.
+            var dtab = conns.empty(heap, 1);
+            let dnb = box_slice(heap, dbname.buf_size(), byte_of(0));
+            dbname.init(dv[off_dbn()..off_dbn() + dbname.size()], dbhost, ns, ns_port);
             let tickets = box_slice(heap, most_held(), 0);
             let ids = box_slice(heap, most_held(), 0);
             let keeps = box_slice(heap, most_held(), 0);
@@ -3849,6 +3868,12 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 while j < nev {
                                     if pool.owns(qw, contents(er)[2 * j]) {
                                         pool.pump(qw, server.poller(sw), contents(er)[2 * j], contents(er)[2 * j + 1]);
+                                    } else if contents(er)[2 * j] == server.first_token(sw) + dbname_token() {
+                                        borrow mut dtab as &!dt in {
+                                            borrow mut dnb as &!dn in {
+                                                dbname.advance(dt, server.poller(sw), dv[off_dbn()..off_dbn() + dbname.size()], contents(dn), server.first_token(sw) + dbname_token(), clock_ms(clock));
+                                            }
+                                        }
                                     }
                                     j = j + 1;
                                 }
@@ -3856,7 +3881,55 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                         }
                         // The pool keeps itself full (section 37.1): the logins move on, what ran out of time is given up, and a connection that is due is dialed
                         // (without waiting) and handed over. It takes the pool by value, so it is between the borrows.
-                        pl = pool.revive(heap, pl, net, dbhost, dbport, server.poller(sw), clock_ms(clock));
+                        if dbname.active(dv[off_dbn()..off_dbn() + dbname.size()]) {
+                            // The host is a name (section 45): the service resolves it and dials the address; the pool is never given the name.
+                            let now_db = clock_ms(clock);
+                            borrow mut dtab as &!dt in {
+                                dbname.expire(dt, dv[off_dbn()..off_dbn() + dbname.size()], now_db);
+                            }
+                            var want = 0;
+                            borrow mut pl as &!qw in {
+                                dbname.note_losses(dv[off_dbn()..off_dbn() + dbname.size()], pool.losses(qw));
+                                want = pool.tick(heap, qw, server.poller(sw), now_db);
+                            }
+                            if want > 0 && !dbname.known(dv[off_dbn()..off_dbn() + dbname.size()]) {
+                                // no address yet: a lookup is begun (or is on the wire), and each connection that was due waits its backoff instead of being due every turn
+                                borrow mut dnb as &!dn in {
+                                    dtab = dbname.start(heap, net, dtab, server.poller(sw), dv[off_dbn()..off_dbn() + dbname.size()], contents(dn), dbhost, server.first_token(sw) + dbname_token(), now_db);
+                                }
+                                borrow mut pl as &!qw in {
+                                    while want > 0 {
+                                        pool.dial_failed(qw, now_db, 0 - 2);
+                                        want = want - 1;
+                                    }
+                                }
+                            }
+                            while want > 0 {
+                                var dialed = false;
+                                region dt {
+                                    let literal = alloc_slice[dt](16, byte_of(0));
+                                    let n_lit = dbname.dotted(dv[off_dbn()..off_dbn() + dbname.size()], literal);
+                                    match tcp_connect_start(net, literal[0..n_lit], dbport) {
+                                        Dialed::Ok(c) => {
+                                            let (grown, lane) = pool.adopt(heap, pl, server.poller(sw), now_db, c);
+                                            pl = grown;
+                                            dialed = true;
+                                        }
+                                        Dialed::Failed(e) => {
+                                        }
+                                    }
+                                }
+                                if !dialed {
+                                    borrow mut pl as &!qw in {
+                                        pool.dial_failed(qw, now_db, 0 - 3);
+                                    }
+                                    dbname.stale(dv[off_dbn()..off_dbn() + dbname.size()]);
+                                }
+                                want = want - 1;
+                            }
+                        } else {
+                            pl = pool.revive(heap, pl, net, dbhost, dbport, server.poller(sw), clock_ms(clock));
+                        }
                         borrow mut pl as &!qw in {
                             // every request the pool has an answer for: an insert is counted, a request for the API is answered
                             var tag = pool.next_done(qw);
@@ -4114,6 +4187,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             }
             pool.close(heap, pl);
             conns.drop(heap, atab);
+            conns.drop(heap, dtab);
+            unbox_slice(heap, dnb);
             borrow mut at as &!aw1 in {
                 attempt.close_tls(ssl, contents(aw1));
             }

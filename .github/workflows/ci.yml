@@ -140,6 +140,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/prune_test.py build/hooks
 
+      - name: "The database's host may be a name (resolved by the service, the loop not held by a slow name server, looked up again after a lost connection)"
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/dbname_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks
