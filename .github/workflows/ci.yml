@@ -136,6 +136,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/advance_test.py build/hooks
 
+      - name: "The history is pruned (rows older than history-days deleted in batches, the recent ones kept, 0 keeps every row)"
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/prune_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks

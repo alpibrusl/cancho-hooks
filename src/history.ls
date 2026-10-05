@@ -25,6 +25,8 @@ import queries;
 //     [12] connections lost with a request on them     [13] the endpoints: 0 not read yet, 2 the read is asked for, 1 read
 //     [14] why the last attempt failed (`pool.last_failure`)   [15] why the last connection was lost (`pool.last_loss`)
 //     [16 .. 20] the settings of the connections: the first wait, the longest wait, the attempt's time, the request's time, the start's wait (ms)
+//     [21] history-days (0: rows are kept for ever)   [22] when the next batch of old rows may be deleted (Unix ms; 0: not decided yet)   [23] 1 while a batch is
+//     on the pool   [24] rows deleted since the start   [25] batches the database refused or lost (`docs/design.md` section 43)
 //     [32 ...] the ring: `cap()` rows of nine integers: endpoint, event, replay, attempt, outcome, status, at (ms), latency (ms), reason (`reason.ls`)
 
 pub fn cap() -> [] int {
@@ -213,6 +215,91 @@ pub fn drain[&h, &q, &s](heap: &!h Heap, pl: &!q pool.Pool, hs: &!s [int], most:
         }
     }
     return sent;
+}
+
+// Pruning (`docs/design.md` section 43): the rows older than `history-days` are deleted a batch at a time, by the time of the attempt, through the pool like any
+// other request and never waited for. A full batch is followed by the next a second later; a batch that was not full, or that failed, by a wait.
+pub fn prune_tag() -> [] int {
+    return 3;
+}
+
+pub fn prune_batch() -> [] int {
+    return 10000;
+}
+
+fn prune_first_ms() -> [] int {
+    return 10000;
+}
+
+fn prune_every_ms() -> [] int {
+    return 600000;
+}
+
+pub fn set_prune_days[&s](h: &!s [int], days: int) -> [] int {
+    h[21] = days;
+    return 0;
+}
+
+pub fn prune_days[&s](h: &s [int]) -> [] int {
+    return h[21];
+}
+
+pub fn pruned[&s](h: &s [int]) -> [] int {
+    return h[24];
+}
+
+pub fn prune_failures[&s](h: &s [int]) -> [] int {
+    return h[25];
+}
+
+// Put the next batch on the pool if one is due: there is a setting, a live connection and no batch on the pool. Answers 1 if one was put. Nothing is sent until
+// the pool's `flush`.
+pub fn prune_start[&h, &q, &s](heap: &!h Heap, pl: &!q pool.Pool, hs: &!s [int], now_ms: int) -> [heap] int {
+    if hs[21] == 0 || hs[23] == 1 || pool.live(pl) == 0 {
+        return 0;
+    }
+    if hs[22] == 0 {
+        hs[22] = now_ms + prune_first_ms();
+    }
+    if now_ms < hs[22] {
+        return 0;
+    }
+    let request = queries.prune_attempts_start(heap, now_ms - hs[21] * 86400000, prune_batch());
+    var code = 0 - 1;
+    borrow request as &rb in {
+        code = pool.submit(pl, prune_tag(), buffer.bytes(rb));
+    }
+    buffer.drop(heap, request);
+    if code == 0 {
+        hs[23] = 1;
+        return 1;
+    }
+    hs[22] = now_ms + 1000;
+    return 0;
+}
+
+// The batch `pool.next_done` last answered: count the rows it deleted, and say when the next may go.
+pub fn prune_done[&q, &s](pl: &q pool.Pool, hs: &!s [int], now_ms: int) -> [] int {
+    hs[23] = 0;
+    var bad = pool.status(pl) != 0;
+    if !bad && pg.failure(pool.reply(pl)) >= 0 {
+        bad = true;
+    }
+    if bad {
+        hs[25] = hs[25] + 1;
+        hs[22] = now_ms + prune_every_ms();
+        return 0;
+    }
+    let n = pg.affected(pool.reply(pl));
+    if n > 0 {
+        hs[24] = hs[24] + n;
+    }
+    if n >= prune_batch() {
+        hs[22] = now_ms + 1000;
+    } else {
+        hs[22] = now_ms + prune_every_ms();
+    }
+    return 0;
 }
 
 // The tags of the requests on the pool: an insert is 1, and a request for the API (a query somebody is waiting for) is

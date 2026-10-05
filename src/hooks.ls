@@ -729,6 +729,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.failed(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_dropped");
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "history_pruned");
+        w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "endpoints_loaded");
         w = json.put_bool(heap, w, history.endpoints_known(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "database_reconnects");
@@ -829,6 +831,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, stats[off_ex() + ex_grace()]);
         w = json.put_key(heap, w, "retention-days");
         w = json.put_int(heap, w, stats[rt_at() + r_retention_days()]);
+        w = json.put_key(heap, w, "history-days");
+        w = json.put_int(heap, w, history.prune_days(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "segment-bytes");
         w = json.put_int(heap, w, evlog.limit(lg));
         w = json.put_key(heap, w, "delivery-log-bytes");
@@ -3923,6 +3927,9 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                         buffer.drop(heap, reply);
                                         sched.slot_free(sg, slots);
                                     }
+                                } else if tag == history.prune_tag() {
+                                    // a batch of history rows older than `history-days` (section 43)
+                                    history.prune_done(qw, dv[off_hq()..off_hq() + history.size()], clock_unix_ms(clock));
                                 } else if tag < history.query_base() {
                                     history.account(qw, dv[off_hq()..off_hq() + history.size()]);
                                 } else {
@@ -4038,6 +4045,9 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 tick_start(heap, qw, sg, clock_unix_ms(clock), now_ms);
                             }
                             history.drain(heap, qw, dv[off_hq()..off_hq() + history.size()], 64);
+                            if !ops.stopping(ops_of(dv)) {
+                                history.prune_start(heap, qw, dv[off_hq()..off_hq() + history.size()], clock_unix_ms(clock));
+                            }
                             pool.flush(qw, server.poller(sw));
                         }
                     }
@@ -5310,6 +5320,7 @@ fn main(world: World) -> [] int {
                                                         if config.pg_host_len(cfg) > 0 {
                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
                                                             history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
+                                                            history.set_prune_days(contents(dvw)[off_hq()..off_hq() + history.size()], config.history_days(cfg));
                                                             let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);
                                                             let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
                                                             borrow mut dl as &!dw1 in {
@@ -5359,6 +5370,7 @@ fn main(world: World) -> [] int {
                                                                         // routes all use it (`history.ls`, `dbup.ls`).
                                                                         var hpool = pool.empty(h, 1, 1, 4096, 4096);
                                                                         history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
+                                                                        history.set_prune_days(contents(dvw)[off_hq()..off_hq() + history.size()], config.history_days(cfg));
                                                                         if config.pg_host_len(cfg) > 0 {
                                                                             pool.close(h, hpool);
                                                                             let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);

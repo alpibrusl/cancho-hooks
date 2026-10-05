@@ -2190,3 +2190,13 @@ The events log, the snapshot's shape and the outcomes header are unchanged. A lo
 **The cure.** At the start, before the large blocks are made, the service calls `prctl(PR_SET_THP_DISABLE, 1)` (`src/thp.ls`): small pages for this process, whatever the host's setting (`/proc/<pid>/status` says `THP_enabled: 0`). A kernel that refuses it leaves the host's setting, and the service goes on. It is a second function of libc in the authority report (`libc:prctl`, pinned in `docs/authority.json`), next to `statx`; lex-sys has no capability for it.
 
 **Not measured yet:** the resident sizes of 41.12 on a host with `always`, after the cure (CI's run of `leak_test` says whether the 2 MiB steps are gone).
+
+## 43. The history is pruned (`history-days`)
+
+**The gap.** Every attempt that ends is a row of `attempts` (section 24), and nothing deleted one: a service that delivers a million attempts a day adds a million rows a day for ever (`docs/status.md` said so). The events themselves have been bounded since retention (38); their history had no bound.
+
+**The rule.** A setting of its own, **`history-days`** (default 30, as `retention-days`; 0 keeps every row; 0 to 36,500), and not retention's: a row says what happened to an attempt and is wanted for its own time, longer or shorter than the event. The service deletes the rows whose `at_ms` is older than that, **10,000 at a time**: `delete from attempts where ctid in (select ctid from attempts where at_ms < $1 limit $2)` (`prune_attempts`), with an index on `at_ms` that `sql/schema.sql` adds (`attempts_at`). A batch goes on the pool like any other request (tag 3, `history.prune_start`, `prune_done`) and is never waited for; the first is sent ten seconds after a connection is live, the next a second after a batch that was full, otherwise ten minutes later, and ten minutes after a batch the database refused or lost. Nothing is pruned while the service is stopping. `GET /stats` says how many rows were deleted (`history_pruned`), `GET /config` the setting.
+
+**What it costs.** A batch is one statement of at most 10,000 rows found through the index; between batches the pool carries the inserts of new rows as before. A backlog of years is worked off at about 10,000 rows a second, in the database's time and not the loop's.
+
+**Tests.** `tests/prune_test.py`: `history-days 1`, 25,000 rows two days old and 500 an hour old put in by hand: the old ones are gone 12 s after the start (in three batches), the recent ones stay, `/stats` counts 25,000, events posted meanwhile are delivered and their rows written; `history-days 0` deletes nothing. `tests/config_test.ls`: the default, the edges, and that it has an index of the table of its own.
