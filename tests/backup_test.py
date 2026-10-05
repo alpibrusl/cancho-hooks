@@ -471,6 +471,16 @@ def stage_b():
         backups.append((out.stdout.strip().splitlines()[-1], before, kills[0], kills[0]))
     else:
         failures.append(f"final backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+    # a run that was quick (the kills few, or each backup slow to start against a database that wants a password) is given its five: more with the service up and
+    # nothing killing it, each after the last acknowledgement
+    while not failures and len(backups) < 5:
+        with lock:
+            before = dict(acked)
+        out = run([BACKUP, "--dir", data, "--out", outdir, "--mode", "online", *pg_flags()])
+        if out.returncode != 0:
+            failures.append(f"extra backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+        else:
+            backups.append((out.stdout.strip().splitlines()[-1], before, kills[0], kills[0]))
     print(f"   {EVENTS} events, {kills[0]} kills as power cuts, {svc.starts} starts, {len(backups)} online backups in {time.time() - started:.1f}s", flush=True)
 
     # 5.
@@ -824,6 +834,14 @@ def stage_d():
         backups.append((out.stdout.strip().splitlines()[-1], before, kills[0], kills[0]))
     else:
         failures.append(f"final backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+    while not failures and len(backups) < 5:
+        with lock:
+            before = dict(acked)
+        out = run([BACKUP, "--dir", data, "--out", outdir, "--mode", "online"])
+        if out.returncode != 0:
+            failures.append(f"extra backup exit {out.returncode}: {out.stderr.strip()[-300:]}")
+        else:
+            backups.append((out.stdout.strip().splitlines()[-1], before, kills[0], kills[0]))
     st = svc.get("/stats")
     print(f"   {D_EVENTS} events of 1.4 KB, {kills[0]} kills as power cuts, {svc.starts} starts, {len(backups)} online backups in {time.time() - started:.1f}s; "
           f"the live service: {st['segments_dropped']} segments dropped, {st['segments_sealed']} sealed, {st['snapshots']} snapshots, events {st['events_first_id']}..{st['events_last_id']}, "

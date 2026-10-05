@@ -541,14 +541,18 @@ def main():
     reset_db()
     d = tmp()
     ra = Receiver(status=500)
+    # a second endpoint holds the floor still: it is sent events 1 to 300 and answers 410 to the 301st, which disables it, so no event above 301 is ever final there and
+    # retention can drop what is below 301 and nothing more, however slow the machine is (without it everything is final and old, and a slow run finds all of it gone)
+    rb = Receiver(status=lambda i, n: 410 if n == 301 else 204)
     knobs = ["--segment-bytes", "262144", "--retention-ms", "1500", "--window-ms", "500"]
     svc = start(d, schedule="10", extra=pg_flags() + ["--admin-token", TOKEN, *knobs])
     a = make(svc, ra.port)
+    b = make(svc, rb.port)
     total = 700
     for n in range(1, total + 1):
         post_event(svc, n, "t", extra={"pad": "x" * 1000})
-    ok = wait_for(lambda: get(svc, "/stats")["dead"] == total, 60)
-    check("9c. 700 events of a kilobyte are dead", ok, str(get(svc, "/stats")))
+    ok = wait_for(lambda: get(svc, "/stats")["dead"] == total + 1, 60)
+    check("9c. 700 events of a kilobyte are dead at one endpoint, and the 301st at the other, which it disabled", ok, str(get(svc, "/stats")))
     ok = wait_for(lambda: get(svc, "/stats")["events_first_id"] > 1, 30)
     first = get(svc, "/stats")["events_first_id"]
     check("9c. retention has dropped the oldest segment (first id %d)" % first, ok and first > 1, str(get(svc, "/stats")))
@@ -573,6 +577,7 @@ def main():
     stop(svc)
     shutil.rmtree(d)
     ra.close()
+    rb.close()
     finish("dead letters")
 
 
