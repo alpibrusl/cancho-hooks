@@ -42,6 +42,7 @@ import record;
 import attempt;
 import thp;
 import dbname;
+import audit;
 import crc;
 import idem;
 import std.conns;
@@ -375,7 +376,11 @@ fn refuse_event[&h, &m, &s](heap: &!h Heap, out: buffer.Buffer, stats: &!s [int]
 // Why the service is not ready (`ops.not_ready`), 0 if it is: the logs are not broken, the data directory took the last probe, a database that was named
 // has a live connection and its endpoints have been read from it (section 37), and the service has not been asked to stop.
 fn readiness[&d, &l, &g](dv: &d [int], lg: &l evlog.Ev, done: &g log.Log) -> [] int {
-    return ops.not_ready(ops_of(dv), evlog.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.serving(dv[off_hq()..off_hq() + history.size()]));
+    let why = ops.not_ready(ops_of(dv), evlog.broken(lg), log.broken(done), history.enabled(dv[off_hq()..off_hq() + history.size()]), history.serving(dv[off_hq()..off_hq() + history.size()]));
+    if why == 0 && audit.broken(dv[off_aud()..off_aud() + audit.size()]) {
+        return 6;
+    }
+    return why;
 }
 
 // `GET /readyz`: 200 `{"ready":true}`, or 503 `{"ready":false,"check":...,"reason":...}`. It reads three flags and the last probe; it waits for nothing.
@@ -578,6 +583,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
     let id = route.find(router, http.method(request, table), path, params);
+    // the route, for the audit log (`audit.ls`), which the loop writes once the answer is known
+    note[2] = id;
     // Who may call this route (`src/authz.ls`: the scope of every route is there, and a route with none is admin-only).
     let verdict = authz.judge(id, request, table, stats[off_token()..off_token() + authz.tokens_size()]);
     if verdict != authz.allowed() {
@@ -734,6 +741,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "audit_lines");
+        w = json.put_int(heap, w, audit.written(stats[off_aud()..off_aud() + audit.size()]));
+        w = json.put_key(heap, w, "audit_failures");
+        w = json.put_int(heap, w, audit.failures(stats[off_aud()..off_aud() + audit.size()]));
         w = json.put_key(heap, w, "database_lookups");
         w = json.put_int(heap, w, dbname.lookups(stats[off_dbn()..off_dbn() + dbname.size()]));
         w = json.put_key(heap, w, "database_lookup_failures");
@@ -1994,8 +2005,13 @@ fn off_dbn() -> [] int {
     return off_lag() + state.max_endpoints();
 }
 
-fn off_token() -> [] int {
+// The audit log (`audit.ls`, `docs/design.md` section 47.1).
+fn off_aud() -> [] int {
     return off_dbn() + dbname.size();
+}
+
+fn off_token() -> [] int {
+    return off_aud() + audit.size();
 }
 
 fn off_mg() -> [] int {
@@ -3423,6 +3439,14 @@ fn tick_start[&h, &q, &s](heap: &!h Heap, qw: &!q pool.Pool, sg: &!s [int], unix
 // The loop
 // ---------------------------------------------------------------------
 
+// The outcome of a request that was held for the database, for the audit log (`audit.ls`), when it is answered.
+fn audit_answer[&h, &d, &b](heap: &!h Heap, lines: buffer.Buffer, dv: &!d [int], now: int, ticket: int, answer: &b [byte]) -> [heap] buffer.Buffer {
+    if !audit.on(dv[off_aud()..off_aud() + audit.size()]) {
+        return lines;
+    }
+    return audit.answered(heap, lines, dv[off_aud()..off_aud() + audit.size()], now, server.ticket_slot(ticket), audit.status_of(answer));
+}
+
 // The poller token of the claim on `SIGINT` and `SIGTERM`, counted from `server.first_token`: the attempts' tokens come first (`attempt.slots()` of them),
 // the database's pool after them (its lanes, 2 at most), and the claim's is clear of both. The delivery and history code ignore a token that is not theirs.
 fn signal_token() -> [] int {
@@ -3478,7 +3502,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             }
             let params = box_slice(heap, 2 * widest, 0);
             let scratch = box_slice(heap, max_len() + 8192, byte_of(0));
-            let note = box_slice(heap, 2, 0);
+            let note = box_slice(heap, 4, 0);
             // The requests for the history that wait for the database: per slot, the pool's tag (0 for a free slot), the ticket of the
             // held connection, whether to keep it alive, and when to give up.
             let pq = box_slice(heap, pq_cap() * 4, 0);
@@ -3497,6 +3521,19 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             var atab = conns.empty(heap, attempt.slots());
             // The database's host, when it is a name, is resolved by the service (`dbname.ls`, section 45): the lookup's one connection, and its query and answer.
             var dtab = conns.empty(heap, 1);
+            // The audit log (`audit.ls`): the lines of a turn, written once with the turn's group commit; and the request being answered, kept until its line is written.
+            var alines = buffer.empty(heap, 4096);
+            var astash = buffer.empty(heap, 512);
+            if audit.on(dv[off_aud()..off_aud() + audit.size()]) {
+                region ap {
+                    let apath = alloc_slice[ap](2112, byte_of(0));
+                    let al = store.path_join(apath, dir, "audit.log");
+                    let have = store.size_of(evlog.lend(lg), apath[0..al]);
+                    if have > 0 {
+                        dv[off_aud() + 3] = have;
+                    }
+                }
+            }
             let dnb = box_slice(heap, dbname.buf_size(), byte_of(0));
             dbname.init(dv[off_dbn()..off_dbn() + dbname.size()], dbhost, ns, ns_port);
             let tickets = box_slice(heap, most_held(), 0);
@@ -3577,6 +3614,10 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                             buffer.clear(ob);
                         }
                         var keep = 1;
+                        var ascope = 0;
+                        var amlen = 0;
+                        var aplen = 0;
+                        var aflen = 0;
                         borrow srv as &sr in {
                             borrow mut params as &!pw in {
                                 borrow mut scratch as &!cw in {
@@ -3589,6 +3630,28 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                             }
                             if !http.keeps_alive(server.parsed(sr)) {
                                 keep = 0;
+                            }
+                            // What the audit line needs of the request, while it is there: who (the token presented), the method, the path and X-Forwarded-For.
+                            if audit.on(dv[off_aud()..off_aud() + audit.size()]) {
+                                borrow mut astash as &!asw in {
+                                    buffer.clear(asw);
+                                }
+                                ascope = authz.presented(server.head(sr), server.parsed(sr), dv[off_token()..off_token() + authz.tokens_size()]);
+                                let am = http.method(server.head(sr), server.parsed(sr));
+                                let apth = http.path(server.head(sr), server.parsed(sr));
+                                amlen = len(am);
+                                aplen = len(apth);
+                                astash = buffer.append(heap, astash, am);
+                                astash = buffer.append(heap, astash, apth);
+                                let fh = http.find_header(server.head(sr), server.parsed(sr), "x-forwarded-for");
+                                aflen = 0;
+                                if fh >= 0 {
+                                    let fv = http.header_value(server.head(sr), server.parsed(sr), fh);
+                                    if len(fv) <= 256 {
+                                        aflen = len(fv);
+                                        astash = buffer.append(heap, astash, fv);
+                                    }
+                                }
                             }
                         }
                         var accepted = 0 - 1;
@@ -3769,6 +3832,27 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 }
                             }
                         }
+                        // The audit line (section 47.1): the answer's status, or 0 for a request held for the database (its outcome is written when it is answered).
+                        if audit.on(dv[off_aud()..off_aud() + audit.size()]) {
+                            var astatus = 0;
+                            var aroute = 0;
+                            borrow out as &ob in {
+                                astatus = audit.status_of(buffer.bytes(ob));
+                            }
+                            borrow note as &nr in {
+                                aroute = contents(nr)[2];
+                                if contents(nr)[0] >= 0 && aroute == 2 {
+                                    // an event taken: its acknowledgement waits for the flush, and an ingest that was taken is not written
+                                    astatus = 202;
+                                }
+                            }
+                            if audit.wanted(aroute, astatus) {
+                                borrow astash as &asr in {
+                                    let ab = buffer.bytes(asr);
+                                    alines = audit.request(heap, alines, dv[off_aud()..off_aud() + audit.size()], clock_unix_ms(clock), ascope, ab[0..amlen], ab[amlen..amlen + aplen], ab[amlen + aplen..amlen + aplen + aflen], astatus, slot);
+                                }
+                            }
+                        }
                     }
                 }
                 if held > 0 {
@@ -3809,6 +3893,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                         }
                         borrow mut srv as &!sw in {
                             borrow resp as &ab in {
+                                alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), ticket, buffer.bytes(ab));
                                 server.answer(sw, ticket, buffer.bytes(ab));
                             }
                         }
@@ -3985,6 +4070,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                         }
                                     }
                                     borrow created as &cb in {
+                                        alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
                                         server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
                                     }
                                     buffer.drop(heap, created);
@@ -4000,6 +4086,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     if slots >= 0 {
                                         let reply = schedule_answer(heap, sched.slot_kind(sg, slots), sched.slot_target(sg, slots), pool.reply(qw), pool.status(qw), sched.slot_keep(sg, slots), clock_unix_ms(clock) / 1000, sg[sched.seconds_at()] == 1);
                                         borrow reply as &rb in {
+                                            alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), sched.slot_ticket(sg, slots), buffer.bytes(rb));
                                             server.answer(sw, sched.slot_ticket(sg, slots), buffer.bytes(rb));
                                         }
                                         buffer.drop(heap, reply);
@@ -4031,6 +4118,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                         }
                                         let reply = view.attempts_reply(heap, pool.reply(qw), pool.status(qw), keep_it);
                                         borrow reply as &rb in {
+                                            alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), ticket, buffer.bytes(rb));
                                             server.answer(sw, ticket, buffer.bytes(rb));
                                         }
                                         buffer.drop(heap, reply);
@@ -4057,6 +4145,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 if due {
                                     let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time", keep_it);
                                     borrow late as &lb in {
+                                        alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), ticket, buffer.bytes(lb));
                                         server.answer(sw, ticket, buffer.bytes(lb));
                                     }
                                     buffer.drop(heap, late);
@@ -4071,6 +4160,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 // process believes.
                                 let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the change may still have been stored", dv[off_mg() + manage.mg_keep()] == 1);
                                 borrow late as &lb in {
+                                    alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), dv[off_mg() + manage.mg_ticket()], buffer.bytes(lb));
                                     server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(lb));
                                 }
                                 buffer.drop(heap, late);
@@ -4081,6 +4171,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                             while stale >= 0 {
                                 let late = server.failure(heap, buffer.empty(heap, 256), 504, "the database did not answer in time; the change may still have been stored", sched.slot_keep(sg, stale));
                                 borrow late as &lb in {
+                                    alines = audit_answer(heap, alines, dv, clock_unix_ms(clock), sched.slot_ticket(sg, stale), buffer.bytes(lb));
                                     server.answer(sw, sched.slot_ticket(sg, stale), buffer.bytes(lb));
                                 }
                                 buffer.drop(heap, late);
@@ -4129,6 +4220,10 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                             pool.flush(qw, server.poller(sw));
                         }
                     }
+                }
+                // The audit log's lines of the turn, appended and synced once (section 47.1).
+                borrow mut alines as &!alw in {
+                    audit.flush(evlog.lend(lg), dir, alw, dv[off_aud()..off_aud() + audit.size()]);
                 }
                 // The end of the turn: a flush that made a log's new records durable is a group commit (`/metrics` counts them); and if the service
                 // was asked to stop, the loop ends when nothing is on the wire and the history has been handed to the database, or when the
@@ -4188,6 +4283,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             pool.close(heap, pl);
             conns.drop(heap, atab);
             conns.drop(heap, dtab);
+            buffer.drop(heap, alines);
+            buffer.drop(heap, astash);
             unbox_slice(heap, dnb);
             borrow mut at as &!aw1 in {
                 attempt.close_tls(ssl, contents(aw1));
@@ -5401,6 +5498,7 @@ fn main(world: World) -> [] int {
                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
                                                             history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
                                                             history.set_prune_days(contents(dvw)[off_hq()..off_hq() + history.size()], config.history_days(cfg));
+                                                            audit.init(contents(dvw)[off_aud()..off_aud() + audit.size()], config.audit_log(cfg), config.audit_log_bytes(cfg), config.audit_log_files(cfg), 0);
                                                             let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);
                                                             let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
                                                             borrow mut dl as &!dw1 in {
@@ -5451,6 +5549,7 @@ fn main(world: World) -> [] int {
                                                                         var hpool = pool.empty(h, 1, 1, 4096, 4096);
                                                                         history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
                                                                         history.set_prune_days(contents(dvw)[off_hq()..off_hq() + history.size()], config.history_days(cfg));
+                                                                        audit.init(contents(dvw)[off_aud()..off_aud() + audit.size()], config.audit_log(cfg), config.audit_log_bytes(cfg), config.audit_log_files(cfg), 0);
                                                                         if config.pg_host_len(cfg) > 0 {
                                                                             pool.close(h, hpool);
                                                                             let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);

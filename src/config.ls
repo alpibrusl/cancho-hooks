@@ -62,7 +62,8 @@ import destination;
 //     cfg[23] pg-backoff-min-ms (100 until set)   cfg[24] pg-backoff-max-ms (5000)   cfg[25] pg-attempt-ms (5000)   cfg[26] pg-request-ms (10000)   cfg[27] pg-start-wait-ms (30000)
 //     cfg[28] retry-jitter (0 to 50; 10 until set)   cfg[29] endpoint-concurrency (1 to 8; 8 until set)   cfg[30] endpoint-rate (0 to 100000)
 //     cfg[31] dns-server address (packed, 0 until set)   cfg[32] its port (53 until set)   cfg[33] tls-ca-file length   cfg[34] tls-resume (0 or 1; 1 until set)
-//     cfg[35] history-days (0 to 36500; 30 until set)
+//     cfg[35] history-days (0 to 36500; 30 until set)   cfg[36] audit-log (0 or 1; 1 until set)   cfg[37] audit-log-bytes (65536 to 2^40; 67108864)
+//     cfg[38] audit-log-files (1 to 100; 8)
 //     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
@@ -223,6 +224,18 @@ pub fn rotation_grace_ms[&c](cfg: &c [int]) -> [] int {
 }
 
 // Retention (`docs/retention.md` section 3).
+pub fn audit_log[&c](cfg: &c [int]) -> [] bool {
+    return cfg[36] == 1;
+}
+
+pub fn audit_log_bytes[&c](cfg: &c [int]) -> [] int {
+    return cfg[37];
+}
+
+pub fn audit_log_files[&c](cfg: &c [int]) -> [] int {
+    return cfg[38];
+}
+
 pub fn history_days[&c](cfg: &c [int]) -> [] int {
     return cfg[35];
 }
@@ -334,6 +347,9 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[32] = 53;
     cfg[34] = 1;
     cfg[35] = 30;
+    cfg[36] = 1;
+    cfg[37] = 67108864;
+    cfg[38] = 8;
     cfg[40] = 30;
     cfg[41] = 67108864;
     cfg[42] = 33554432;
@@ -371,6 +387,10 @@ pub fn production_status[&c, &b](cfg: &c [int], blob: &b [byte]) -> [] int {
     if cfg[20] > 0 && (same(blob, token_at(), cfg[12], read_token_at(), cfg[20]) || same(blob, ingest_token_at(), cfg[19], read_token_at(), cfg[20])) {
         return 34;
     }
+    // the audit log (`docs/design.md` section 47.1): who read and changed what is part of running it on the internet
+    if cfg[36] == 0 {
+        return 36;
+    }
     return 0;
 }
 
@@ -402,6 +422,9 @@ pub fn unsafe_message(status: int) -> [] &static [byte] {
     }
     if status == 34 {
         return "admin-token, ingest-token and read-token must be three different tokens (a token that is the same as the admin token gives its holder the admin scope)";
+    }
+    if status == 36 {
+        return "audit-log is 0 (who read and changed what would not be written down); set it to 1";
     }
     if status == 33 {
         return "can be read or written by its group or by others; the data directory must be 0700 and its files 0600 (start the service with umask 077)";
@@ -692,6 +715,28 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[34] = 0;
         } else {
             why = why_value();
+        }
+    } else if bytes.equal(key, "audit-log") {
+        if bytes.equal(value, "1") {
+            cfg[36] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[36] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "audit-log-bytes") {
+        let n = number(value);
+        if n < 65536 || n > 1099511627776 {
+            why = why_value();
+        } else {
+            cfg[37] = n;
+        }
+    } else if bytes.equal(key, "audit-log-files") {
+        let n = number(value);
+        if n < 1 || n > 100 {
+            why = why_value();
+        } else {
+            cfg[38] = n;
         }
     } else if bytes.equal(key, "history-days") {
         let n = number(value);
