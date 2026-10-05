@@ -259,6 +259,10 @@ jobs:
           HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/metrics_test.py build/hooks
           HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ready_test.py build/hooks
 
+      - name: "A full data directory does not make the service send the same events again (no event more than twice while full, every acknowledged one after a restart)"
+        working-directory: hooks
+        run: python3 tests/fulldisk_test.py build/hooks
+
       - name: Why an attempt failed (a receiver for each reason; in /attempts, /metrics, the history table and the delivery log)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/reason_test.py build/hooks

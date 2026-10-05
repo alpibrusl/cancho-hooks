@@ -2942,6 +2942,12 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
         // Asked to stop (`docs/design.md` section 34.4): what is on the wire finishes, and nothing new starts.
         return (atab, 0);
     }
+    if log.broken(done) {
+        // The outcomes log took a write that failed (a full disk): only a restart clears that (`/readyz` says `delivery_log`). An attempt started now could not
+        // be recorded, so it would count for nothing and be due again at once: the same events sent as fast as the receivers answer (`docs/soak.md`, finding 2).
+        // What is on the wire finishes; nothing new starts, and the restart sends again what was not recorded, once.
+        return (atab, 0);
+    }
     let count = dv[c_endpoints()];
     var table = atab;
     // The service has `attempt.slots()` connections in all, and `attempt.begin` answers "no connection" for a start beyond them, which
