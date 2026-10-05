@@ -26,6 +26,8 @@ create table if not exists attempts (
 
 -- Asking "what happened to event 41" is the question this table is for.
 create index if not exists attempts_event on attempts (event);
+-- The rows older than `history-days` are deleted in batches by the service (docs/design.md section 43): by the time of the attempt.
+create index if not exists attempts_at on attempts (at_ms);
 
 -- A table made before endpoint ids could be above 32767 has the column as a smallint: widen it (a no-op on a new one).
 alter table attempts alter column endpoint type bigint;

@@ -29,6 +29,7 @@ import destination;
 //     stop-deadline-ms  how long attempts on the wire may take to finish after SIGTERM or SIGINT   default 5000 (section 34.4)
 //     repair-logs  `1`: cut a log that has damage in the middle at the damage instead of refusing to start; the cut is reported   default 0 (section 34.5)
 //     rotation-grace-ms  how long the previous secret is still signed with after `PATCH ... {"keep_old": true}` (1 to 2592000000)   default 86400000, a day (section 35)
+//     history-days  delete the rows of the attempts table older than this, in batches; 0 keeps them for ever   default 30 (`docs/design.md` section 43)
 //     retention-days  drop events that are final everywhere and older than this; 0 keeps them for ever   default 30 (`docs/retention.md`)
 //     segment-bytes  seal the active events segment at this size   default 67108864
 //     delivery-log-bytes  replace the outcomes log by a snapshot at this size   default 33554432
@@ -61,6 +62,7 @@ import destination;
 //     cfg[23] pg-backoff-min-ms (100 until set)   cfg[24] pg-backoff-max-ms (5000)   cfg[25] pg-attempt-ms (5000)   cfg[26] pg-request-ms (10000)   cfg[27] pg-start-wait-ms (30000)
 //     cfg[28] retry-jitter (0 to 50; 10 until set)   cfg[29] endpoint-concurrency (1 to 8; 8 until set)   cfg[30] endpoint-rate (0 to 100000)
 //     cfg[31] dns-server address (packed, 0 until set)   cfg[32] its port (53 until set)   cfg[33] tls-ca-file length   cfg[34] tls-resume (0 or 1; 1 until set)
+//     cfg[35] history-days (0 to 36500; 30 until set)
 //     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
@@ -221,6 +223,10 @@ pub fn rotation_grace_ms[&c](cfg: &c [int]) -> [] int {
 }
 
 // Retention (`docs/retention.md` section 3).
+pub fn history_days[&c](cfg: &c [int]) -> [] int {
+    return cfg[35];
+}
+
 pub fn retention_days[&c](cfg: &c [int]) -> [] int {
     return cfg[40];
 }
@@ -327,6 +333,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[22] = 86400000;
     cfg[32] = 53;
     cfg[34] = 1;
+    cfg[35] = 30;
     cfg[40] = 30;
     cfg[41] = 67108864;
     cfg[42] = 33554432;
@@ -685,6 +692,13 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[34] = 0;
         } else {
             why = why_value();
+        }
+    } else if bytes.equal(key, "history-days") {
+        let n = number(value);
+        if n < 0 || n > 36500 {
+            why = why_value();
+        } else {
+            cfg[35] = n;
         }
     } else if bytes.equal(key, "retention-days") {
         let n = number(value);

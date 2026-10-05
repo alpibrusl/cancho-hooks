@@ -183,7 +183,7 @@ Everything above was built without changing `lexsys-log`: its record and recover
 
 * The snapshot is not sliced; its stall is measured and stated.
 * One service per directory: no lock stops a second service from starting on the same files (as before). `compact.lock` protects against a backup, not against a second service.
-* `attempts` (PostgreSQL) is not pruned.
+* `attempts` (PostgreSQL) is pruned by the service on its own setting, `history-days` (docs/design.md section 43), not by retention: a row says what happened to an attempt, and may be wanted longer or shorter than the event.
 * The sparse index and the scan are not parallel; the start is single threaded.
 * `GET /events/:id` of a dropped event is a `404`; there is no tombstone that says "dropped" as opposed to "never existed" (the message says either).
 
