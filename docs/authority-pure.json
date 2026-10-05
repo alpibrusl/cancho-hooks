@@ -1,0 +1,117 @@
+{
+  "bounded": false,
+  "unbounded_by": [
+    "libc:prctl",
+    "libc:statx"
+  ],
+  "effects": [
+    "args",
+    "clock",
+    "conn_accept",
+    "conn_read",
+    "conn_write",
+    "err_write",
+    "ffi",
+    "file_read",
+    "file_write",
+    "fs_read",
+    "fs_write",
+    "heap",
+    "net_in",
+    "net_out",
+    "poll",
+    "signals",
+    "signals_read"
+  ],
+  "labels": [
+    {
+      "name": "args",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "clock",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "conn_accept",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "conn_read",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "conn_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "err_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "ffi",
+      "argument": "libc",
+      "bounded": false
+    },
+    {
+      "name": "file_read",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "file_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "fs_read",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "fs_write",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "heap",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "net_in",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "net_out",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "poll",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "signals",
+      "argument": "INT,TERM",
+      "bounded": true
+    },
+    {
+      "name": "signals_read",
+      "argument": null,
+      "bounded": true
+    }
+  ],
+  "foreign_symbols": [
+    "prctl",
+    "statx"
+  ]
+}

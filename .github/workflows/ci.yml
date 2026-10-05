@@ -294,3 +294,72 @@ jobs:
           name: hooks-linux-x86_64-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
+
+  # The service with lex-sys's own TLS in place of OpenSSL (docs/pure-tls.md, lex-sys#210). It is a project of its own, `pure/`, which pins a newer compiler than the
+  # default one, so this job builds both compilers; it builds both services and compares what the `https` tests find on each.
+  pure-tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hooks
+
+      - name: Read the two compiler pins
+        id: pin
+        run: |
+          echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+          echo "pure=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/pure/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.pin.outputs.rev }}
+          path: lex-sys
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.pin.outputs.pure }}
+          path: lex-sys-pure
+
+      - name: Cache the compilers
+        id: compilers
+        uses: actions/cache@v4
+        with:
+          path: |
+            lex-sys/target/release/lex-sys
+            lex-sys-pure/target/release/lex-sys
+          key: lex-sys-${{ steps.pin.outputs.rev }}-${{ steps.pin.outputs.pure }}
+
+      - name: Build the compilers
+        if: steps.compilers.outputs.cache-hit != 'true'
+        run: |
+          (cd lex-sys && cargo build --release -p lex-sys)
+          (cd lex-sys-pure && cargo build --release -p lex-sys)
+
+      - name: OpenSSL (for the default service, and for the tests' certificates), and the reference library for Standard Webhooks
+        run: |
+          dpkg -s libssl-dev >/dev/null 2>&1 || (sudo apt-get update -q && sudo apt-get install -y -q libssl-dev openssl)
+          pip install standardwebhooks
+
+      - name: Build the default service, and the pure one
+        working-directory: hooks
+        run: |
+          LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
+          LEX_SYS_PURE=../lex-sys-pure/target/release/lex-sys scripts/build.sh --pure
+
+      - name: The pure service links no TLS library
+        working-directory: hooks
+        run: "! ldd pure/build/hooks-pure | grep -Ei 'ssl|crypto'"
+
+      - name: Formatting of the pure build's own source
+        working-directory: hooks
+        run: ../lex-sys-pure/target/release/lex-sys fmt --check pure/src
+
+      - name: The pure service's authority report is the committed one (no libssl, no libcrypto)
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys-pure/target/release/lex-sys scripts/check-authority.sh --pure
+
+      - name: The https tests on both services, the outcomes compared
+        working-directory: hooks
+        run: python3 scripts/https_both.py

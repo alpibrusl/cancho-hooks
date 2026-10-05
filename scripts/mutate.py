@@ -2,6 +2,7 @@
 """Mutation testing on a COPY of the tree (docs/design.md section 40.10): the work tree is never touched.
 
     LEX_SYS=/path/to/lex-sys HOOKS_PG=host:port:user:database python3 scripts/mutate.py tests/mutants/https.py [id ...]
+    PURE=1 LEX_SYS=/path/to/lex-sys python3 scripts/mutate.py tests/mutants/pure.py [id ...]     # the build with lex-sys's own TLS: `scripts/build.sh --pure`, tested as pure/build/hooks-pure
 
 The tree (without .git) is copied to a temporary directory and built there. For each mutant of the file named (a list `MUTANTS` of `(id, file, old, new, [test sets])`): the text `old`, which
 must occur exactly once in `file`, is replaced by `new`; the service is built; the test sets are run in order until one fails (the mutant is killed) or all pass (it survives); the file
@@ -31,13 +32,19 @@ for name in os.listdir(here):
     if name != ".git":
         (shutil.copytree if os.path.isdir(os.path.join(here, name)) else shutil.copy2)(os.path.join(here, name), os.path.join(copy, name))
 env = dict(os.environ, LEX_SYS=lex)
+PURE = os.environ.get("PURE") == "1"
+BUILD = ["scripts/build.sh", "--pure"] if PURE else ["scripts/build.sh"]
+BIN = "pure/build/hooks-pure" if PURE else "build/hooks"
 TESTS = {"unit": [lex, "test"]}
-for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation"):
-    TESTS[name] = ["python3", f"tests/{'https_api' if name == 'api' else name}_test.py", "build/hooks"]
+for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation", "pure"):
+    TESTS[name] = ["python3", f"tests/{'https_api' if name == 'api' else name}_test.py", BIN]
+if PURE:
+    # `tests/https_test.py` always fails on the pure build (the check that SSL_CERT_FILE is honoured, which it is not), so a failure of it is no sign of a mutant killed.
+    TESTS["https"] = ["python3", "scripts/https_both.py", "--check-pure", BIN]
 # the stages of tests/many_test.py (design section 41): "many:flags" runs only that stage, "many" all of them
-TESTS["many"] = ["python3", "tests/many_test.py", "build/hooks"]
+TESTS["many"] = ["python3", "tests/many_test.py", BIN]
 for stage in ("limit", "chaos", "flags", "replay", "quiet", "retention", "compactnow", "pool", "formats"):
-    TESTS[f"many:{stage}"] = ["env", f"STAGES={stage}", "python3", "tests/many_test.py", "build/hooks"]
+    TESTS[f"many:{stage}"] = ["env", f"STAGES={stage}", "python3", "tests/many_test.py", BIN]
 
 
 def run(cmd, timeout=900):
@@ -48,7 +55,7 @@ def run(cmd, timeout=900):
         return 124, "timeout"
 
 
-rc, out = run(["scripts/build.sh"], 600)
+rc, out = run(BUILD, 600)
 if rc != 0:
     sys.exit("the unmutated tree does not build:\n" + out[-2000:])
 results = []
@@ -68,7 +75,7 @@ for mid, path, old, new, tests in MUTANTS:
     t0 = time.time()
     detail = []
     try:
-        rc, out = run(["scripts/build.sh"], 600)
+        rc, out = run(BUILD, 600)
         if rc != 0:
             status, detail = "does not compile", out.strip().splitlines()[-2:]
         else:

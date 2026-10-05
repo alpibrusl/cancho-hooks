@@ -1,0 +1,38 @@
+# The service with lex-sys's own TLS in place of OpenSSL (docs/pure-tls.md). It is a project of its own, because a project's libraries are built into every
+# program of it: lex-sys's `tls` package and this service's OpenSSL module are both called `tls`, and the pure build needs a newer compiler than the default one
+# (`std.gcm`, `std.ecdh` and the packages are newer than the pin of the default project). `scripts/make_pure.py` writes `build/src`; `scripts/build.sh` runs it.
+
+[package]
+name = "hooks-pure"
+lex-sys = "7c1bd084af0512ea5593dcee72beafe034a18b6e"
+
+[dependencies.log]
+git = "https://github.com/alpibrusl/lexsys-log"
+rev = "6b4f46fd045f9e6c1a3f4bda22ee9d850daf63d1"
+path = ".lex-sys-vcs/log"
+
+[dependencies.server]
+git = "https://github.com/alpibrusl/lex-sys"
+rev = "f804ce7e6fcf5717ea52442bf648a1fe81090f98"
+path = "packages/http-server/.lex-sys-vcs"
+
+[dependencies.pg]
+git = "https://github.com/alpibrusl/lexsys-pg"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
+path = ".lex-sys-vcs"
+
+[dependencies.pool]
+git = "https://github.com/alpibrusl/lexsys-pg"
+rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
+path = ".lex-sys-vcs-pool"
+
+# lex-sys's own TLS client and the certificate verifier it needs (lex-sys epic #197).
+[dependencies.tls]
+git = "https://github.com/alpibrusl/lex-sys"
+rev = "7c1bd084af0512ea5593dcee72beafe034a18b6e"
+path = "packages/tls/.lex-sys-vcs/tls"
+
+[[bin]]
+name = "hooks-pure"
+sources = ["build/src"]
+std = true

@@ -2,6 +2,7 @@
 """What a delivery costs the service in CPU, by kind (docs/design.md section 40).
 
     python3 scripts/bench/https_cost.py [deliveries]         # default 600 per row; HOOKS_BIN=path/to/hooks to name the binary; REPS=5 rows are repeated; KINDS='http, address' only those rows
+    EVENT_BYTES=50000 python3 scripts/bench/https_cost.py    # each event carries that many bytes more: the difference from a row without is the cost of the records (docs/pure-tls.md)
     PIN=1 python3 scripts/bench/https_cost.py                # the service on core 3 (taskset), the receivers and this script on cores 1 and 2: as the lex-sys spike measured
 
 Each row starts a service with E endpoints, posts events until there have been `deliveries` deliveries, and reads the service's own CPU time (user + system, from /proc) before and
@@ -32,6 +33,8 @@ import tlskit as K  # noqa: E402
 
 BIN = os.environ.get("HOOKS_BIN") or os.path.join(ROOT, "build", "hooks")
 DELIVERIES = int(_args[0]) if _args else 600
+EVENT_BYTES = int(os.environ.get("EVENT_BYTES", "0"))
+PAD = {"pad": "x" * EVENT_BYTES} if EVENT_BYTES else None
 REPS = int(os.environ.get("REPS", "3"))
 if os.environ.get("PIN") == "1":
     # The service gets core 3 to itself (a wrapper that execs it under taskset); this process, and the receivers' threads in it, cores 1 and 2.
@@ -69,14 +72,14 @@ def row(kind, endpoints, pki, cert):
     svc.start()
     events = DELIVERIES // endpoints
     # warm up: one event per endpoint (the first delivery of an endpoint is a full handshake even where sessions are kept), then count
-    svc.post_event(0)
+    svc.post_event(0, extra=PAD)
     L.wait_for(lambda: svc.stats()["delivered"] >= endpoints, 30)
     time.sleep(0.2)
     before = cpu_seconds(svc.proc.pid)
     handshakes0 = (srv.handshakes, srv.resumed) if tls else (0, 0)
     t0 = time.time()
     for n in range(1, events + 1):
-        svc.post_event(n)
+        svc.post_event(n, extra=PAD)
     ok = L.wait_for(lambda: svc.stats()["delivered"] >= endpoints * (events + 1), 120)
     wall = time.time() - t0
     time.sleep(0.2)
@@ -98,7 +101,7 @@ def main():
         if line.startswith("model name"):
             cpu_model = line.split(":", 1)[1].strip()
             break
-    print(f"{cpu_model}, {os.cpu_count()} cores{', service pinned to core 3' if os.environ.get('PIN') == '1' else ''}; {DELIVERIES} deliveries a row, {REPS} runs; binary {os.environ.get('HOOKS_BIN') or 'build/hooks'}")
+    print(f"{cpu_model}, {os.cpu_count()} cores{', service pinned to core 3' if os.environ.get('PIN') == '1' else ''}; {DELIVERIES} deliveries a row, {REPS} runs, {EVENT_BYTES} bytes of padding an event; binary {os.environ.get('HOOKS_BIN') or 'build/hooks'}")
     pki = K.Pki()
     cert = pki.leaf("hooks.test")
     print(f"{'kind':16} {'endpoints':>9} {'deliveries':>10} {'CPU per delivery, median (least to most)':>42} {'wall':>8}  handshakes (resumed)")

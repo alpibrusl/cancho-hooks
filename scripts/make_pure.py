@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Make the sources of the `hooks-pure` build: the service with lex-sys's own TLS in place of OpenSSL (docs/pure-tls.md).
+
+    python3 scripts/make_pure.py [<out-dir>]       (default pure/build/src)
+
+`lex-sys` has no function values and no effect polymorphism (lex-sys `docs/effect-polymorphism.md`), so the 11 functions that carry an `Ffi("libssl")` row
+cannot be written once for both backends. This script writes the other one. It copies every file of `src/` except `src/tls.ls` (the OpenSSL module) into
+<out-dir>, with the changes listed in `PATCHES`, and adds `pure/tlsx.ls` (the module that takes its place). The result is not committed, so there is no copy
+to drift from `src/`.
+
+**Every change is an exact-match replacement with the number of matches it must make**, and the script fails, saying which, if the source no longer has
+exactly that many: a change to the shape of these functions in `src/` cannot be half applied. Line numbers are kept (a change adds no line and removes none),
+so a compiler error in the output is at the line of `src/` that caused it.
+
+What the changes do, in short:
+- the `Ffi("libcrypto,libssl")` or `Ffi("libssl")` of a function becomes the engine (`tls.Engine`, `lex-sys`'s `packages/tls`) in the same place, and the two
+  `ffi(...)` entries leave every row. `attempt.advance` also takes the time (the certificates' dates) and `main` opens the engine once, seeds it and loads the
+  trust store (`tlsx.setup`), and closes it at the end;
+- every `tls.` of `attempt.ls` and `hooks.ls` (the OpenSSL module) is `tlsx.` (the adapter);
+- `main` holds the `libc` scope only: libssl and libcrypto are gone.
+"""
+import os
+import re
+import shutil
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class Mismatch(Exception):
+    pass
+
+
+def exact(text, old, new, count, what):
+    n = text.count(old)
+    if n != count:
+        raise Mismatch(f"{what}: expected {count} occurrence(s) of\n    {old!r}\nfound {n}")
+    return text.replace(old, new)
+
+
+def regex(text, pattern, new, count, what):
+    found = len(re.findall(pattern, text, re.M))
+    if found != count:
+        raise Mismatch(f"{what}: expected {count} match(es) of /{pattern}/, found {found}")
+    return re.sub(pattern, new, text, flags=re.M)
+
+
+def rows_and_types(text, name, sole, tail, lead, typed_both, typed_ssl):
+    """The `ffi(...)` entries of every row and the `Ffi(...)` types of the parameters of the TLS functions."""
+    text = regex(text, r'\[ffi\("(?:libcrypto|libssl)"\)\]', "[]", sole, f"{name}: a row that was only ffi")
+    text = regex(text, r'ffi\("(?:libcrypto|libssl)"\), ', "", lead, f"{name}: ffi entries followed by others")
+    text = regex(text, r', ffi\("(?:libcrypto|libssl)"\)', "", tail, f"{name}: ffi entries at the end of a row")
+    text = exact(text, 'ffi: &f Ffi("libcrypto,libssl")', "engine: &!f tls.Engine", typed_both, f"{name}: both-library parameters")
+    text = exact(text, 'ffi: &f Ffi("libssl")', "engine: &!f tls.Engine", typed_ssl, f"{name}: libssl parameters")
+    return text
+
+
+def attempt(text):
+    # The module that was `tls` is `tlsx`; `tls` is lex-sys's package, named only for `tls.Engine`.
+    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 28, "attempt.ls: calls of the TLS module")
+    text = exact(text, "import tls;\n", "import tls; import tlsx;\n", 1, "attempt.ls: imports") if "import tls;\n" in text else \
+        exact(text, "import std.conns;\n", "import std.conns;\nimport tls; import tlsx;\n", 1, "attempt.ls: imports")
+    # `advance` takes the time for the certificates' dates (`tlsx.open`), the other functions only the engine.
+    text = exact(text, 'pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab:',
+                 "pub fn advance[&f, &t, &p, &a, &r, &s](engine: &!f tls.Engine, now_ms: int, tab:", 1, "attempt.ls: advance")
+    text = exact(text, "tlsx.open(ffi, at[env_at() + e_ctx()], at, tb, ", "tlsx.open(engine, slot, now_ms, at, tb, ", 1, "attempt.ls: open")
+    text = exact(text, ", session) != 0 {", ") != 0 {", 1, "attempt.ls: open's session argument")
+    text = exact(text, "tlsx.drop(ffi, at, slot * stride() + f_tls());", "tlsx.drop(engine, slot, at, slot * stride() + f_tls());", 1, "attempt.ls: drop")
+    # The OpenSSL context is not there; the engine is closed by `main`.
+    text = exact(text, "    tlsx.free_context(ffi, at[env_at() + e_ctx()]);\n", "    // (no context to free: `main` closes the engine)\n", 1, "attempt.ls: free_context")
+    text = rows_and_types(text, "attempt.ls", sole=4, tail=0, lead=2, typed_both=0, typed_ssl=4)
+    text = regex(text, r"\bffi\b", "engine", 9, "attempt.ls: the remaining `ffi` arguments")
+    return text
+
+
+def hooks(text):
+    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 6, "hooks.ls: calls of the TLS module")
+    text = exact(text, "import tls;\n", "import tls; import tlsx;\n", 1, "hooks.ls: imports")
+    text = start_tls(text)
+    # The TLS functions of the delivery loop.
+    text = exact(text, "attempt.advance(ffi, atab, poller,", "attempt.advance(engine, clock_unix_ms(clock), atab, poller,", 1, "hooks.ls: advance")
+    text = regex(text, r"\b(attempt\.finish|conclude|settle|sweep)\(ffi,", r"\1(engine,", 6, "hooks.ls: calls in the delivery loop")
+    text = exact(text, 'ssl: &c Ffi("libcrypto,libssl")', "ssl: &!c tls.Engine", 1, "hooks.ls: run's parameter")
+    text = regex(text, r'\[ffi\("(?:libcrypto|libssl)"\)\]', "[]", 0, "hooks.ls: a row that was only ffi")
+    text = regex(text, r'ffi\("(?:libcrypto|libssl)"\), ', "", 8, "hooks.ls: ffi entries followed by others")
+    text = regex(text, r', ffi\("(?:libcrypto|libssl)"\)', "", 0, "hooks.ls: ffi entries at the end of a row")
+    text = exact(text, 'ffi: &f Ffi("libcrypto,libssl")', "engine: &!f tls.Engine", 2, "hooks.ls: both-library parameters")
+    text = exact(text, 'ffi: &f Ffi("libssl")', "engine: &!f tls.Engine", 2, "hooks.ls: libssl parameters")
+    # `main`: the scope, the engine, the trust store.
+    text = exact(text, 'narrow(ffi, "libc,libcrypto,libssl")', 'narrow(ffi, "libc")', 1, "hooks.ls: the scope")
+    text = exact(text, "borrow mut heap as &!h in {\n", "borrow mut heap as &!h in { var engine = tls.open(h, attempt.slots());\n", 1, "hooks.ls: the engine is opened")
+    text = close_engine(text)
+    text = regex(text, r"borrow libc as &lt in \{\n(\s*)tls_ctx = start_tls\(lt, (.*)\n(\s*)\}",
+                 r"borrow mut engine as &!en in {\n\1tls_ctx = tlsx.setup(en, h, evlog.lend(lw), \2\n\3}", 1, "hooks.ls: the trust store")
+    text = exact(text, "borrow libc as &lb in {\n", "borrow mut engine as &!lb in {\n", 1, "hooks.ls: the engine is lent to run")
+    text = regex(text, r"borrow libc as &lt in \{\n\s*tlsx\.free_context\(lt, tls_ctx\);\n\s*\}\n",
+                 "// (the engine is closed at the end of its block)\n\n\n", 1, "hooks.ls: the context of a failed listen")
+    return text
+
+
+def start_tls(text):
+    """`start_tls` (the OpenSSL context) is not in the pure build: its lines are blank, so the others keep their numbers."""
+    m = re.search(r"^fn start_tls\[.*?^}\n", text, re.M | re.S)
+    if not m:
+        raise Mismatch("hooks.ls: no `fn start_tls`")
+    return text[:m.start()] + "\n" * m.group(0).count("\n") + text[m.end():]
+
+
+def close_engine(text):
+    """`tls.close(h, engine)` goes on the line of the brace that ends the block `engine` is opened in."""
+    lines = text.split("\n")
+    opens = [i for i, l in enumerate(lines) if l.rstrip().endswith("borrow mut heap as &!h in { var engine = tls.open(h, attempt.slots());")]
+    if len(opens) != 1:
+        raise Mismatch("hooks.ls: the engine's block")
+    i = opens[0]
+    indent = len(lines[i]) - len(lines[i].lstrip())
+    for j in range(i + 1, len(lines)):
+        if lines[j] == " " * indent + "}":
+            lines[j] = " " * indent + "tls.close(h, engine); }"
+            return "\n".join(lines)
+    raise Mismatch("hooks.ls: the end of the engine's block")
+
+
+PATCHES = {"attempt.ls": attempt, "hooks.ls": hooks}
+
+
+def main():
+    out = os.path.join(ROOT, sys.argv[1] if len(sys.argv) > 1 else "pure/build/src")
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    src = os.path.join(ROOT, "src")
+    for name in sorted(os.listdir(src)):
+        if not name.endswith(".ls") or name == "tls.ls":
+            continue
+        text = open(os.path.join(src, name)).read()
+        if name in PATCHES:
+            try:
+                text = PATCHES[name](text)
+            except Mismatch as e:
+                raise SystemExit(f"make_pure: src/{name} is no longer what the changes expect:\n  {e}\n"
+                                 "  (scripts/make_pure.py lists each change and how many places it must find)")
+        elif re.search(r"\btls\.", text):
+            raise SystemExit(f"make_pure: src/{name} uses `tls.` and has no changes listed for it")
+        open(os.path.join(out, name), "w").write(text)
+    shutil.copy(os.path.join(ROOT, "pure", "src", "tlsx.ls"), os.path.join(out, "tlsx.ls"))
+    print(f"{out}: {len(os.listdir(out))} files")
+
+
+if __name__ == "__main__":
+    main()
