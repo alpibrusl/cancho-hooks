@@ -2094,7 +2094,7 @@ The suites that assumed the limit were changed and are marked here: `slots_test.
 
 ### 41.11 Mutants
 
-`tests/mutants/many.py` (60 mutants, `python3 scripts/mutate.py tests/mutants/many.py [ids]`: the tree is copied, each mutant built and run against the test sets it names until one fails, the file restored and compared byte for byte). MUTANTS_RESULT_PLACEHOLDER
+`tests/mutants/many.py` (60 mutants, `python3 scripts/mutate.py tests/mutants/many.py [ids]`: the tree is copied, each mutant built and run against the test sets it names until one fails, the file restored and compared byte for byte). **Run on the final code, under an emulated x86-64, after the merge (19 of the 60 when this was written):** 16 killed (Q01 to Q07, Q09, Q11 to Q14, Q16, F01 to F03; by `many:quiet`, `many:flags`, `limits`, `retry` and `delete`), Q15 not judged (the C compiler crashed under the emulation, not a verdict), and **two survive, both equivalent in behaviour**: Q08 takes away the reset of an endpoint's `wake` when a *replay's* attempt ends, and replays are started by their own loop, which `wake` does not gate (and a window pass that stopped at the endpoint's concurrency, which the end of a replay frees, has already set `wake` to 0); Q10 takes away the reset of `wake` when an endpoint is enabled, and while it was disabled its `wake` kept the earliest time any of its waiting events is due, so after the enable they are looked at when due, and a new event raises its reach whatever `wake` says. Both resets are kept: they make the skip safe without the argument. The whole list is run on CI's kind of machine by `.github/workflows/mutants.yml` (by hand, in shards); its result is recorded here when it has run.
 
 ### 41.12 Measured
 
