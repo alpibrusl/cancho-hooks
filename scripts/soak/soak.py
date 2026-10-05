@@ -1141,6 +1141,13 @@ def selftest(a):
         if name == "clean":
             ok = v["verdict"] == "PASS"
             results.append(("a clean run passes", ok, f"{v['verdict']}, failed {v['failed']}, {took:.0f} s, violations {v['violations']}"))
+            if not ok:
+                # what failed, in full, so that a log is enough to see why (a CI job keeps the run directory only as an artifact)
+                for c in v.get("checks", []):
+                    if c.get("ok") is False:
+                        print("     the clean run's " + json.dumps(c, default=str)[:1500], flush=True)
+                for tag, ex in v.get("examples", {}).items():
+                    print(f"     {tag}: " + json.dumps(ex[:3], default=str)[:600], flush=True)
         else:
             hit = [t for t in tags if v["violations"].get(t)]
             ok = v["verdict"] == "FAIL" and bool(hit)
