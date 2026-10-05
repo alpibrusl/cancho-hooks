@@ -19,6 +19,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import opslib as L  # noqa: E402
+import tlskit as K  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 TOKEN = "leakleakleak"
@@ -87,6 +88,7 @@ def main():
         for name, f, n in kinds:
             kept, bad = [], []
             for _ in range(2):
+                m0 = K.mappings_kb(proc.pid)
                 a = rss()
                 for i in range(n):
                     st_, body_ = f(i)
@@ -94,19 +96,21 @@ def main():
                         bad.append((st_, body_[:120]))
                 time.sleep(0.3)
                 kept.append((rss() - a) * 1024 / n)
+                where = K.grown(m0, K.mappings_kb(proc.pid))
             check(f"{name}: every call answered 2xx", not bad, f"{len(bad)} not: {bad[:2]}")
-            check(f"{name}: the second round of {n} keeps {kept[1]:.0f} bytes a call (the first {kept[0]:.0f}; at most {BOUND})", kept[1] <= BOUND, f"{kept}")
+            check(f"{name}: the second round of {n} keeps {kept[1]:.0f} bytes a call (the first {kept[0]:.0f}; at most {BOUND})", kept[1] <= BOUND, f"{kept}; the second round grew in {where}")
 
         # a schedule of every second: its fires, after the first minute
         s, body = call("POST", "/schedules", {"expr": "* * * * * *", "type": "leak.tick"})
         check("a schedule of every second is made", s == 201, body.decode(errors="replace"))
         assert L.wait_for(lambda: stats()["cron_fired"] >= 60, 120), f"the schedule did not fire: {stats()}"
-        a, f0 = rss(), stats()["cron_fired"]
+        a, f0, m0 = rss(), stats()["cron_fired"], K.mappings_kb(proc.pid)
         assert L.wait_for(lambda: stats()["cron_fired"] >= f0 + 120, 240), f"the schedule stopped firing: {stats()}"
         time.sleep(0.3)
         st = stats()
         per = (rss() - a) * 1024 / (st["cron_fired"] - f0)
-        check(f"a fire keeps {per:.0f} bytes (after the first 60; {st['cron_fired'] - f0} fires; at most {BOUND})", per <= BOUND and st["cron_errors"] == 0, str(st))
+        check(f"a fire keeps {per:.0f} bytes (after the first 60; {st['cron_fired'] - f0} fires; at most {BOUND})", per <= BOUND and st["cron_errors"] == 0,
+              f"grew in {K.grown(m0, K.mappings_kb(proc.pid), top=8)}; {st}")
     finally:
         proc.terminate()
         proc.wait()
