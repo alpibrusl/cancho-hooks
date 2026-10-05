@@ -519,6 +519,10 @@ class Run:
         st = json.load(open(self.path("state.json")))
         saved = json.load(open(self.path("run.json")))
         self.resumed = True
+        was = saved.get("binary_sha256")
+        if was and sha256(a.binary) != was and not a.force:
+            print(f"the service binary is not the one this run began with (SHA-256 {sha256(a.binary)[:16]}... against {was[:16]}...): a run is of one build; --force to go on anyway", file=sys.stderr)
+            raise SystemExit(2)
         self.elapsed_before = st["elapsed"]
         self.port = st["port"]
         self.next_idx = st["next_idx"]
@@ -571,7 +575,14 @@ class Run:
         self.svc.inc = st["inc"]
         self.svc.unexpected = [tuple(x) for x in st.get("unexpected", [])]
         # the old service, if it was running, was killed just now: the files are as a power cut leaves them
+        # when did the old run end? The last heartbeat is up to five seconds before it, and a service that was left running (the harness alone was killed) went on delivering until it was stopped just
+        # now: the latest write to either ledger is the best evidence of life
         t_dead = st["t"]
+        for f in (os.path.join("ledger", "recv.bin"), "acked.bin"):
+            try:
+                t_dead = max(t_dead, os.path.getmtime(self.path(f)))
+            except OSError:
+                pass
         power_cut(self.datadir, random.Random(self.seed + 5)) if self.shim else None
         for label, ep in self.eps.items():
             self.verifier.add_endpoint(ep.idx, label, ep.cls, ep.types, c0=ep.c0, params=dict(CLASSES.get(ep.cls, ([], {}))[1], **ep.params))
@@ -605,6 +616,8 @@ class Run:
         # the numbers (and so the idempotency keys) of events posted since the last heartbeat are in the poster's ledger, not in state.json: go past them
         recs, _ = common.read_records(self.path("acked.bin"), max(0, os.path.getsize(self.path("acked.bin")) - 200000 * ACK.size), ACK) if os.path.exists(self.path("acked.bin")) else ([], 0)
         self.poster_start_n = max([st["n_next"]] + [r[2] + 1 for r in recs]) + 100
+        # a request the old poster had sent when it died, and whose answer it did not write down, may be an event the service has: its number is not "an event nobody posted"
+        self.verifier.posted_n.update(range(max([r[2] for r in recs], default=0) + 1, self.poster_start_n))
 
     def notes_since_heartbeat(self, t_state):
         """What the harness did between the last write of `state.json` and the end of the previous harness is in `chaos.jsonl`: the replays it asked for (their deliveries are not repeats) and the
@@ -972,6 +985,10 @@ def finalize_args(a, p):
     if a.resume:
         saved = json.load(open(os.path.join(a.resume, "run.json")))["args"]
         keep = {"selftest", "selftest_ledger", "resume", "force", "progress_s"}
+        if a.binary:
+            keep.add("binary")      # the build may have moved: it is the same one only if its SHA-256 is (checked at the resume)
+        if a.pg:
+            keep.add("pg")          # the database may be somewhere else (HOOKS_PG is set again by whoever resumes)
         for k, v in saved.items():
             if k not in keep and not (k == "tmpfs_data" and a.tmpfs_data):
                 setattr(a, k, v)

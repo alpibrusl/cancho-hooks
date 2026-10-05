@@ -222,7 +222,7 @@ jobs:
 
       - name: The shell scripts
         working-directory: hooks
-        run: shellcheck scripts/*.sh deploy/*.sh
+        run: shellcheck scripts/*.sh scripts/soak/*.sh deploy/*.sh
 
       # The checker of the soak test (docs/soak.md) against synthetic ledgers that are mutated: every mutation must be caught under its own tag. Seconds; no service.
       - name: The soak harness's checker catches what it must
