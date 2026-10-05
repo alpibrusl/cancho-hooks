@@ -172,13 +172,28 @@ pub fn push[&s](h: &!s [int], endpoint: int, event: int, replay: int, attempt: i
     return 1;
 }
 
+// The pool the service makes for the database: its connections, and how many requests each may have in flight.
+pub fn lanes() -> [] int {
+    return 2;
+}
+
+pub fn depth() -> [] int {
+    return 64;
+}
+
+// The places in flight the inserts leave free, for what a person or the schedules wait on (a change to an endpoint, a read, a tick): the inserts of a busy
+// service would otherwise fill every place, and each change would be refused with a 503 while they last (found on a fast machine: every `PATCH` of 300 was).
+pub fn reserved() -> [] int {
+    return 16;
+}
+
 // Turn the rows in the ring into requests on `pl`, as many as it takes, at most `most` this turn. A row the pool has no room
 // for stays in the ring for the next turn, and so does every row while no connection is live (the pool is making one: section 37.3); a row
 // it cannot take at all (it is too large) is dropped, and counted. Nothing is sent until the pool's `flush`.
 pub fn drain[&h, &q, &s](heap: &!h Heap, pl: &!q pool.Pool, hs: &!s [int], most: int) -> [heap] int {
     var sent = 0;
     var going = true;
-    while going && sent < most && hs[0] > hs[1] {
+    while going && sent < most && hs[0] > hs[1] && pool.in_flight(pl) < lanes() * depth() - reserved() {
         let base = ring() + hs[1] % cap() * 9;
         let request = queries.add_attempt_start(heap, hs[base], hs[base + 1], hs[base + 2], hs[base + 3], hs[base + 4], hs[base + 5], hs[base + 6], hs[base + 7], hs[base + 8]);
         var code = 0 - 1;

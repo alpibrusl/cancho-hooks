@@ -5205,7 +5205,7 @@ fn main(world: World) -> [] int {
                                                         if config.pg_host_len(cfg) > 0 {
                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
                                                             history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
-                                                            let fresh = pool.empty(h, 2, 64, 1048576, 131072);
+                                                            let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);
                                                             let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
                                                             borrow mut dl as &!dw1 in {
                                                                 borrow net as &nn1 in {
@@ -5256,7 +5256,7 @@ fn main(world: World) -> [] int {
                                                                         history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
                                                                         if config.pg_host_len(cfg) > 0 {
                                                                             pool.close(h, hpool);
-                                                                            let fresh = pool.empty(h, 2, 64, 1048576, 131072);
+                                                                            let fresh = pool.empty(h, history.lanes(), history.depth(), 1048576, 131072);
                                                                             let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
                                                                             hpool = made;
                                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
