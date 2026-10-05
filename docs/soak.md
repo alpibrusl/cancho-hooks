@@ -343,6 +343,8 @@ The service is the build of `origin/main` at `45faec0`. None of these was fixed 
 
 The first runs of the harness failed for causes in the harness (counted wrongly, a lock kept too long, a rotation that dropped a secret too soon, endpoints left behind by a create that was not answered). They are corrected, and the criteria that changed with them are listed next.
 
+One more, found by the self-test's clean run on a slow (emulated) machine: a create answered `504` left its row in the table, the service did not know it, so the harness's `DELETE` was a `404` and the row stayed; a `kill -9` later the start loaded it at the slowest cursor, a replay to every endpoint that wants an event reached it ahead of its window, and the window sent the same events again two seconds later. The endpoint was marked as one about which nothing is judged, but the repeat check did not honour the mark (three `B_repeat`). It does now, and `--selftest-ledger` has the case. What the service does here is what `status.md` says of a change whose outcome it did not learn (the table is read once).
+
 ## Changes to the criteria
 
 Written after the shakedowns, and the reason for each:

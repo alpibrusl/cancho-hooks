@@ -81,12 +81,14 @@ def cursors_at(plan, label, now):
     return c
 
 
-def run(plan, recs=None, acks=None, kills=None, cursor_hook=None, dead_hook=None, rotations=(), away=(), final_cursors=None):
+def run(plan, recs=None, acks=None, kills=None, cursor_hook=None, dead_hook=None, rotations=(), away=(), final_cursors=None, ambiguous=()):
     """Feed the checker as the harness would: each second read the cursors, then drain the ledgers, then settle. Returns the Violations."""
     v = Violations()
     ver = Verifier(SEED, violations=v, keep_s=5.0)
     for (idx, label, cls, types_) in EPS:
         ver.add_endpoint(idx, label, cls, types_, params=dict(CLASSES[cls][1], **({"poison": 0.05} if cls == "gone" else {})), created=T0 - 1000)
+        if label in ambiguous:
+            ver.activate(label, 0, T0 - 1000, ambiguous=True)
     ver.cron_period[1] = 1
     for k in (plan["kills"] if kills is None else kills):
         ver.note_kill(k)
@@ -158,6 +160,7 @@ def mutants(plan):
     quiet = [i for i in oracle_eff if T0 + 5.5 < recs[i][0] < T0 + 7.0][3]
     out["a repeat outside any kill"] = ("B_repeat", dict(recs=dup(quiet, 0.4)))
     out["a repeat in the same instant (the receiver wrote it twice)"] = ("B_repeat", dict(recs=dup(quiet, 0.0)))
+    out["a repeat at an endpoint whose creation was not answered is not judged"] = (None, dict(recs=dup(quiet, 0.4), ambiguous=("oracle",)))
     near = [i for i in oracle_eff if T0 + 8.0 < recs[i][0] < T0 + 8.9][2]
     out["a repeat after a kill is excused"] = (None, dict(recs=dup(near, 1.2)))
     out["but not when the kill was more than 2 s after the first delivery"] = ("B_repeat", dict(recs=dup(oracle_eff[5], 0.5), kills=[T0 + 0.2 + recs[oracle_eff[5]][0] - T0 + 3.0]))
