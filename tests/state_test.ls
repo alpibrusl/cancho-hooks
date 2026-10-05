@@ -306,7 +306,9 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         // 19, a slot's cursor (section 42), reads back and changes no cell through `apply`; one past it is still not an outcome
         state.put_outcome(buf, 0, 15, state.advanced(), 2, 40, 0, 0);
         test.assert_eq(state.outcome_at(buf, 0).0, 19);
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 20);
+        state.put_outcome(buf, 0, 16, state.erased(), 0, 77, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, 20);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 21);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);

@@ -152,6 +152,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/maxage_test.py build/hooks
 
+      - name: "Erasure of one event (the body gone from the segment's bytes, never sent, replayed or served, the active segment, kill -9 at each step of the rewrite)"
+        working-directory: hooks
+        run: python3 tests/erase_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks

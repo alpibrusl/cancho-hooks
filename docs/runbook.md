@@ -92,7 +92,7 @@ The service never ends by itself once it listens, bar status 4, and bar statuses
 | 12 | `delivery.seg` could not be opened or recovered | no |
 | 13 | `endpoints.conf` or the `endpoints` table has an invalid line or row (the message names it; for the table, after `listening`) | no |
 | 14 | the retry schedule does not parse | no |
-| 15 | `delivery.seg` has records this version does not understand (this is also what a build from before 1,024 endpoints says of a log that uses a slot of 62 or above, and a build from before section 42 of a log in which an endpoint with a list of types has a stated cursor: section 5, items 6 and 7) | no |
+| 15 | `delivery.seg` has records this version does not understand (this is also what a build from before 1,024 endpoints says of a log that uses a slot of 62 or above, and a build from before section 42 of a log in which an endpoint with a list of types has a stated cursor, and a build from before section 47.3 of a log with an erasure: section 5, items 6 and 7) | no |
 | 16 | the events log has a record this version does not understand (a damaged sealed segment reads this way too), or more fresh idempotency keys than the index holds (`idem-keys`: raise it) | no |
 | 17 | a new endpoint could not be given a slot (the `created` record could not be written) | no |
 | 18 | **`delivery.seg` refers to an event `events.seg` does not hold** (an older events log beside a newer delivery log: `events.seg` ends at event M, `delivery.seg` names event N > M). Nothing was changed. Section 4.7 | no |
