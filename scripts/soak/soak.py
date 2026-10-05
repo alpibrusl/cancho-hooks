@@ -978,7 +978,7 @@ def parse(argv):
     p.add_argument("--calibrate", action="store_true", help="measure the rate the mix sustains (no chaos) and write calibration.json")
     p.add_argument("--selftest", action="store_true")
     p.add_argument("--selftest-mutants", default="lose", help="which faults the self-test injects: lose, dup, liar, all")
-    p.add_argument("--selftest-strict", action="store_true", help="the self-test waives nothing (by default it waives B_restart_repeat, the known finding of docs/soak.md section 8)")
+    p.add_argument("--selftest-waive", default="", help="violation tags the self-test's clean run does not fail on (none by default: finding 1 of docs/soak.md section 8, the one it used to waive, is mended)")
     p.add_argument("--selftest-ledger", action="store_true", help="only the offline test of the checker")
     a = p.parse_args(argv)
     return p, a
@@ -1118,7 +1118,7 @@ def selftest(a):
                    "--endpoints", str(a.endpoints), "--lenient-validity", "--sample-s", "5", "--progress-s", "30", "--drain-s", "180", "--after-stop-s", "8", "--min-incarnation-s", "600",
                    # the criteria that need a long incarnation (the growth of memory, descriptors, the 99.9th percentile of the loop) are not judged in three minutes: the quiet tail is a few samples and the p99.9 is
                    # its two or three worst, in a run in which a fault is on a third of the time. They are tested on synthetic series by --selftest-ledger and judged on the real run.
-                   "--min-tail-s", "100000", "--p999-ms", "1000"] + ([] if a.selftest_strict else ["--waive", "B_restart_repeat,J_repeat"]) + \
+                   "--min-tail-s", "100000", "--p999-ms", "1000"] + (["--waive", a.selftest_waive] if a.selftest_waive else []) + \
                   (["--no-pin"] if a.no_pin else []) + (["--shim", a.shim] if a.shim else [])
     plan = [("clean", [], None)]
     names = ["lose", "dup", "liar"] if a.selftest_mutants == "all" else [x for x in a.selftest_mutants.split(",") if x]
