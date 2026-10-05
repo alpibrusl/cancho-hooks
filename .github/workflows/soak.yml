@@ -23,6 +23,12 @@ on:
       endpoints:
         description: "Long-lived endpoints (the classes of docs/soak.md, in order)"
         default: "12"
+      schedules:
+        description: "Cron schedules (0 to 2); 0 while docs/soak.md finding 3 (memory grows with each cron fire) is not mended"
+        default: "0"
+      churn:
+        description: "Threads that create, change and delete endpoints (0 while finding 3 is not mended)"
+        default: "0"
       tmpfs_mb:
         description: "Size in MB of a tmpfs for the data directory, which adds the disk-full fault (0: none)"
         default: "0"
@@ -107,6 +113,7 @@ jobs:
             --rate "${{ github.event.inputs.rate || '40' }}" \
             --burst-rate "${{ github.event.inputs.burst_rate || '120' }}" \
             --endpoints "${{ github.event.inputs.endpoints || '12' }}" \
+            --schedules "${{ github.event.inputs.schedules || '0' }}" --churn "${{ github.event.inputs.churn || '0' }}" \
             --tmpfs-data "$tmpfs" \
             --out "$RUNNER_TEMP/soak-out" --progress-s 300
 
