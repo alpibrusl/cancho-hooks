@@ -105,6 +105,7 @@ The service never ends by itself once it listens, bar status 4, and bar statuses
 | 33 | `production = 1`: the data directory, `events.seg`, `delivery.seg` or `endpoints.conf` can be read or written by its group or by others (the message names the path) | no |
 | 34 | `production = 1`: two of `admin-token`, `ingest-token` and `read-token` are the same | no |
 | 35 | `production = 1`: the mode of the data directory cannot be read (it is not there, or the call failed) | no |
+| 36 | `production = 1`: `audit-log` is 0 | no |
 | 40 | a segment of the events log is in a format this version does not understand (a header that says 3 or more, or one that is not this program's header at all) | no |
 | 41 | `delivery.seg` is in a format this version does not understand | no |
 | 42 | the events log has a hole or a break in its chain of segments (`events.first` names a missing file, a number is missing, a base does not follow the one before) | no |
@@ -175,7 +176,7 @@ When several things are wrong it says one at a time, always in that order. A dat
 
 **Secrets at rest.** The endpoints' signing secrets are in the clear in the `endpoints` table (or `endpoints.conf`) because the service signs with them. **The database is the trust boundary**: whoever can read the table, or a backup of it, can sign as the service. Give the service's role `select`, `insert`, `update` and `delete` on `endpoints`, `attempts` and `schedules` and `usage` on the sequence `endpoint_ids`, nothing else (not the superuser, as the tests use); keep the database off any network the receivers or the senders are on; encrypt the disk and the backups. There is no encryption in the service, on purpose: a key it can read is a key a reader of the same machine can read.
 
-**What it does not do.** No TLS (put a reverse proxy in front for `https` from your own clients), no rate limit on failed tokens, no audit of who called what, no rotation without a restart, no per-endpoint or per-sender scope. A route that exists can be told from one that does not without a token (`405` against `404`).
+**What it does not do.** No TLS (put a reverse proxy in front for `https` from your own clients), no rate limit on failed tokens, no rotation without a restart, no per-endpoint or per-sender scope. A route that exists can be told from one that does not without a token (`405` against `404`).
 
 **PostgreSQL.** `psql -f sql/schema.sql` creates `attempts`, `endpoints`, `schedules` and the sequence `endpoint_ids`; it is idempotent and **must be re-run before starting a newer binary**, because every connection prepares every statement and a missing table, column or sequence is a refusal (status 20, "the query failed"). This version added `attempts.reason` (`alter table attempts add column if not exists reason smallint not null default 0`, in the file): rows written before it have `0`, which `GET /events/:id/attempts` shows as `unrecorded` for a failed attempt. The image carries the file: `docker run --rm --entrypoint cat lexsys-hooks /usr/share/hooks/schema.sql | psql ...`.
 
@@ -521,7 +522,7 @@ The entry point is `deploy/hooks-entrypoint.sh`: a `umask 077`, then the service
 | a drain on `SIGTERM`, `TimeoutStopSec` as its deadline | 0.4 | **built** (section 1; `tests/stop_test.py`); not run under a real systemd |
 | the reason a delivery attempt failed, in the log | 0.4 | **built** (kind 14, `attempts.reason`, `/metrics`; `tests/reason_test.py`) |
 | refusing a `delivery.seg` that outruns its `events.seg`, and a log with damage in the middle (4.7) | 0.5 | **built** (statuses 18 and 19, `--repair-logs`; `tests/corrupt_test.py`, `backup_test.py`). The scripts are still the guard for a backup |
-| tokens for ingest and read, `production = 1` | 0.3 | **built** (section 2.1); open: no TLS, no audit, no rotation without a restart |
+| tokens for ingest and read, `production = 1` | 0.3 | **built** (section 2.1); the audit log is built (design 47.1); open: no TLS, no rotation without a restart |
 | a dead endpoint not stopping the others | 0.1 | **built** (design.md section 31) |
 | dead letters you can list and replay in bulk, cancelling a replay, retry jitter, a concurrency and rate limit per endpoint | P1.2, P1.4 | **built** (section 3.6; `tests/dead_test.py`, `cancel_test.py`, `jitter_test.py`, `limits_test.py`) |
 | bounded logs, a snapshot of the outcome state, a bounded start time | 0.2 | **built** (docs/retention.md, design.md section 38); `--mode online` backup re-argued (4.4) and tested under `kill -9` |
