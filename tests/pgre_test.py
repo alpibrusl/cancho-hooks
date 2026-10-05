@@ -22,13 +22,13 @@ here restarts or stops the server.
   8. pg-request-ms: a connection that goes silent with a request on it is given up, the request is answered 503, and a new one is made
   9. backends ended with pg_terminate_backend while idle: replaced at once
  10. the sleep bound of the loop includes the pool's: with waits of 2 ms the attempts to reconnect are made every few ms, not every 50 ms turn
- 11. a table whose answer does not fit the pool's 128 KiB slab ends the start with status 20, `too large`, instead of asking again for ever
+ 11. a table whose answer does not fit the pool's 1 MiB slab ends the start with status 20, `too large`, instead of asking again for ever
  12. the read of the table takes a while (a view that sleeps): in the meantime /readyz is 503 and the routes about endpoints are 503 although a connection is live;
      and a connection lost in the middle of the read is asked again, and the endpoints load
  13. (with HOOKS_PG_PASSWORD, i.e. a server that wants SCRAM-SHA-256) the logins of the reconnects are SCRAM: backends ended six times in a row, the
      longest wait of a probe on /healthz, no attempt failed; a wrong password at the start is refused at once, status 20, `cannot log in`
  15. retention (design 38) waits for the endpoints: with the database away and retention at 1 ms no segment and no event is dropped, every event is delivered
-     once after the table is read and only then are segments dropped; `compact-now` with a database named refuses (44) and changes nothing
+     once after the table is read and only then are segments dropped; `compact-now` with a database named reads the table first (status 20 and nothing changed if it cannot in pg-start-wait-ms)
  14. (with HOOKS_PG_STOP and HOOKS_PG_START, shell commands that stop and start the server under test) a server that really goes away and comes back: events
      flowing, every one delivered once, ready again with no restart, the history accounted. Never run against a server that others use
 """
@@ -697,13 +697,13 @@ def stage11():
     print("== 11. a table too large for the answer", flush=True)
     reset()
     secret = L.secret()
-    L.psql(f"insert into endpoints select g, repeat('a', 240) || '.example', 9, '{secret}' from generate_series(1000, 1700) g")
+    L.psql(f"insert into endpoints (id, host, port, secret, types, headers) select g, repeat('a', 240) || '.example', 9, '{secret}', repeat('t.x,', 120) || 't.y', repeat('a', 1500) from generate_series(0, 1023) g")
     try:
         t = time.time()
         svc = make(None, extra=["--pg-start-wait-ms", "60000"])
         svc.start(timeout=10)
         code = svc.wait_exit(20)
-        check("11. 701 rows of 250-byte hosts (about 220 KB): status 20, `too large`, at once (the answer does not fit the pool's 128 KiB), not asked for again for ever",
+        check("11. 1,024 rows with 250-byte hosts, long lists and headers (about 2.4 MB): status 20, `too large`, at once (the answer does not fit the pool's 1 MiB), not asked for again for ever",
               code == 20 and svc.has_line("the table is too large") and time.time() - t < 10, f"{code} {svc.stderr()} {time.time() - t:.1f}")
         shutil.rmtree(svc.dir, ignore_errors=True)
     finally:
@@ -861,7 +861,8 @@ def stage15():
     check("15. ... and then retention does its work: segments are dropped", L.wait_for(lambda: svc.stats()["segments_dropped"] >= 1, 20), str(svc.stats()))
     svc.stop()
     shutil.rmtree(svc.dir, ignore_errors=True)
-    # compact-now with a database named does not read the table: it refuses, and changes nothing
+    # compact-now with a database named reads the table first, through the same pool, and waits for it as long as pg-start-wait-ms allows (design section 41.8):
+    # with the database away it ends with status 20 after that time and changes nothing; with the database there it reads the table and does its pass
     d = L.free_dir("hooks-pgre-")
     proxy.cut()
     sv2 = make(proxy, extra=knobs, d=d)
@@ -870,10 +871,20 @@ def stage15():
         sv2.post_event(n)
         time.sleep(0.5)
     sv2.stop()
-    before = {n: os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".seg")}
-    proc = subprocess.run([BIN, "--port", str(L.chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", *L.pg_flags(proxy.port)], capture_output=True, text=True, timeout=30)
-    after = {n: os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".seg")}
-    check("15. compact-now with a database named: status 44, says why, and every file is as it was", proc.returncode == 44 and "does not know which events are final" in proc.stderr and before == after, f"{proc.returncode} {proc.stderr!r} {before} {after}")
+    before = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d) if n.endswith((".seg", ".first"))}
+    t = time.time()
+    proc = subprocess.run([BIN, "--port", str(L.chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", "--pg-start-wait-ms", "2000", *L.pg_flags(proxy.port)], capture_output=True, text=True, timeout=60)
+    took = time.time() - t
+    after = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d) if n.endswith((".seg", ".first"))}
+    check("15. compact-now with the database away: status 20 after pg-start-wait-ms (2 s: it took %.1f), says it could not read the endpoints, and every file is as it was" % took,
+          proc.returncode == 20 and "cannot be read" in proc.stderr and 1.5 < took < 20 and before == after, f"{proc.returncode} {proc.stderr!r} {took}")
+    check("15. ... and it is not the status of a lock held (43) or of a step that failed (44)", proc.returncode not in (43, 44))
+    proxy.restore()
+    proc = subprocess.run([BIN, "--port", str(L.chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", "--pg-start-wait-ms", "20000", *L.pg_flags(proxy.port)], capture_output=True, text=True, timeout=60)
+    after2 = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d) if n.endswith((".seg", ".first"))}
+    check("15. compact-now with the database there: it reads the endpoints (1), does its pass and exits 0", proc.returncode == 0 and "endpoints loaded: 1" in proc.stderr and "compacted" in proc.stderr, f"{proc.returncode} {proc.stderr!r}")
+    check("15. ... and no segment of the events log was dropped: the endpoint it read has cursor 0, so every event is owed (what held them was the cursors, not the refusal)",
+          all(n in after2 for n in before if n.startswith("events")), str(sorted(after2)))
     proxy.close()
     peer.close()
     shutil.rmtree(d, ignore_errors=True)

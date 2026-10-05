@@ -146,29 +146,63 @@ fn rt_put[&b, &v](buf: &!b [byte], at: int, dv: &!v [int], kind: int, e: int, id
     return at + n;
 }
 
-// The bytes the snapshot of the delivery state needs at most: 62 slots of one record for the slot, one for each cell of its window, a few for its flags,
-// and the replays (a little over 4.9 MB), and one for each dead letter the tables hold, 2,048 an endpoint, and the floor (9.8 MB more).
+// The bytes the snapshot of the delivery state needs at most for one **chunk** of `rt_chunk()` slots: one record for the slot, one for each cell of its window, a
+// few for its flags, and the replays (a little over 4.9 MB), and one for each dead letter the tables hold, 2,048 an endpoint, and the floor (9.8 MB more).
 fn rt_snapshot_room() -> [] int {
     return 16777216;
 }
 
-// The state as the shortest log that replays to it (`docs/retention.md` section 6): a header, then for each slot that has an endpoint (live, dormant or
-// draining) `created`, the cells of its window, its flags and its waiting replays. Every kind is one the replay already knows. Answers `(bytes,
-// the offset of a record boundary about half way)`.
-fn rt_build[&b, &v](buf: &!b [byte], dv: &!v [int], now: int) -> [] (int, int) {
-    var at = rt_put(buf, 0, dv, state.format(), state.max_endpoints(), 2, 0, now);
-    var mid = 0;
-    var e = 0;
+// The snapshot is built and written a chunk of this many slots at a time, so that its buffer is 16 MiB however many slots there are (the largest state of 1,024
+// endpoints would need 277 MB at once; `docs/design.md` section 41.4). It was the number of slots there were: 62 or fewer make one chunk, and the file is what it was.
+fn rt_chunk() -> [] int {
+    return 62;
+}
+
+// Does a slot of `state.first_wide()` or above have an endpoint (live, dormant or draining)? Then the log needs the marker that makes a build from before refuse it
+// (`state.wide()`, `docs/design.md` section 41.5).
+fn rt_uses_wide[&v](dv: &v [int]) -> [] bool {
+    var e = state.first_wide();
     while e < state.max_endpoints() {
-        if e == state.max_endpoints() / 2 {
+        if dv[off_slotid() + e] >= 0 {
+            return true;
+        }
+        e = e + 1;
+    }
+    return false;
+}
+
+// The state as the shortest log that replays to it (`docs/retention.md` section 6), the slots `from` to `to - 1` of it: with `header`, the format header and, if a
+// slot of 62 or above has an owner, the marker `wide`; then for each slot that has an endpoint (live, dormant or draining) `created`, the cells of its window, its
+// flags and its waiting replays; `last` is the id of the newest event (a window past it is empty). Every kind is one the replay already knows (but `wide`, which it is
+// only told). Answers `(bytes, the offset of a record boundary about half way)`.
+fn rt_build[&b, &v](buf: &!b [byte], dv: &!v [int], now: int, last: int, from: int, to: int, header: bool) -> [] (int, int) {
+    var at = 0;
+    if header {
+        at = rt_put(buf, 0, dv, state.format(), state.format_slot(), 2, 0, now);
+        // what the new log holds is what `note_created` must know (hooks.ls `c_wide`)
+        dv[c_wide()] = 0;
+        if rt_uses_wide(dv) {
+            at = rt_put(buf, at, dv, state.wide(), 0, 0, 0, 0);
+            dv[c_wide()] = 1;
+        }
+    }
+    var mid = 0;
+    var e = from;
+    while e < to {
+        if e == from + (to - from) / 2 {
             mid = at;
         }
         let ident = dv[off_slotid() + e];
         if ident >= 0 {
             let c = dv[off_cur() + e];
             at = rt_put(buf, at, dv, state.created(), e, ident, c, 0);
+            // (the cells of events that are not in the log are zero: an endpoint that is caught up has none to read, and a snapshot does not make its window resident)
             var id = c + 1;
-            while id <= c + state.span() {
+            var upto = c + state.span();
+            if last < upto {
+                upto = last;
+            }
+            while id <= upto {
                 let tries = state.attempts(dv[off_cells()..off_flight()], e, id);
                 let next_at = state.next_at(dv[off_cells()..off_flight()], e, id);
                 if state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) {
@@ -213,34 +247,49 @@ fn rt_build[&b, &v](buf: &!b [byte], dv: &!v [int], now: int) -> [] (int, int) {
     return (at, mid);
 }
 
-// Write the snapshot of the state to `delivery.seg.tmp` and make it durable (steps 13 to 16). Answers the number of bytes, or `0 - 1` if a step failed (the
-// file is then removed).
+// Write the snapshot of the state to `delivery.seg.tmp` and make it durable (steps 13 to 16), a chunk of `rt_chunk()` slots at a time through one buffer (the
+// steps are the same however many chunks there are: 13 when the file exists, 14 after the first half of the first chunk, 15 when the last is written). Answers
+// the number of bytes, or `0 - 1` if a step failed (the file is then removed).
 fn rt_write_snapshot[&h, &l, &v](heap: &!h Heap, lg: &l evlog.Ev, dv: &!v [int], now: int) -> [heap, fs_read(""), fs_write(""), file_write, poll] int {
     let fs = evlog.lend(lg);
     let dir = evlog.dir_of(lg);
     dead_expire_all(lg, dv);
     let buf = box_slice(heap, rt_snapshot_room(), byte_of(0));
     var total = 0;
-    var mid = 0;
-    borrow mut buf as &!bw in {
-        let built = rt_build(contents(bw), dv, now);
-        total = built.0;
-        mid = built.1;
-    }
     var rc = 0;
     region a {
         let tmp = alloc_slice[a](2112, byte_of(0));
         let tn = store.path_join(tmp, dir, "delivery.seg.tmp");
-        borrow buf as &bq in {
-            rc = store.write_file(fs, tmp[0..tn], contents(bq)[0..0], false);
-            if rc == 0 {
-                evlog.step(lg, 13);
-                rc = store.append_bytes(fs, tmp[0..tn], contents(bq)[0..mid], false);
+        var from = 0;
+        while from < state.max_endpoints() && rc == 0 {
+            var to = from + rt_chunk();
+            if to > state.max_endpoints() {
+                to = state.max_endpoints();
             }
-            if rc == 0 {
-                evlog.step(lg, 14);
-                rc = store.append_bytes(fs, tmp[0..tn], contents(bq)[mid..total], false);
+            var bytes = 0;
+            var mid = 0;
+            borrow mut buf as &!bw in {
+                let built = rt_build(contents(bw), dv, now, evlog.last_id(lg), from, to, from == 0);
+                bytes = built.0;
+                mid = built.1;
             }
+            borrow buf as &bq in {
+                if from == 0 {
+                    rc = store.write_file(fs, tmp[0..tn], contents(bq)[0..0], false);
+                    if rc == 0 {
+                        evlog.step(lg, 13);
+                        rc = store.append_bytes(fs, tmp[0..tn], contents(bq)[0..mid], false);
+                    }
+                    if rc == 0 {
+                        evlog.step(lg, 14);
+                        rc = store.append_bytes(fs, tmp[0..tn], contents(bq)[mid..bytes], false);
+                    }
+                } else if bytes > 0 {
+                    rc = store.append_bytes(fs, tmp[0..tn], contents(bq)[0..bytes], false);
+                }
+            }
+            total = total + bytes;
+            from = to;
         }
         if rc == 0 {
             evlog.step(lg, 15);
@@ -537,7 +586,7 @@ fn rt_check_format[&g, &w](done: &!g log.Log, window: &!w [byte], now: int) -> [
         var rc = 1;
         region a {
             let rec = alloc_slice[a](128, byte_of(0));
-            let n = state.put_outcome(rec, 0, 1, state.format(), state.max_endpoints(), 2, 0, now);
+            let n = state.put_outcome(rec, 0, 1, state.format(), state.format_slot(), 2, 0, now);
             rc = log.append(done, rec[0..n], 1, 0);
         }
         if rc != 0 || log.flush(done) != 0 {
@@ -566,7 +615,7 @@ fn rt_clamp[&l, &d](lg: &!l evlog.Ev, dv: &!d [int]) -> [] int {
         let e = dv[off_table() + i * endpoints.stride()];
         if e >= 0 && dv[off_cur() + e] < lo {
             skipped = skipped + lo - dv[off_cur() + e];
-            state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, lo);
+            reset_window(dv, e, lo);
         }
         i = i + 1;
     }
@@ -755,13 +804,134 @@ fn open_delivery[&e, &d, &w, &q](ev: &!e evlog.Ev, dir: &d [byte], window: &!w [
     return open_log(evlog.lend(ev), dir, "delivery.seg", window, repair, report, gate);
 }
 
+// `compact-now` with a database (`docs/design.md` section 41.8): the endpoints of the table are what says which events are final, so the run reads them, **as the service
+// does** (the same pool, the same request, `load_late` for what follows it), and waits for that as long as `pg-start-wait-ms` allows (`dbup.verdict`: a refusal for good
+// ends it at once, a database that cannot be reached or that does not answer ends it after the wait; 0 waits for ever). There is no listener and no attempt: a poller of its own
+// for the pool's connections and nothing else. The pool is closed before it answers. Answers the status: 0 (the endpoints are in the state, and `history.endpoints_known`), 20
+// (the database could not give them: the message is said), 4 (no poller), or what `load_late` says (13 a bad row, 15 or 17 the log); a line on stderr for each but 0 and 4.
+fn compact_read_table[&h, &l, &g, &w, &d, &b, &n, &k, &o, &e](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &!b [byte], net: &n Net(""), clock: &k Clock, io: &!o Io, pl0: pool.Pool, dbhost: &e [byte], dbport: int) -> [heap, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), net_out(""), err_write] int {
+    var result = 4;
+    var pl = pl0;
+    match poller_new() {
+        Polling::Ok(p0) => {
+            var poller = p0;
+            borrow mut pl as &!qw in {
+                borrow mut poller as &!pw in {
+                    pool.start(qw, pw, 100);
+                }
+            }
+            let events = box_slice(heap, 64, 0);
+            let began = clock_ms(clock);
+            var going = true;
+            result = 0;
+            while going {
+                borrow mut poller as &!pw in {
+                    pl = pool.revive(heap, pl, net, dbhost, dbport, pw, clock_ms(clock));
+                }
+                var nap = 50;
+                borrow mut pl as &!qw in {
+                    borrow mut poller as &!pw in {
+                        var tag = pool.next_done(qw);
+                        while tag >= 0 && going {
+                            if tag == dbup.load_tag() {
+                                if pool.status(qw) == 8 {
+                                    // the answer does not fit the pool's input slab (1 MiB)
+                                    say_unreadable(io, 20, 6);
+                                    result = 20;
+                                    going = false;
+                                } else if pool.status(qw) != 0 {
+                                    // the connection went with the request on it: asked again when one is live
+                                    history.set_load_state(dv[off_hq()..off_hq() + history.size()], 0);
+                                } else {
+                                    let (st, dt) = load_late(heap, lg, done, window, dv, blob, pool.reply(qw));
+                                    if st == 0 {
+                                        history.set_load_state(dv[off_hq()..off_hq() + history.size()], 1);
+                                        say(io, "hooks: endpoints loaded: ");
+                                        ops.say_number(io, dt);
+                                        say(io, "\n");
+                                    } else {
+                                        say_unreadable(io, st, dt);
+                                        result = st;
+                                    }
+                                    going = false;
+                                }
+                            }
+                            tag = pool.next_done(qw);
+                        }
+                        if going && history.load_state(dv[off_hq()..off_hq() + history.size()]) == 0 && pool.live(qw) > 0 {
+                            let ask = queries.endpoints_all_start(heap);
+                            var asked_it = 0 - 1;
+                            borrow ask as &ab in {
+                                asked_it = pool.submit(qw, dbup.load_tag(), buffer.bytes(ab));
+                            }
+                            buffer.drop(heap, ask);
+                            if asked_it == 0 {
+                                history.set_load_state(dv[off_hq()..off_hq() + history.size()], 2);
+                            }
+                        }
+                        if going {
+                            region ra {
+                                let state5 = alloc_slice[ra](5, byte_of(0));
+                                let known = pool.sqlstate(qw, state5);
+                                let why = dbup.verdict(pool.last_failure(qw), state5[0..known], clock_ms(clock) - began, history.start_wait_ms(dv[off_hq()..off_hq() + history.size()]));
+                                if why != 0 {
+                                    say_unreadable(io, 20, why);
+                                    result = 20;
+                                    going = false;
+                                }
+                            }
+                        }
+                        pool.flush(qw, pw);
+                    }
+                    let due = pool.next_wake(qw, clock_ms(clock));
+                    if due >= 0 && due < nap {
+                        nap = due;
+                    }
+                }
+                if going {
+                    var ready = 0 - 1;
+                    borrow mut poller as &!pw in {
+                        borrow mut events as &!ew in {
+                            ready = poller_wait(pw, contents(ew), nap);
+                        }
+                    }
+                    var j = 0;
+                    while j < ready {
+                        var token = 0 - 1;
+                        var how = 0;
+                        borrow events as &er in {
+                            token = contents(er)[2 * j];
+                            how = contents(er)[2 * j + 1];
+                        }
+                        borrow mut pl as &!qw in {
+                            if pool.owns(qw, token) {
+                                borrow mut poller as &!pw in {
+                                    pool.pump(qw, pw, token, how);
+                                }
+                            }
+                        }
+                        j = j + 1;
+                    }
+                }
+            }
+            unbox_slice(heap, events);
+            pool.close(heap, pl);
+            poller_close(poller);
+        }
+        Polling::Failed(e) => {
+            pool.close(heap, pl);
+        }
+    }
+    return result;
+}
+
 // `compact-now`: do it, say what was done, close the outcomes log. Answers the status to exit with: 0, 43 if somebody holds the lock, 44 if a step failed.
 fn compact_once[&h, &l, &v, &i, &a, &w, &o](heap: &!h Heap, lg: &!l evlog.Ev, done: log.Log, dv: &!v [int], ix: &!i [int], arena: &!a [byte], window: &!w [byte], now: int, out: &!o Io) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll, err_write] int {
     if !history.endpoints_known(dv[off_hq()..off_hq() + history.size()]) {
-        // A one-off run does not wait for the database, and without the endpoints it knows no cursor: it would drop what a slow endpoint still needs and
-        // replace the outcomes log by an empty snapshot. Refused, with nothing changed.
+        // Without the endpoints it knows no cursor: it would drop what a slow endpoint still needs and replace the outcomes log by an empty snapshot. `main` reads them
+        // first (`compact_read_table`) and does not come here if it could not; this is the check that a path which did not read them cannot get past. Refused, nothing changed.
         log.close(done);
-        say(out, "hooks: compact-now: a database is named, and this run does not read the endpoints from it, so it does not know which events are final; nothing was done (run it without pg-host settings only for a service that has none)\n");
+        say(out, "hooks: compact-now: the endpoints of the database have not been read, so it does not know which events are final; nothing was done\n");
         return 44;
     }
     let segments = evlog.dropped_segments(lg);

@@ -24,7 +24,7 @@ records the service writes (kinds 10 and 11 above all) are checked and not only 
       bit or the replays (the log's created/removed sequence is shown); a row added by hand at the restart takes a freed slot and inherits nothing
    9. the history keeps the deleted endpoint's rows and the new endpoint's do not collide with them
   10. the id of a deleted endpoint is not given again (a row added by hand, a row made by the API, all of them deleted)
-  11. 62 endpoints: a 63rd is 409; delete one, create one works; 70 times, the live number never above 62; a restart keeps all 62
+  11. 1,024 endpoints (62 before design section 41): a 1,025th is 409; delete one, create one works; 70 times, the live number never above 1,024; a restart keeps all
   12. a restart (kill -9) while an endpoint is draining: the row is gone, the slot is dormant, and `take_slot` reclaims it when it is needed
   12b. ... and a row put back by hand before the next start is the same endpoint resuming, with the replays that were dropped still dropped
   13. a deleted endpoint is sent nothing under load, and the others lose no event
@@ -225,8 +225,19 @@ def wait_for(cond, secs):
     return False
 
 
+LIMIT = 1024    # the endpoints there can be (src/state.ls; design section 41: it was 62)
+
+
 def listing(svc):
-    return req(svc, "GET", "/endpoints", token=None)[1]
+    """GET /endpoints page by page (the service answers 64 at a time, and says in X-Next-Offset where to go on)."""
+    out, offset = [], 0
+    while True:
+        status, data, hdrs = req(svc, "GET", f"/endpoints?offset={offset}", token=None, raw=True)
+        out += json.loads(data)
+        nxt = {k.lower(): v for k, v in hdrs.items()}.get("x-next-offset")
+        if nxt is None:
+            return out
+        offset = int(nxt)
 
 
 def cursors(svc):
@@ -376,19 +387,19 @@ def main():
     reset_db()
     sa, sb, sc = secret(), secret(), secret()
     ra, rb, rc = Receiver([sa], plan={1: [(1.4, 204)]}), Receiver([sb]), Receiver([sc])
-    # ids above 62, so that a new endpoint takes the lowest *free slot* and not the slot of its own number: A has slot 0, B slot 1
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    # ids above 1,023, so that a new endpoint takes the lowest *free slot* and not the slot of its own number: A has slot 0, B slot 1
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
-    slot_a, slot_b = created_slot(d, 100), created_slot(d, 101)
-    check("3. (ids 100 and 101 have slots 0 and 1)", (slot_a, slot_b) == (0, 1), str((slot_a, slot_b)))
+    slot_a, slot_b = created_slot(d, 5100), created_slot(d, 5101)
+    check("3. (ids 5100 and 5101 have slots 0 and 1)", (slot_a, slot_b) == (0, 1), str((slot_a, slot_b)))
     post_event(svc, 1)
     check("3. the first receiver has the event and holds its answer", wait_for(lambda: ra.events() == [1], 5), str(ra.seen))
     t0 = time.time()
-    st, out = delete(svc, 100)
-    check("3. the delete is accepted while the attempt is on the wire, and says it is draining", st == 200 and out == {"id": 100, "deleted": True, "draining": True}, str((st, out)))
-    check("3. the endpoint is out of GET /endpoints at once, and /stats says one is draining", ids(svc) == [101] and stats(svc)["draining"] == 1 and stats(svc)["endpoints"] == 1, str((listing(svc), stats(svc))))
-    check("3. its row is gone", db_ids() == [101])
+    st, out = delete(svc, 5100)
+    check("3. the delete is accepted while the attempt is on the wire, and says it is draining", st == 200 and out == {"id": 5100, "deleted": True, "draining": True}, str((st, out)))
+    check("3. the endpoint is out of GET /endpoints at once, and /stats says one is draining", ids(svc) == [5101] and stats(svc)["draining"] == 1 and stats(svc)["endpoints"] == 1, str((listing(svc), stats(svc))))
+    check("3. its row is gone", db_ids() == [5101])
     post_event(svc, 2)
     post_event(svc, 3)
     check("3. events 2 and 3 go to the other endpoint", wait_for(lambda: sorted(rb.events()) == [1, 2, 3], 5), str(rb.seen))
@@ -407,7 +418,7 @@ def main():
           wait_for(lambda: of_kind(d, REMOVED) == [(REMOVED, slot_a, 0, 0, 0)], 5)
           and index_of(outcomes(d), lambda r: r == (REMOVED, slot_a, 0, 0, 0)) > index_of(outcomes(d), lambda r: r == (DELIVERED, slot_a, 1, 1, 0)), str(outcomes(d)))
     check("3. the history has the row under the endpoint's id, delivered with the receiver's status",
-          wait_for(lambda: attempts("endpoint = 100") == [(100, 1, 0, 1, 1, 204)], 5), str(attempts("endpoint = 100")))
+          wait_for(lambda: attempts("endpoint = 5100") == [(5100, 1, 0, 1, 1, 204)], 5), str(attempts("endpoint = 5100")))
     check("3. /stats: nothing draining any more, three endpoints' worth of work counted", stats(svc)["draining"] == 0 and stats(svc)["endpoints"] == 2, str(stats(svc)))
     time.sleep(0.4)
     check("3. the deleted endpoint's receiver saw event 1 once and nothing else, signed", ra.events() == [1] and ra.all_signed(), str(ra.seen))
@@ -419,8 +430,8 @@ def main():
     stop(svc)
     svc = start(d)
     post_event(svc, 4)
-    check("3. after a restart the endpoints are 101, the one made in the window and the one that took the slot; each gets event 4 once",
-          ids(svc) == sorted([101, new_id, third["id"]]) and wait_for(lambda: 4 in rb.events() and 4 in rc.events() and 4 in rc2.events(), 8), str((ids(svc), rb.events(), rc.events(), rc2.events())))
+    check("3. after a restart the endpoints are 5101, the one made in the window and the one that took the slot; each gets event 4 once",
+          ids(svc) == sorted([5101, new_id, third["id"]]) and wait_for(lambda: 4 in rb.events() and 4 in rc.events() and 4 in rc2.events(), 8), str((ids(svc), rb.events(), rc.events(), rc2.events())))
     stop(svc)
     shutil.rmtree(d)
 
@@ -428,15 +439,15 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa], plan={1: [(0.8, 500)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d, schedule="100,100,100")
     post_event(svc, 1)
     check("3b. the attempt is on the wire", wait_for(lambda: ra.events() == [1], 5), str(ra.seen))
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("3b. deleted, draining", st == 200 and out["draining"] is True, str((st, out)))
     check("3b. the attempt ends in a failure that is recorded (log: failed, 1 attempt; history: outcome 2, status 500)",
-          wait_for(lambda: of_kind(d, FAILED) and attempts("endpoint = 100") == [(100, 1, 0, 1, 2, 500)], 6), str((outcomes(d), attempts("endpoint = 100"))))
+          wait_for(lambda: of_kind(d, FAILED) and attempts("endpoint = 5100") == [(5100, 1, 0, 1, 2, 500)], 6), str((outcomes(d), attempts("endpoint = 5100"))))
     check("3b. and then the slot is freed", wait_for(lambda: of_kind(d, REMOVED) == [(REMOVED, 0, 0, 0, 0)], 5), str(outcomes(d)))
     time.sleep(1.0)
     check("3b. the failed attempt is not tried again (its schedule says 100 ms)", ra.events() == [1], str(ra.seen))
@@ -447,15 +458,15 @@ def main():
     reset_db()
     sa = secret()
     ra = Receiver([sa], plan={1: [(1.0, 204)]})
-    add_rows([(100, ra, sa)])
+    add_rows([(5100, ra, sa)])
     d = tmp()
     svc = start(d)
     post_event(svc, 1)
     wait_for(lambda: ra.events() == [1], 5)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("3c. the only endpoint is deleted while an attempt is on the wire", st == 200 and out["draining"] is True and listing(svc) == [] and stats(svc)["endpoints"] == 0, str((st, out)))
     check("3c. the attempt still ends: recorded as delivered, and the slot is freed (the loop keeps settling attempts with no endpoint left)",
-          wait_for(lambda: (DELIVERED, 0, 1, 1, 0) in of_kind(d, DELIVERED) and of_kind(d, REMOVED) == [(REMOVED, 0, 0, 0, 0)] and attempts("endpoint = 100") == [(100, 1, 0, 1, 1, 204)], 6),
+          wait_for(lambda: (DELIVERED, 0, 1, 1, 0) in of_kind(d, DELIVERED) and of_kind(d, REMOVED) == [(REMOVED, 0, 0, 0, 0)] and attempts("endpoint = 5100") == [(5100, 1, 0, 1, 1, 204)], 6),
           str((outcomes(d), stats(svc))))
     check("3c. /stats: nothing draining", stats(svc)["draining"] == 0)
     rn = Receiver()
@@ -470,19 +481,19 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa], plan={1: [(0, 204), (1.2, 204)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
     post_event(svc, 1)
-    wait_for(lambda: cursors(svc) == {100: 1, 101: 1}, 5)
-    st, out = req(svc, "POST", "/events/1/replay/100")
+    wait_for(lambda: cursors(svc) == {5100: 1, 5101: 1}, 5)
+    st, out = req(svc, "POST", "/events/1/replay/5100")
     check("3d. a replay to the endpoint is on the wire (the receiver holds it)", st == 202 and wait_for(lambda: ra.events() == [1, 1], 5), str((st, out, ra.seen)))
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("3d. deleted while it is on the wire: draining", st == 200 and out["draining"] is True, str((st, out)))
     check("3d. the replay's outcome is recorded (log: replay delivered; history: a replay row), and then the slot is freed; a replay on the wire is not dropped",
           wait_for(lambda: of_kind(d, REPLAY_DELIVERED) == [(REPLAY_DELIVERED, 0, 1, 1, 0)] and of_kind(d, REMOVED) == [(REMOVED, 0, 0, 0, 0)], 6)
           and [r[0] for r in outcomes(d) if r[1] == 0] == [CREATED, DELIVERED, REPLAY, REPLAY_DELIVERED, REMOVED], str(outcomes(d)))
-    check("3d. ... and the history has both rows of event 1 under 100", wait_for(lambda: attempts("endpoint = 100") == [(100, 1, 0, 1, 1, 204), (100, 1, 1, 1, 1, 204)], 5), str(attempts("endpoint = 100")))
+    check("3d. ... and the history has both rows of event 1 under 100", wait_for(lambda: attempts("endpoint = 5100") == [(5100, 1, 0, 1, 1, 204), (5100, 1, 1, 1, 1, 204)], 5), str(attempts("endpoint = 5100")))
     check("3d. no replay is left", stats(svc)["replays"] == 0, str(stats(svc)))
     stop(svc)
     shutil.rmtree(d)
@@ -491,21 +502,21 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa], plan={1: [(0, 204), (1.0, 500)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d, schedule="100,100,100")
     post_event(svc, 1)
-    wait_for(lambda: cursors(svc) == {100: 1, 101: 1}, 5)
-    req(svc, "POST", "/events/1/replay/100")
+    wait_for(lambda: cursors(svc) == {5100: 1, 5101: 1}, 5)
+    req(svc, "POST", "/events/1/replay/5100")
     wait_for(lambda: ra.events() == [1, 1], 5)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("3e. deleted while a replay is on the wire", st == 200 and out["draining"] is True and stats(svc)["replays"] == 1, str((st, out, stats(svc))))
     check("3e. the failure is recorded (replay_failed, and why), the replay is dropped (replay_dead), then the slot is freed, in that order",
           wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0][-4:] == [REPLAY_FAILED, REASON, REPLAY_DEAD, REMOVED], str(outcomes(d)))
     check("3e. no replay waits, and it is not tried again", stats(svc)["replays"] == 0, str(stats(svc)))
     time.sleep(0.8)
     check("3e. ... (the receiver saw the event twice: the delivery and the replay)", ra.events() == [1, 1], str(ra.seen))
-    check("3e. the history has the failed replay row under the id", attempts("endpoint = 100 and replay = 1") == [(100, 1, 1, 1, 2, 500)], str(attempts("endpoint = 100")))
+    check("3e. the history has the failed replay row under the id", attempts("endpoint = 5100 and replay = 1") == [(5100, 1, 1, 1, 2, 500)], str(attempts("endpoint = 5100")))
     stop(svc)
     shutil.rmtree(d)
 
@@ -513,12 +524,12 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa], plan={1: [(0.8, 410)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
     post_event(svc, 1)
     wait_for(lambda: ra.events() == [1], 5)
-    delete(svc, 100)
+    delete(svc, 5100)
     check("3f. the 410 is recorded as dead (and why), with no `disabled` record, then the slot is freed",
           wait_for(lambda: of_kind(d, REMOVED), 6) and [r[0] for r in outcomes(d) if r[1] == 0] == [CREATED, DEAD, REASON, REMOVED], str(outcomes(d)))
     stop(svc)
@@ -528,18 +539,18 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa], plan={2: [(0, 410)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
     for n in (1, 2, 3):
         post_event(svc, n)
     check("4. a 410 disables the first endpoint", wait_for(lambda: any(e["disabled"] for e in listing(svc)), 6), str(listing(svc)))
     wait_for(lambda: sorted(rb.events()) == [1, 2, 3], 5)
-    st1 = req(svc, "POST", "/events/1/replay/100")
-    st2 = req(svc, "POST", "/events/3/replay/100")
+    st1 = req(svc, "POST", "/events/1/replay/5100")
+    st2 = req(svc, "POST", "/events/3/replay/5100")
     check("4. two replays wait for the disabled endpoint", st1[0] == 202 and st2[0] == 202 and stats(svc)["replays"] == 2, str((st1, st2, stats(svc))))
     seen_before = len(ra.seen)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("4. the delete drops them at once", st == 200 and out["draining"] is False and stats(svc)["replays"] == 0, str((st, out, stats(svc))))
     rows = [r for r in outcomes(d) if r[1] == 0]
     check("4. each has its record: replay_dead for events 1 and 3, then `removed`, in that order",
@@ -547,13 +558,13 @@ def main():
     check("4. the receiver of the deleted endpoint was never sent a replay", len(ra.seen) == seen_before, str(ra.seen))
     stop(svc)
     svc = start(d)
-    check("4. after a restart: no replay waits, only the other endpoint", stats(svc)["replays"] == 0 and ids(svc) == [101], str((stats(svc), listing(svc))))
+    check("4. after a restart: no replay waits, only the other endpoint", stats(svc)["replays"] == 0 and ids(svc) == [5101], str((stats(svc), listing(svc))))
     # the row comes back by hand: the slot was freed (removed), so it is a new endpoint: not disabled, no replay, starting at the others' cursor
-    add_rows([(100, ra, sa)])
+    add_rows([(5100, ra, sa)])
     stop(svc)
     svc = start(d)
     check("4. a row put back by hand is a new endpoint: not disabled, no replay, no event sent",
-          stats(svc)["replays"] == 0 and not [e for e in listing(svc) if e["id"] == 100 and e["disabled"]] and len(ra.seen) == seen_before, str((stats(svc), listing(svc), ra.seen)))
+          stats(svc)["replays"] == 0 and not [e for e in listing(svc) if e["id"] == 5100 and e["disabled"]] and len(ra.seen) == seen_before, str((stats(svc), listing(svc), ra.seen)))
     stop(svc)
     shutil.rmtree(d)
 
@@ -561,24 +572,24 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa]), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     psql("create or replace function hooks_test_refuse() returns trigger as $$ begin raise exception 'no'; end $$ language plpgsql")
     psql("create trigger hooks_test_trigger before delete on endpoints for each row execute function hooks_test_refuse()")
     d = tmp()
     svc = start(d)
     post_event(svc, 1)
     wait_for(lambda: ra.events() == [1] and rb.events() == [1], 5)
-    wait_for(lambda: cursors(svc) == {100: 1, 101: 1}, 5)
+    wait_for(lambda: cursors(svc) == {5100: 1, 5101: 1}, 5)
     log_before = outcomes(d)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("5. a database that refuses the delete is a 503", st == 503, str((st, out)))
     check("5. nothing changed: the endpoint is listed, enabled, the row is there, nothing draining, the log has no new record",
-          ids(svc) == [100, 101] and db_ids() == [100, 101] and stats(svc)["draining"] == 0 and outcomes(d) == log_before, str((listing(svc), db_ids(), outcomes(d), log_before)))
+          ids(svc) == [5100, 5101] and db_ids() == [5100, 5101] and stats(svc)["draining"] == 0 and outcomes(d) == log_before, str((listing(svc), db_ids(), outcomes(d), log_before)))
     post_event(svc, 2)
     check("5. the endpoint still gets events", wait_for(lambda: ra.events() == [1, 2] and rb.events() == [1, 2], 5), str((ra.seen, rb.seen)))
     psql("drop trigger hooks_test_trigger on endpoints")
-    st, out = delete(svc, 100)
-    check("5. and the next DELETE works", st == 200 and ids(svc) == [101] and db_ids() == [101], str((st, out)))
+    st, out = delete(svc, 5100)
+    check("5. and the next DELETE works", st == 200 and ids(svc) == [5101] and db_ids() == [5101], str((st, out)))
     stop(svc)
     shutil.rmtree(d)
 
@@ -586,21 +597,21 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa]), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
     post_event(svc, 1)
     wait_for(lambda: ra.events() == [1] and rb.events() == [1], 5)
-    psql("delete from endpoints where id = 100")
-    st, out = req(svc, "PATCH", "/endpoints/100", {"port": 9})
-    check("6. (a PATCH of a row that is gone is a 404 that says so, and the service goes on delivering to it)", st == 404 and ids(svc) == [100, 101], str((st, out)))
-    st, out = delete(svc, 100)
+    psql("delete from endpoints where id = 5100")
+    st, out = req(svc, "PATCH", "/endpoints/5100", {"port": 9})
+    check("6. (a PATCH of a row that is gone is a 404 that says so, and the service goes on delivering to it)", st == 404 and ids(svc) == [5100, 5101], str((st, out)))
+    st, out = delete(svc, 5100)
     check("6. a DELETE of a row that is gone is a 200 that says the row was already gone", st == 200 and out.get("row") == "was already gone" and out["deleted"] is True, str((st, out)))
-    check("6. ... and the endpoint is removed from the service all the same (the database is the owner and says it is not there)", ids(svc) == [101], str(listing(svc)))
+    check("6. ... and the endpoint is removed from the service all the same (the database is the owner and says it is not there)", ids(svc) == [5101], str(listing(svc)))
     post_event(svc, 2)
     check("6. ... so it is sent nothing", wait_for(lambda: rb.events() == [1, 2], 5) and ra.events() == [1], str((ra.seen, rb.seen)))
     check("6. ... its slot is freed (a `removed` record)", of_kind(d, REMOVED) == [(REMOVED, 0, 0, 0, 0)], str(of_kind(d, REMOVED)))
-    check("6. ... and a second DELETE is a 404", delete(svc, 100)[0] == 404)
+    check("6. ... and a second DELETE is a 404", delete(svc, 5100)[0] == 404)
     stop(svc)
     shutil.rmtree(d)
 
@@ -608,7 +619,7 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa]), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     psql("create or replace function hooks_test_slow() returns trigger as $$ begin perform pg_sleep(1.5); return old; end $$ language plpgsql")
     psql("create trigger hooks_test_trigger before delete on endpoints for each row execute function hooks_test_slow()")
     d = tmp()
@@ -616,19 +627,19 @@ def main():
     first = {}
 
     def slow_delete():
-        first["r"] = delete(svc, 100)
+        first["r"] = delete(svc, 5100)
 
     t = threading.Thread(target=slow_delete)
     t.start()
     time.sleep(0.4)
-    st2, out2 = delete(svc, 101)
+    st2, out2 = delete(svc, 5101)
     st3, out3 = create(svc, ra.port)
-    st4, out4 = req(svc, "PATCH", "/endpoints/101", {"port": 9})
+    st4, out4 = req(svc, "PATCH", "/endpoints/5101", {"port": 9})
     t.join()
     check("7. a second DELETE while one waits is a 409", st2 == 409, str((st2, out2)))
     check("7. a POST /endpoints while it waits is a 409", st3 == 409, str((st3, out3)))
     check("7. a PATCH while it waits is a 409", st4 == 409, str((st4, out4)))
-    check("7. the first completes, and the refused ones changed nothing", first["r"][0] == 200 and ids(svc) == [101] and db_ids() == [101], str((first, listing(svc), db_ids())))
+    check("7. the first completes, and the refused ones changed nothing", first["r"][0] == 200 and ids(svc) == [5101] and db_ids() == [5101], str((first, listing(svc), db_ids())))
     psql("drop trigger hooks_test_trigger on endpoints")
     psql("create or replace function hooks_test_slow() returns trigger as $$ begin perform pg_sleep(1.5); return new; end $$ language plpgsql")
     psql("create trigger hooks_test_trigger before insert on endpoints for each row execute function hooks_test_slow()")
@@ -640,9 +651,9 @@ def main():
     t = threading.Thread(target=slow_create)
     t.start()
     time.sleep(0.4)
-    st5, out5 = delete(svc, 101)
+    st5, out5 = delete(svc, 5101)
     t.join()
-    check("7. a DELETE while a POST waits is a 409, and the POST completes", st5 == 409 and first2["r"][0] == 201 and 101 in ids(svc), str((st5, out5, first2, listing(svc))))
+    check("7. a DELETE while a POST waits is a 409, and the POST completes", st5 == 409 and first2["r"][0] == 201 and 5101 in ids(svc), str((st5, out5, first2, listing(svc))))
     psql("drop trigger hooks_test_trigger on endpoints")
     stop(svc)
     shutil.rmtree(d)
@@ -650,33 +661,33 @@ def main():
     # 8. a slot reused inherits nothing, across a restart ------------------------------------------------------------
     reset_db()
     s98, s99 = secret(), secret()
-    # event 2 fails at 99 and waits an hour (its cursor stays at 1, event 3 is final above it); event 4 is a 410 (dead, and 99 is disabled);
+    # event 2 fails at 5099 and waits an hour (its cursor stays at 1, event 3 is final above it); event 4 is a 410 (dead, and 5099 is disabled);
     # a replay then waits for the disabled endpoint
     r98, r99 = Receiver([s98]), Receiver([s99], plan={2: [(0, 500)], 4: [(0, 410)]})
-    add_rows([(98, r98, s98), (99, r99, s99)])
+    add_rows([(5098, r98, s98), (5099, r99, s99)])
     d = tmp()
     svc = start(d, schedule="3600000")
-    check("8. (98 has slot 0 and 99 slot 1)", (created_slot(d, 98), created_slot(d, 99)) == (0, 1), str(of_kind(d, CREATED)))
+    check("8. (5098 has slot 0 and 5099 slot 1)", (created_slot(d, 5098), created_slot(d, 5099)) == (0, 1), str(of_kind(d, CREATED)))
     for n in range(1, 5):
         post_event(svc, n)
-    check("8. endpoint 99 reaches the state to be inherited: cursor 1, disabled", wait_for(lambda: cursors(svc).get(99) == 1 and [e for e in listing(svc) if e["id"] == 99][0]["disabled"], 8), str((listing(svc), r99.seen)))
-    post_event(svc, 5)  # after the 410: 99 is disabled and is not sent it (posted with the others, it could have been attempted before the 410 came back)
+    check("8. endpoint 5099 reaches the state to be inherited: cursor 1, disabled", wait_for(lambda: cursors(svc).get(5099) == 1 and [e for e in listing(svc) if e["id"] == 5099][0]["disabled"], 8), str((listing(svc), r99.seen)))
+    post_event(svc, 5)  # after the 410: 5099 is disabled and is not sent it (posted with the others, it could have been attempted before the 410 came back)
     wait_for(lambda: sorted(r98.events()) == [1, 2, 3, 4, 5], 5)
-    st, out = req(svc, "POST", "/events/1/replay/99")
+    st, out = req(svc, "POST", "/events/1/replay/5099")
     check("8. ... with a replay waiting", st == 202 and stats(svc)["replays"] == 1, str((st, stats(svc))))
-    wait_for(lambda: cursors(svc).get(98) == 5, 5)
-    st, out = delete(svc, 99)
+    wait_for(lambda: cursors(svc).get(5098) == 5, 5)
+    st, out = delete(svc, 5099)
     check("8. delete 99", st == 200 and out["draining"] is False, str((st, out)))
     sn = secret()
     rn = Receiver([sn])
     st, new = create(svc, rn.port, sn)
-    check("8. the new endpoint is id 100 and takes slot 1, starting at the last event (5)", st == 201 and new["id"] == 100 and new["cursor"] == 5 and created_slot(d, 100) == 1, str((st, new, of_kind(d, CREATED))))
+    check("8. the new endpoint is id 5100 and takes slot 1, starting at the last event (5)", st == 201 and new["id"] == 5100 and new["cursor"] == 5 and created_slot(d, 5100) == 1, str((st, new, of_kind(d, CREATED))))
     seq = [r for r in outcomes(d) if r[1] == 1 and r[0] in (CREATED, REMOVED, DISABLED, REPLAY, REPLAY_DEAD, FAILED, DELIVERED, DEAD)]
-    check("8. the log's story of slot 1: created for 99, its outcomes (a failure, a 410) and the disable, then replay, replay dropped, removed, created for 100",
+    check("8. the log's story of slot 1: created for 5099, its outcomes (a failure, a 410) and the disable, then replay, replay dropped, removed, created for 100",
           seq[0][0] == CREATED and [r[0] for r in seq[-4:]] == [REPLAY, REPLAY_DEAD, REMOVED, CREATED]
           and {FAILED, DEAD, DISABLED} <= {r[0] for r in seq[1:-4]}, str(seq))
-    check("8. ... the first created says id 99, the last id 100 and start 5", seq[0][2] == 99 and seq[-1][2:4] == (100, 5), str((seq[0], seq[-1])))
-    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 100] == [{"id": 100, "port": rn.port, "scheme": "http", "cursor": 5, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}], str((listing(svc), stats(svc))))
+    check("8. ... the first created says id 5099, the last id 5100 and start 5", seq[0][2] == 5099 and seq[-1][2:4] == (5100, 5), str((seq[0], seq[-1])))
+    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 5100] == [{"id": 5100, "port": rn.port, "scheme": "http", "cursor": 5, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}], str((listing(svc), stats(svc))))
     # post enough events that the ring of the slot (1,024 cells) would reach the cells the old endpoint left above its cursor (events 3 and 4)
     total = 1040
     for n in range(6, total + 1):
@@ -685,75 +696,75 @@ def main():
           wait_for(lambda: sorted(set(rn.events())) == list(range(6, total + 1)), 60), str((len(rn.events()), sorted(set(range(6, total + 1)) - set(rn.events()))[:10])))
     check("8. ... and the other endpoint is sent all of them", wait_for(lambda: sorted(set(r98.events())) == list(range(1, total + 1)), 60))
     check("8. the deleted endpoint's receiver saw nothing after the delete", sorted(r99.events()) == [1, 2, 3, 4], str(r99.events()))
-    check("8. the new one's cursor reaches the end", wait_for(lambda: cursors(svc) == {98: total, 100: total}, 30), str(cursors(svc)))
+    check("8. the new one's cursor reaches the end", wait_for(lambda: cursors(svc) == {5098: total, 5100: total}, 30), str(cursors(svc)))
     n_seen = len(rn.events())
-    # state for the next generation: 100 gets a replay waiting (disabled by a 410 on event 1041)
+    # state for the next generation: 5100 gets a replay waiting (disabled by a 410 on event 1041)
     rn.plan[1041] = [(0, 410)]
     post_event(svc, 1041)
-    check("8. (100 is disabled by a 410)", wait_for(lambda: [e for e in listing(svc) if e["id"] == 100][0]["disabled"], 8), str(listing(svc)))
-    req(svc, "POST", "/events/6/replay/100")
+    check("8. (5100 is disabled by a 410)", wait_for(lambda: [e for e in listing(svc) if e["id"] == 5100][0]["disabled"], 8), str(listing(svc)))
+    req(svc, "POST", "/events/6/replay/5100")
     check("8. (and has a replay waiting)", stats(svc)["replays"] == 1)
     stop(svc)
     svc = start(d, schedule="3600000")
-    check("8. restart: endpoints 98 and 100, 100 still disabled, its replay waiting (nothing was lost), cursors kept",
-          ids(svc) == [98, 100] and [e for e in listing(svc) if e["id"] == 100][0]["disabled"] and stats(svc)["replays"] == 1, str((listing(svc), stats(svc))))
+    check("8. restart: endpoints 5098 and 5100, 5100 still disabled, its replay waiting (nothing was lost), cursors kept",
+          ids(svc) == [5098, 5100] and [e for e in listing(svc) if e["id"] == 5100][0]["disabled"] and stats(svc)["replays"] == 1, str((listing(svc), stats(svc))))
     created_before = of_kind(d, CREATED)
     removed_before = of_kind(d, REMOVED)
     time.sleep(0.5)
-    st, out = delete(svc, 100)
-    check("8. delete 100 (disabled, with a replay waiting)", st == 200 and stats(svc)["replays"] == 0, str((st, out)))
-    # a row added by hand: at the restart it takes the freed slot 1 and must inherit nothing of 100 (disabled bit, replay, cursor)
+    st, out = delete(svc, 5100)
+    check("8. delete 5100 (disabled, with a replay waiting)", st == 200 and stats(svc)["replays"] == 0, str((st, out)))
+    # a row added by hand: at the restart it takes the freed slot 1 and must inherit nothing of 5100 (disabled bit, replay, cursor)
     s150 = secret()
     r150 = Receiver([s150])
-    add_rows([(150, r150, s150)])
+    add_rows([(5150, r150, s150)])
     stop(svc)
     svc = start(d, schedule="3600000")
-    check("8. restart with a row added by hand (150): it takes the slot that 100 left (1)", created_slot(d, 150) == 1 and ids(svc) == [98, 150], str((of_kind(d, CREATED), listing(svc))))
+    check("8. restart with a row added by hand (5150): it takes the slot that 5100 left (1)", created_slot(d, 5150) == 1 and ids(svc) == [5098, 5150], str((of_kind(d, CREATED), listing(svc))))
     check("8. ... at the cursor of the slowest endpoint it knows (the other one's), enabled, no replay",
-          [e for e in listing(svc) if e["id"] == 150] == [{"id": 150, "port": r150.port, "scheme": "http", "cursor": 1041, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
+          [e for e in listing(svc) if e["id"] == 5150] == [{"id": 5150, "port": r150.port, "scheme": "http", "cursor": 1041, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
     post_event(svc, 1042)
     check("8. ... it gets event 1042 and nothing before it", wait_for(lambda: r150.events() == [1042], 6), str(r150.seen))
     time.sleep(0.5)
     check("8. ... once, and no other receiver is sent an old event again", r150.events() == [1042] and len(rn.events()) == n_seen + 1, str((r150.seen, len(rn.events()), n_seen)))
-    check("8. the log: created for 100, then (removed 1) and (created 150) after the delete, in this order",
+    check("8. the log: created for 5100, then (removed 1) and (created 5150) after the delete, in this order",
           index_of(outcomes(d), lambda r: r == (REMOVED, 1, 0, 0, 0)) is not None and
-          [r for r in outcomes(d) if r[0] in (CREATED, REMOVED) and r[1] == 1][-3:] == [(CREATED, 1, 100, 5, 0), (REMOVED, 1, 0, 0, 0), (CREATED, 1, 150, 1041, 0)],
+          [r for r in outcomes(d) if r[0] in (CREATED, REMOVED) and r[1] == 1][-3:] == [(CREATED, 1, 5100, 5, 0), (REMOVED, 1, 0, 0, 0), (CREATED, 1, 5150, 1041, 0)],
           str([r for r in outcomes(d) if r[0] in (CREATED, REMOVED) and r[1] == 1]))
     check("8. (the older slot records are unchanged: %d created, %d removed before the last delete)" % (len(created_before), len(removed_before)),
           [r for r in outcomes(d) if r[0] == CREATED][: len(created_before)] == created_before)
     stop(svc)
 
     # 9. the history keeps the old rows, the new ones do not collide ------------------------------------------------
-    old = attempts("endpoint = 99")
+    old = attempts("endpoint = 5099")
     check("9. the deleted endpoint's rows are all still there: events 1 to 4 (event 2 failed once, event 4 a 410)",
           [(r[1], r[2], r[4], r[5]) for r in old] == [(1, 0, 1, 204), (2, 0, 2, 500), (3, 0, 1, 204), (4, 0, 3, 410)], str(old))
-    rows100 = attempts("endpoint = 100")
+    rows100 = attempts("endpoint = 5100")
     check("9. the new endpoint's rows are its own: events 6 and up, none of 1 to 5, and its 410 at 1041",
           rows100 and min(r[1] for r in rows100) == 6 and max(r[1] for r in rows100) == 1041 and (1041, 0, 3, 410) in [(r[1], r[2], r[4], r[5]) for r in rows100], str(rows100[:3]))
-    # the same (event, replay, attempt) under both ids: a replay of event 3 (which 99 had) to a new endpoint is a different row
-    check("9. no row is under a slot number that is not an id, and none under -1", not attempts("endpoint < 0") and not attempts("endpoint = 1 or endpoint = 0"), str(attempts("endpoint < 100 and endpoint <> 98 and endpoint <> 99")[:3]))
+    # the same (event, replay, attempt) under both ids: a replay of event 3 (which 5099 had) to a new endpoint is a different row
+    check("9. no row is under a slot number that is not an id, and none under -1", not attempts("endpoint < 0") and not attempts("endpoint = 1 or endpoint = 0"), str(attempts("endpoint < 5100 and endpoint <> 5098 and endpoint <> 5099")[:3]))
     shutil.rmtree(d)
 
     # 9b. a replay of an event the deleted endpoint had, to the endpoint that has its slot now: two rows, not one lost
     reset_db()
     s98, s99 = secret(), secret()
     r98, r99 = Receiver([s98]), Receiver([s99])
-    add_rows([(98, r98, s98), (99, r99, s99)])
+    add_rows([(5098, r98, s98), (5099, r99, s99)])
     d = tmp()
     svc = start(d)
     for n in (1, 2, 3):
         post_event(svc, n)
-    wait_for(lambda: cursors(svc) == {98: 3, 99: 3}, 6)
-    wait_for(lambda: len(attempts("endpoint = 99")) == 3, 6)
-    delete(svc, 99)
+    wait_for(lambda: cursors(svc) == {5098: 3, 5099: 3}, 6)
+    wait_for(lambda: len(attempts("endpoint = 5099")) == 3, 6)
+    delete(svc, 5099)
     sn = secret()
     rn = Receiver([sn])
     st, new = create(svc, rn.port, sn)
-    st2, out2 = req(svc, "POST", "/events/3/replay/100")
+    st2, out2 = req(svc, "POST", "/events/3/replay/5100")
     check("9b. a replay of event 3 to the new endpoint is sent", st2 == 202 and wait_for(lambda: rn.events() == [3], 5), str((st2, out2, rn.seen)))
-    check("9b. the history has (99, event 3, first run) and (100, event 3, replay), both",
-          wait_for(lambda: attempts("event = 3 and endpoint >= 99") == [(99, 3, 0, 1, 1, 204), (100, 3, 1, 1, 1, 204)], 6), str(attempts("event = 3")))
-    check("9b. the old rows are as they were: three", len(attempts("endpoint = 99")) == 3)
+    check("9b. the history has (5099, event 3, first run) and (5100, event 3, replay), both",
+          wait_for(lambda: attempts("event = 3 and endpoint >= 5099") == [(5099, 3, 0, 1, 1, 204), (5100, 3, 1, 1, 1, 204)], 6), str(attempts("event = 3")))
+    check("9b. the old rows are as they were: three", len(attempts("endpoint = 5099")) == 3)
     stop(svc)
     shutil.rmtree(d)
 
@@ -787,29 +798,29 @@ def main():
     stop(svc)
     shutil.rmtree(d)
 
-    # 11. 62 endpoints: delete one, create one ----------------------------------------------------------------------
+    # 11. 1,024 endpoints (it was 62): delete one, create one ----------------------------------------------------------------------
     reset_db()
     keys = {}
     rall = Receiver()
-    for i in range(62):
+    for i in range(LIMIT):
         keys[i] = secret()
         psql(f"insert into endpoints values ({i}, '127.0.0.1', {rall.port}, '{keys[i]}')")
     rall.keys = list(keys.values())
     d = tmp()
     svc = start(d)
-    check("11. 62 endpoints are live", len(listing(svc)) == 62 and stats(svc)["endpoints"] == 62)
+    check("11. 1,024 endpoints are live", len(listing(svc)) == LIMIT and stats(svc)["endpoints"] == LIMIT)
     st, out = create(svc, rall.port)
-    check("11. a 63rd is a 409 that says 62, and no row was stored", st == 409 and "62" in json.dumps(out) and len(db_ids()) == 62, str((st, out)))
+    check("11. a 1,025th is a 409 that says 1024, and no row was stored", st == 409 and "1024" in json.dumps(out) and len(db_ids()) == LIMIT, str((st, out)))
     st, out = delete(svc, 10)
-    check("11. delete one", st == 200 and stats(svc)["endpoints"] == 61)
+    check("11. delete one", st == 200 and stats(svc)["endpoints"] == LIMIT - 1)
     st, out = create(svc, rall.port)
     check("11. create one works, and it has the freed slot", st == 201 and created_slot(d, out["id"]) == 10, str((st, out)))
     rall.keys.append(out["secret"])
-    check("11. at 62 again, a POST is a 409", create(svc, rall.port)[0] == 409)
+    check("11. at 1,024 again, a POST is a 409", create(svc, rall.port)[0] == 409)
     over = 0
     bad = []
     live = set(ids(svc))
-    n_created = 62 + 1
+    n_created = LIMIT + 1
     for k in range(70):
         victim = sorted(live)[(k * 7) % len(live)]
         st, out = delete(svc, victim)
@@ -824,55 +835,55 @@ def main():
         rall.keys.append(out["secret"])
         live.add(out["id"])
         n_created += 1
-        if len(live) > 62:
+        if len(live) > LIMIT:
             over += 1
         if k % 10 == 0 and create(svc, rall.port)[0] != 409:
-            bad.append(("62 and a POST was not a 409", k))
+            bad.append(("1,024 and a POST was not a 409", k))
     check("11. 70 times delete one and create one: every request answered as it should", not bad, str(bad[:3]))
-    check("11. the live number was never above 62 and is 62 (service, table and what the API says)", over == 0 and len(listing(svc)) == 62 and len(db_ids()) == 62 and ids(svc) == db_ids() == sorted(live), str((over, len(listing(svc)), len(db_ids()))))
+    check("11. the live number was never above 1,024 and is 1,024 (service, table and what the API says)", over == 0 and len(listing(svc)) == LIMIT and len(db_ids()) == LIMIT and ids(svc) == db_ids() == sorted(live), str((over, len(listing(svc)), len(db_ids()))))
     check("11. the log: %d created, 71 removed (70 and the first)" % n_created, len(of_kind(d, CREATED)) == n_created and len(of_kind(d, REMOVED)) == 71, str((len(of_kind(d, CREATED)), len(of_kind(d, REMOVED)))))
     stop(svc)
     svc = start(d)
-    check("11. a restart keeps the 62 (and writes no slot record)", ids(svc) == sorted(live) and len(of_kind(d, CREATED)) == n_created and len(of_kind(d, REMOVED)) == 71, str((len(listing(svc)), len(of_kind(d, CREATED)))))
+    check("11. a restart keeps the 1,024 (and writes no slot record)", ids(svc) == sorted(live) and len(of_kind(d, CREATED)) == n_created and len(of_kind(d, REMOVED)) == 71, str((len(listing(svc)), len(of_kind(d, CREATED)))))
     post_event(svc, 1)
-    check("11. one event reaches all 62, each signed with its own key", wait_for(lambda: len(rall.seen) == 62, 15) and rall.all_signed(), str((len(rall.seen), rall.all_signed())))
+    check("11. one event reaches all 1,024, each signed with its own key", wait_for(lambda: len(rall.seen) == LIMIT, 15) and rall.all_signed(), str((len(rall.seen), rall.all_signed())))
     time.sleep(0.5)
-    check("11. ... and no more", len(rall.seen) == 62 and set(rall.events()) == {1}, str(len(rall.seen)))
+    check("11. ... and no more", len(rall.seen) == LIMIT and set(rall.events()) == {1}, str(len(rall.seen)))
     stop(svc)
     shutil.rmtree(d)
 
     # 12. a restart while an endpoint is draining ---------------------------------------------------------------------
     reset_db()
     rfast = Receiver()
-    rslow = Receiver(plan={1: [(1.5, 204)]})
+    rslow = Receiver(plan={1: [(10.0, 204)]})
     keys = {}
-    for i in range(62):
+    for i in range(LIMIT):
         keys[i] = secret()
         r = rslow if i == 5 else rfast
         psql(f"insert into endpoints values ({i}, '127.0.0.1', {r.port}, '{keys[i]}')")
     rfast.keys = [k for i, k in keys.items() if i != 5]
     rslow.keys = [keys[5]]
     d = tmp()
-    svc = start(d)
+    svc = start(d, deadline="20000")
     post_event(svc, 1)
-    check("12. 61 endpoints get event 1, and the slow one holds its attempt", wait_for(lambda: len(rfast.seen) == 61 and rslow.events() == [1], 10), str((len(rfast.seen), rslow.seen)))
-    wait_for(lambda: sum(1 for e in listing(svc) if e["cursor"] == 1) == 61, 10)
+    check("12. 1,023 endpoints get event 1, and the slow one holds its attempt", wait_for(lambda: len(rfast.seen) == LIMIT - 1 and rslow.events() == [1], 10), str((len(rfast.seen), rslow.seen)))
+    wait_for(lambda: sum(1 for e in listing(svc) if e["cursor"] == 1) == LIMIT - 1, 10)
     st, out = delete(svc, 5)
-    check("12. endpoint 5 is deleted while its attempt is on the wire: draining", st == 200 and out["draining"] is True and stats(svc)["draining"] == 1 and len(listing(svc)) == 61, str((st, out)))
+    check("12. endpoint 5 is deleted while its attempt is on the wire: draining", st == 200 and out["draining"] is True and stats(svc)["draining"] == 1 and len(listing(svc)) == LIMIT - 1, str((st, out)))
     st, out = create(svc, rfast.port)
-    check("12. 61 live and one draining: every slot is taken, so a POST is a 409 and stores nothing (it would have a row and nowhere to put it)",
-          st == 409 and len(db_ids()) == 61, str((st, out, len(db_ids()))))
+    check("12. 1,023 live and one draining: every slot is taken, so a POST is a 409 and stores nothing (it would have a row and nowhere to put it)",
+          st == 409 and len(db_ids()) == LIMIT - 1, str((st, out, len(db_ids()))))
     kill(svc)
     check("12. (killed: no `removed` record for slot 5 was written)", not of_kind(d, REMOVED), str(of_kind(d, REMOVED)))
     svc = start(d)
-    check("12. restart: the row is gone, so 61 endpoints; slot 5 is dormant and untouched", len(listing(svc)) == 61 and 5 not in ids(svc) and not of_kind(d, REMOVED) and stats(svc)["draining"] == 0, str((len(listing(svc)), of_kind(d, REMOVED))))
+    check("12. restart: the row is gone, so 1,023 endpoints; slot 5 is dormant and untouched", len(listing(svc)) == LIMIT - 1 and 5 not in ids(svc) and not of_kind(d, REMOVED) and stats(svc)["draining"] == 0, str((len(listing(svc)), of_kind(d, REMOVED))))
     st, out = create(svc, rfast.port)
     check("12. a POST needs a slot: dormant slot 5 is reclaimed (removed, then created, in that order)",
           st == 201 and [r for r in outcomes(d) if r[0] in (CREATED, REMOVED) and r[1] == 5][-2:] == [(REMOVED, 5, 0, 0, 0), (CREATED, 5, out["id"], out["cursor"], 0)], str((st, out, [r for r in outcomes(d) if r[1] == 5])))
     rfast.keys.append(out["secret"])
     n_before = len(rfast.seen)
     post_event(svc, 2)
-    check("12. all 62 get event 2", wait_for(lambda: len(rfast.seen) - n_before == 62 and rfast.all_signed(), 10), str((len(rfast.seen) - n_before)))
+    check("12. all 1,024 get event 2", wait_for(lambda: len(rfast.seen) - n_before == LIMIT and rfast.all_signed(), 10), str((len(rfast.seen) - n_before)))
     stop(svc)
     shutil.rmtree(d)
 
@@ -881,23 +892,23 @@ def main():
     sa, sb = secret(), secret()
     # event 1 is delivered, its replay fails (500) and waits an hour; event 2 is on the wire (held) when the endpoint is deleted
     ra, rb = Receiver([sa], plan={1: [(0, 204), (0, 500)], 2: [(2.0, 204)]}), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d, schedule="3600000")
     post_event(svc, 1)
-    wait_for(lambda: cursors(svc) == {100: 1, 101: 1}, 6)
-    req(svc, "POST", "/events/1/replay/100")
+    wait_for(lambda: cursors(svc) == {5100: 1, 5101: 1}, 6)
+    req(svc, "POST", "/events/1/replay/5100")
     check("12b. a replay of event 1 failed and waits (an hour)", wait_for(lambda: ra.events() == [1, 1] and of_kind(d, REPLAY_FAILED), 6) and stats(svc)["replays"] == 1, str((ra.seen, stats(svc))))
     post_event(svc, 2)
     wait_for(lambda: ra.events() == [1, 1, 2], 5)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("12b. deleted with event 2 on the wire: draining, and the waiting replay is dropped", st == 200 and out["draining"] is True and stats(svc)["replays"] == 0, str((st, out, stats(svc))))
     check("12b. ... with its record", of_kind(d, REPLAY_DEAD) == [(REPLAY_DEAD, 0, 1, 1, 0)], str(of_kind(d, REPLAY_DEAD)))
     kill(svc)
-    add_rows([(100, ra, sa)])
+    add_rows([(5100, ra, sa)])
     svc = start(d, schedule="3600000")
-    check("12b. the row is put back before the next start: endpoint 100 is back in its slot (no `removed` was written), and the replay is not waiting again",
-          ids(svc) == [100, 101] and not of_kind(d, REMOVED) and stats(svc)["replays"] == 0 and created_slot(d, 100) == 0, str((listing(svc), stats(svc), of_kind(d, REMOVED))))
+    check("12b. the row is put back before the next start: endpoint 5100 is back in its slot (no `removed` was written), and the replay is not waiting again",
+          ids(svc) == [5100, 5101] and not of_kind(d, REMOVED) and stats(svc)["replays"] == 0 and created_slot(d, 5100) == 0, str((listing(svc), stats(svc), of_kind(d, REMOVED))))
     stop(svc)
     shutil.rmtree(d)
 
@@ -905,7 +916,7 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa]), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     d = tmp()
     svc = start(d)
     total = 400
@@ -914,14 +925,14 @@ def main():
     def poster():
         for n in range(1, total + 1):
             post_event(svc, n)
-            if n == 150:
+            if n == 5150:
                 stopped["at"] = time.time()
             time.sleep(0.002)
 
     th = threading.Thread(target=poster)
     th.start()
     wait_for(lambda: len(ra.seen) >= 100, 10)
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     t_del = time.time()
     th.join()
     check("13. the delete is accepted in the middle of the stream", st == 200, str((st, out)))
@@ -940,7 +951,7 @@ def main():
     reset_db()
     ss, sf = secret(), secret()
     rs, rf = Receiver([ss]), Receiver([sf])
-    add_rows([(100, rs, ss), (101, rf, sf)])
+    add_rows([(5100, rs, ss), (5101, rf, sf)])
     rs.close()  # nothing listens: every attempt at the slow endpoint fails, and (schedule: an hour) waits
     d = tmp()
     svc = start(d, schedule="3600000", deadline="1000")
@@ -949,10 +960,10 @@ def main():
         post_event(svc, n)
     check("14. the fast endpoint is sent all 1,300 events, though the slow one is dead and 1,024 events behind it",
           wait_for(lambda: sorted(set(rf.events())) == list(range(1, total + 1)), 40), str((len(set(rf.events())), max(rf.events() or [0]))))
-    check("14. the slow endpoint's cursor is 0, the fast one's 1300", wait_for(lambda: cursors(svc) == {100: 0, 101: total}, 10), str(cursors(svc)))
-    st, out = delete(svc, 100)
+    check("14. the slow endpoint's cursor is 0, the fast one's 1300", wait_for(lambda: cursors(svc) == {5100: 0, 5101: total}, 10), str(cursors(svc)))
+    st, out = delete(svc, 5100)
     check("14. delete the slow one", st == 200, str((st, out)))
-    check("14. the fast one's cursor stays at the end and nothing was sent twice", wait_for(lambda: cursors(svc) == {101: total}, 10) and len(rf.events()) == total, str((cursors(svc), len(rf.events()))))
+    check("14. the fast one's cursor stays at the end and nothing was sent twice", wait_for(lambda: cursors(svc) == {5101: total}, 10) and len(rf.events()) == total, str((cursors(svc), len(rf.events()))))
     st, out = create(svc, rf.port)
     rf.keys.append(out["secret"])
     post_event(svc, total + 1)
@@ -963,20 +974,20 @@ def main():
     # 16. dormant slots and a draining one: the slot that is draining is not mistaken for a dormant one (its id is not in the table either)
     reset_db()
     rfast = Receiver()
-    rslow = Receiver(plan={1: [(1.5, 204)]})
+    rslow = Receiver(plan={1: [(10.0, 204)]})
     keys = {}
-    for i in range(62):
+    for i in range(LIMIT):
         keys[i] = secret()
         r = rslow if i == 5 else rfast
         psql(f"insert into endpoints values ({i}, '127.0.0.1', {r.port}, '{keys[i]}')")
     rfast.keys = [k for i, k in keys.items() if i != 5]
     rslow.keys = [keys[5]]
     d = tmp()
-    svc = start(d)
+    svc = start(d, deadline="20000")
     stop(svc)
     psql("delete from endpoints where id between 10 and 30")  # 21 rows: their slots are dormant at the next start
-    svc = start(d)
-    check("16. 41 live endpoints and 21 dormant slots", len(listing(svc)) == 41 and stats(svc)["draining"] == 0, str(len(listing(svc))))
+    svc = start(d, deadline="20000")
+    check("16. 1,003 live endpoints and 21 dormant slots", len(listing(svc)) == LIMIT - 21 and stats(svc)["draining"] == 0, str(len(listing(svc))))
     post_event(svc, 1)
     check("16. the slow endpoint (5, slot 5) holds its attempt", wait_for(lambda: rslow.events() == [1], 10), str(rslow.seen))
     st, out = delete(svc, 5)
@@ -986,7 +997,7 @@ def main():
     check("16. a POST needs a slot: it reclaims the lowest dormant one (10), not slot 5, which is draining (and has a lower number)",
           st == 201 and got == [(REMOVED, 10, 0, 0, 0), (CREATED, 10, out["id"], out["cursor"], 0)] and not [r for r in of_kind(d, REMOVED) if r[1] == 5], str((st, out, got)))
     rfast.keys.append(out["secret"])
-    check("16. when the attempt ends, slot 5 is freed", wait_for(lambda: [r for r in of_kind(d, REMOVED) if r[1] == 5] == [(REMOVED, 5, 0, 0, 0)] and (DELIVERED, 5, 1, 1, 0) in of_kind(d, DELIVERED), 6), str(outcomes(d)[-6:]))
+    check("16. when the attempt ends, slot 5 is freed", wait_for(lambda: [r for r in of_kind(d, REMOVED) if r[1] == 5] == [(REMOVED, 5, 0, 0, 0)] and (DELIVERED, 5, 1, 1, 0) in of_kind(d, DELIVERED), 25), str(outcomes(d)[-6:]))
     stop(svc)
     shutil.rmtree(d)
 
@@ -994,22 +1005,22 @@ def main():
     reset_db()
     sa, sb = secret(), secret()
     ra, rb = Receiver([sa]), Receiver([sb])
-    add_rows([(100, ra, sa), (101, rb, sb)])
+    add_rows([(5100, ra, sa), (5101, rb, sb)])
     psql("create or replace function hooks_test_slow() returns trigger as $$ begin perform pg_sleep(6.5); return old; end $$ language plpgsql")
     psql("create trigger hooks_test_trigger before delete on endpoints for each row execute function hooks_test_slow()")
     d = tmp()
     svc = start(d)
     t0 = time.time()
-    st, out = delete(svc, 100)
+    st, out = delete(svc, 5100)
     check("15. a delete the database does not answer in five seconds is a 504 after about five", st == 504 and 4.5 < time.time() - t0 < 6.4, str((st, out, time.time() - t0)))
-    check("15. nothing changed in the service: still listed, still delivered to, nothing draining, no record", ids(svc) == [100, 101] and stats(svc)["draining"] == 0 and not of_kind(d, REMOVED), str((listing(svc), of_kind(d, REMOVED))))
+    check("15. nothing changed in the service: still listed, still delivered to, nothing draining, no record", ids(svc) == [5100, 5101] and stats(svc)["draining"] == 0 and not of_kind(d, REMOVED), str((listing(svc), of_kind(d, REMOVED))))
     post_event(svc, 1)
     check("15. ... and the endpoint still gets events", wait_for(lambda: ra.events() == [1], 5), str(ra.seen))
-    check("15. the row does go (the transaction was not assumed to have failed)", wait_for(lambda: db_ids() == [101], 6), str(db_ids()))
+    check("15. the row does go (the transaction was not assumed to have failed)", wait_for(lambda: db_ids() == [5101], 6), str(db_ids()))
     psql("drop trigger hooks_test_trigger on endpoints")
     stop(svc)
     svc = start(d)
-    check("15. the next start reconciles: the row is gone, so the endpoint is not there", ids(svc) == [101], str(listing(svc)))
+    check("15. the next start reconciles: the row is gone, so the endpoint is not there", ids(svc) == [5101], str(listing(svc)))
     post_event(svc, 2)
     check("15. ... and is sent nothing", wait_for(lambda: 2 in rb.events(), 5) and ra.events() == [1], str(ra.seen))
     stop(svc)

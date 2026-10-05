@@ -18,7 +18,7 @@ module dbup;
 // The reasons (`message` has the words, and the service ends with status 20 for each):
 //
 //     1 cannot connect   2 cannot log in   3 the query failed   4 the database did not answer in time   5 a row has an empty field or a
-//     byte that is not printable   6 the table is too large
+//     byte that is not printable   6 the table is too large (its text over `endpoints.text_limit()`, or the reply over the pool's input slab)
 
 // The tag the read of the table goes under on the pool (an insert of the history is 1, the API's reads 100 and above, the schedules' above those).
 pub fn load_tag() -> [] int {
@@ -89,5 +89,5 @@ pub fn message(reason: int) -> [] &static [byte] {
     if reason == 5 {
         return "a row has an empty field or a byte that is not printable";
     }
-    return "the table is too large (the service reads at most 32 KiB of it)";
+    return "the table is too large (the service reads at most 540,672 bytes of it, 528 an endpoint, and the pool's answer at most 1 MiB)";
 }

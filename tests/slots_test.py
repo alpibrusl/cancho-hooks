@@ -3,7 +3,7 @@
 
     HOOKS_PG=host:port:user:database [HOOKS_PG_PASSWORD=...] python3 tests/slots_test.py build/hooks
 
-An endpoint has an id (what the API and the history call it, up to six digits) and a slot (its place in the delivery state, 0 to 61);
+An endpoint has an id (what the API and the history call it, up to six digits) and a slot (its place in the delivery state, 0 to 1,023 since design section 41; it was 0 to 61);
 the log says which endpoint has which slot (`created` and `removed` records, kinds 10 and 11 of delivery.seg). The test reads and
 writes that log with its own reader and writer, so it checks the format and not only the service's agreement with itself.
 
@@ -47,6 +47,7 @@ PG_PASSWORD = os.environ.get("HOOKS_PG_PASSWORD", "")
 PSQL_ENV = dict(os.environ, PGPASSWORD=PG_PASSWORD) if PG_PASSWORD else dict(os.environ)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILS = []
+LIMIT = 1024          # the slots there are (src/state.ls `max_endpoints`; design section 41: it was 62)
 CREATED, REMOVED = 10, 11
 DELIVERED, FAILED = 1, 2
 
@@ -289,14 +290,14 @@ def main():
     # 5. no free slot: dormant ones are freed, lowest first
     d = tempfile.mkdtemp(prefix="hooks-slots-")
     log = os.path.join(d, "delivery.seg")
-    write_outcomes(log, [(CREATED, k, 1000 + k, 0, 0) for k in range(62)])
+    write_outcomes(log, [(CREATED, k, 1000 + k, 0, 0) for k in range(LIMIT)])
     r5a, r5b = Receiver(), Receiver()
     conf(d, [(5000, r5a), (5001, r5b)])
     svc = start(d)
     post(svc, 1)
     check("5. two new endpoints with every slot taken: both are served", wait_for(lambda: r5a.seen == [1] and r5b.seen == [1], 5), str((svc.lines, r5a.seen, r5b.seen)))
     stop(svc)
-    tail = read_outcomes(log)[62:]
+    tail = read_outcomes(log)[LIMIT:]
     check("5. slots 0 and 1 were freed (`removed`) and given (`created`), in that order",
           [(r[1], r[2], r[3]) for r in tail[:4]] == [(REMOVED, 0, 0), (CREATED, 0, 5000), (REMOVED, 1, 0), (CREATED, 1, 5001)], str(tail[:6]))
     check("5. no other slot was touched", all(r[2] in (0, 1) for r in tail if r[1] in (CREATED, REMOVED)), str(tail))
@@ -315,14 +316,14 @@ def main():
     # 5b. a dormant slot is freed, a live endpoint's never: slot 0 holds id 1000, which is in the table
     d = tempfile.mkdtemp(prefix="hooks-slots-")
     log = os.path.join(d, "delivery.seg")
-    write_outcomes(log, [(CREATED, k, 1000 + k, 0, 0) for k in range(62)])
+    write_outcomes(log, [(CREATED, k, 1000 + k, 0, 0) for k in range(LIMIT)])
     r1000, r6000 = Receiver(), Receiver()
     conf(d, [(1000, r1000), (6000, r6000)])
     svc = start(d)
     post(svc, 1)
     check("5b. a live endpoint and a new one with every slot taken: both are served", wait_for(lambda: r1000.seen == [1] and r6000.seen == [1], 5), str((r1000.seen, r6000.seen)))
     stop(svc)
-    tail = [(r[1], r[2], r[3]) for r in read_outcomes(log)[62:] if r[1] in (CREATED, REMOVED)]
+    tail = [(r[1], r[2], r[3]) for r in read_outcomes(log)[LIMIT:] if r[1] in (CREATED, REMOVED)]
     check("5b. the lowest slot that is not a live endpoint's (1) was freed and given, and slot 0 was not touched", tail == [(REMOVED, 1, 0), (CREATED, 1, 6000)], str(tail))
     shutil.rmtree(d)
 

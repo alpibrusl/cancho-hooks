@@ -5,6 +5,7 @@ import std.bytes;
 import std.test;
 import metrics;
 import ops;
+import state;
 import reason;
 
 // What an operator watches (`src/ops.ls`, `src/metrics.ls`; `docs/design.md` sections 34.1 to 34.4): the counters, when the service is ready, how it learns it is to stop,
@@ -101,14 +102,14 @@ fn test_failures_are_counted_by_reason_and_remembered_per_endpoint() -> [] int {
         test.assert_eq(ops.last_reason(o, 3), 0);
         test.assert_eq(ops.failures_for(o, reason.connect_refused()), 2);
         // recovery sets it; a slot out of range is ignored, not written beyond the array
-        ops.set_last_reason(o, 61, reason.gone());
-        test.assert_eq(ops.last_reason(o, 61), reason.gone());
-        ops.set_last_reason(o, 62, reason.gone());
+        ops.set_last_reason(o, state.max_endpoints() - 1, reason.gone());
+        test.assert_eq(ops.last_reason(o, state.max_endpoints() - 1), reason.gone());
+        ops.set_last_reason(o, state.max_endpoints(), reason.gone());
         ops.set_last_reason(o, 0 - 1, reason.gone());
         ops.attempt_ended(o, 99, reason.reset());
         test.assert_eq(ops.failures_for(o, reason.reset()), 1);
         // the last reason cell of the last slot is the last cell of the array but one at most
-        test.assert(ops.size() >= 110);
+        test.assert(ops.size() >= 48 + state.max_endpoints());
     }
     return 0;
 }
@@ -145,7 +146,7 @@ fn test_every_reason_counts_in_a_cell_of_its_own() -> [] int {
         // a reason that does not exist is not counted, and is not a cell of anything else
         ops.attempt_ended(o, 0, reason.count());
         ops.attempt_ended(o, 0, 1000);
-        test.assert_eq(ops.size(), 110 + reason.count());
+        test.assert_eq(ops.size(), 48 + state.max_endpoints() + reason.count());
     }
     return 0;
 }

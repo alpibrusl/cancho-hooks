@@ -13,7 +13,7 @@ The database must exist; the test applies sql/schema.sql and empties `endpoints`
   3. with --pg-host the service delivers to the table's endpoints and **not** to endpoints.conf, signing with the table's secret
   4. the table is read at each start: a row removed, a restart, and that endpoint is no longer delivered to; and an empty table
      starts the service with no endpoints (it accepts and keeps events)
-  5. (also: an empty host, and a table too large for the 32 KiB the service reads it into)
+  5. (also: an empty host, and a table too large for the 540,672 bytes the service reads it into)
   5. a row the service cannot use is a refusal to start with the row's number (an id of seven digits, a repeated id cannot be: it
      is the key; a secret that is not base64), and a row with an unprintable byte is refused as such
   6. a table that is not there, a database that is not there (after pg-start-wait-ms), a wrong password: status 20 and what failed
@@ -282,9 +282,9 @@ def main():
     check("5. an empty host: status 20 and the reason", svc.exited and svc.proc.wait() == 20 and any("not printable" in l for l in svc.lines), str(svc.lines))
     stop(svc)
     psql("truncate endpoints")
-    psql(f"insert into endpoints select g, repeat('h', 250), 80, '{s1}' from generate_series(0, 200) g")
+    psql(f"insert into endpoints (id, host, port, secret, types) select g, repeat('h', 250), 80, '{s1}', repeat('t.x,', 60) || 't.y' from generate_series(0, 1023) g")
     svc = start(d, pg_flags())
-    check("5. a table larger than the service reads (201 rows of 250-byte hosts): status 20 and the reason, not a crash",
+    check("5. a table larger than the service reads (1,024 rows of 250-byte hosts and 243-byte lists: 563 KB of text, over the 540,672 bytes): status 20 and the reason, not a crash",
           svc.exited and svc.proc.wait() == 20 and any("too large" in l for l in svc.lines), str(svc.lines))
     stop(svc)
 

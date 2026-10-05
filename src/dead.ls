@@ -2,6 +2,8 @@ edition 5;
 
 module dead;
 
+import state;
+
 // `dead` -- the dead letters of each endpoint, kept in memory so that they can be listed and replayed in bulk (`docs/design.md` section 39.1).
 //
 // A *dead letter* is an event whose last word at an endpoint is `dead`: the schedule ran out, or the receiver answered `410`, and no replay of it has
@@ -19,15 +21,15 @@ module dead;
 // this. A plain fold of the log from its start, as recovery does, is not enough: it drops the old ones when the table is full of newer ones that a
 // later record then removes, and has no way to bring them back. Why 2,048:
 // an endpoint can have only one window of 1,024 events not final (`state.span()`), and a window's worth dies per schedule (about 76 hours), so the
-// circuit breaker (5 days by default) pauses an endpoint after roughly one and a half windows. The whole table is 62 x (4 + 2,048 x 4) integers,
-// 4.1 MB, touched only where an endpoint has dead letters.
+// circuit breaker (5 days by default) pauses an endpoint after roughly one and a half windows. The whole table is `state.max_endpoints()` x (4 + 2,048 x 4)
+// integers (1,024 x 64 KiB, 67 MB), touched only where an endpoint has dead letters (`clear` writes only what a block held: it is all zero past its count).
 //
 // An entry is four integers: the event id, `attempts * 65536 + reason` (`reason.ls`; 0: not recorded), when it died (Unix ms; 0: a record from before
 // the time was written), and where the event starts in the events log plus one (0: not known yet; the first listing that wants the event's type
 // finds it, `hooks.ls`). A table is sorted by event id, so a page of it is found by a binary search and is stable while the table changes: the
 // cursor of the API is an event id.
 //
-// The block for slot `e` is `[count, floor, settled, 0]` and then `cap()` entries. `settled` is 1 once a fold of the log for the events below the floor
+// The block for slot `e` is `[count, floor, settled, 0]` (in the dense headers) and then `cap()` entries. `settled` is 1 once a fold of the log for the events below the floor
 // found nothing to add: the log has no more to give (a snapshot of it keeps only what the table held), so asking again would read it for nothing. A
 // dead letter left out later clears it.
 //
@@ -47,39 +49,42 @@ pub fn block() -> [] int {
 }
 
 pub fn size() -> [] int {
-    return 62 * block();
+    return state.max_endpoints() * block();
 }
 
-fn base(e: int) -> [] int {
-    return e * block();
+// The headers of the blocks are dense, `[count, floor, settled, 0]` for slot `e` at `4 e`, in the first `4 x rows` integers of the array (`rows` is its length over `block()`,
+// which is `state.max_endpoints()` for the real one), and the entries follow in `cap()` for each slot: so reading a slot's count or floor never touches the 64 KiB of its
+// entries, and nothing of a slot's entries is resident until it has dead letters (`docs/design.md` section 41.4).
+fn hb(e: int) -> [] int {
+    return e * 4;
 }
 
-fn entry(e: int, k: int) -> [] int {
-    return base(e) + 4 + k * width();
+fn entry[&d](d: &d [int], e: int, k: int) -> [] int {
+    return len(d) / block() * 4 + e * cap() * width() + k * width();
 }
 
 pub fn count[&d](d: &d [int], e: int) -> [] int {
-    return d[base(e)];
+    return d[hb(e)];
 }
 
 // The largest event id that was left out of slot `e`'s table for room (0: none was; the table is all of the dead letters).
 pub fn floor[&d](d: &d [int], e: int) -> [] int {
-    return d[base(e) + 1];
+    return d[hb(e) + 1];
 }
 
 // Is the table short of the dead letters it could hold: some were left out, and it has room now?
 pub fn wants_refold[&d](d: &d [int], e: int) -> [] bool {
-    return d[base(e) + 1] > 0 && d[base(e)] < cap() && d[base(e) + 2] == 0;
+    return d[hb(e) + 1] > 0 && d[hb(e)] < cap() && d[hb(e) + 2] == 0;
 }
 
 // A fold for the events below the floor added nothing: do not ask again until something else is left out.
 pub fn settle[&d](d: &!d [int], e: int) -> [] int {
-    d[base(e) + 2] = 1;
+    d[hb(e) + 2] = 1;
     return 0;
 }
 
 pub fn is_settled[&d](d: &d [int], e: int) -> [] bool {
-    return d[base(e) + 2] == 1;
+    return d[hb(e) + 2] == 1;
 }
 
 // The largest event id left out of the table for room is at least `id`: what a snapshot says of the ones it did not keep.
@@ -91,62 +96,74 @@ pub fn raise_floor[&d](d: &!d [int], e: int, id: int) -> [] int {
 // how many entries went.
 pub fn expire[&d](d: &!d [int], e: int, first: int) -> [] int {
     let gone = clear_below(d, e, first);
-    if d[base(e) + 1] < first {
-        d[base(e) + 1] = 0;
-        d[base(e) + 2] = 0;
+    if d[hb(e) + 1] < first {
+        // (written only if it is not zero: this is called for every slot there is, whether it has dead letters or not)
+        if d[hb(e) + 1] != 0 {
+            d[hb(e) + 1] = 0;
+        }
+        if d[hb(e) + 2] != 0 {
+            d[hb(e) + 2] = 0;
+        }
     }
     return gone;
 }
 
 // Forget what was left out, before a fold of the log puts the entries below the old floor in and sets it again.
 pub fn reset_floor[&d](d: &!d [int], e: int) -> [] int {
-    d[base(e) + 1] = 0;
+    d[hb(e) + 1] = 0;
     return 0;
 }
 
 fn left_out[&d](d: &!d [int], e: int, id: int) -> [] int {
-    if id > d[base(e) + 1] {
-        d[base(e) + 1] = id;
-        d[base(e) + 2] = 0;
+    if id > d[hb(e) + 1] {
+        d[hb(e) + 1] = id;
+        d[hb(e) + 2] = 0;
     }
     return 0;
 }
 
 pub fn id_at[&d](d: &d [int], e: int, k: int) -> [] int {
-    return d[entry(e, k)];
+    return d[entry(d, e, k)];
 }
 
 pub fn attempts_at[&d](d: &d [int], e: int, k: int) -> [] int {
-    return d[entry(e, k) + 1] / 65536;
+    return d[entry(d, e, k) + 1] / 65536;
 }
 
 pub fn reason_at[&d](d: &d [int], e: int, k: int) -> [] int {
-    return d[entry(e, k) + 1] % 65536;
+    return d[entry(d, e, k) + 1] % 65536;
 }
 
 pub fn died_at[&d](d: &d [int], e: int, k: int) -> [] int {
-    return d[entry(e, k) + 2];
+    return d[entry(d, e, k) + 2];
 }
 
 // Where the event starts in the events log, or -1 if that is not known yet.
 pub fn offset_at[&d](d: &d [int], e: int, k: int) -> [] int {
-    return d[entry(e, k) + 3] - 1;
+    return d[entry(d, e, k) + 3] - 1;
 }
 
 pub fn set_offset[&d](d: &!d [int], e: int, k: int, offset: int) -> [] int {
-    d[entry(e, k) + 3] = offset + 1;
+    d[entry(d, e, k) + 3] = offset + 1;
     return 0;
 }
 
 // Forget slot `e`: no entries, nothing evicted. (A slot freed, or given to another endpoint.)
+// A block is zero past its count (`put` fills the entry at the count, `remove` and `clear_below` zero the entries they vacate), so only the entries it holds are written:
+// a start gives a slot to every endpoint, and a loop that stored zeros over 8,192 integers for each would make every block resident.
 pub fn clear[&d](d: &!d [int], e: int) -> [] int {
-    d[base(e)] = 0;
-    d[base(e) + 1] = 0;
-    d[base(e) + 2] = 0;
     var k = 0;
-    while k < cap() * width() {
-        d[base(e) + 4 + k] = 0;
+    while k < d[hb(e)] * width() {
+        d[entry(d, e, 0) + k] = 0;
         k = k + 1;
+    }
+    // (a header that is zero is not written either: a page that was never written is not resident)
+    var h = 0;
+    while h < 3 {
+        if d[hb(e) + h] != 0 {
+            d[hb(e) + h] = 0;
+        }
+        h = h + 1;
     }
     return 0;
 }
@@ -154,10 +171,10 @@ pub fn clear[&d](d: &!d [int], e: int) -> [] int {
 // How many entries of slot `e` have an event id below `id`: the place `id` is, or would be, in the table.
 pub fn below[&d](d: &d [int], e: int, id: int) -> [] int {
     var lo = 0;
-    var hi = d[base(e)];
+    var hi = d[hb(e)];
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if d[entry(e, mid)] < id {
+        if d[entry(d, e, mid)] < id {
             lo = mid + 1;
         } else {
             hi = mid;
@@ -174,7 +191,7 @@ pub fn upto[&d](d: &d [int], e: int, id: int) -> [] int {
 // The index of the entry for event `id`, or -1.
 pub fn find[&d](d: &d [int], e: int, id: int) -> [] int {
     let k = below(d, e, id);
-    if k < d[base(e)] && d[entry(e, k)] == id {
+    if k < d[hb(e)] && d[entry(d, e, k)] == id {
         return k;
     }
     return 0 - 1;
@@ -203,12 +220,12 @@ pub fn put_left_out() -> [] int {
 // `offset` in the events log (-1: not known). One that is there is overwritten (a replay of it died again); its offset is kept if `offset` is -1.
 pub fn put[&d](d: &!d [int], e: int, id: int, attempts: int, why: int, died: int, offset: int) -> [] int {
     let k = below(d, e, id);
-    let n = d[base(e)];
-    if k < n && d[entry(e, k)] == id {
-        d[entry(e, k) + 1] = attempts * 65536 + why;
-        d[entry(e, k) + 2] = died;
+    let n = d[hb(e)];
+    if k < n && d[entry(d, e, k)] == id {
+        d[entry(d, e, k) + 1] = attempts * 65536 + why;
+        d[entry(d, e, k) + 2] = died;
         if offset >= 0 {
-            d[entry(e, k) + 3] = offset + 1;
+            d[entry(d, e, k) + 3] = offset + 1;
         }
         return put_replaced();
     }
@@ -222,12 +239,12 @@ pub fn put[&d](d: &!d [int], e: int, id: int, attempts: int, why: int, died: int
         }
         // drop the smallest: the entries below the new one's place (1 to k - 1) move down one place, the ones above it stay where they are, and
         // the new entry takes the place at k - 1
-        let dropped = d[entry(e, 0)];
+        let dropped = d[entry(d, e, 0)];
         var j = 1;
         while j < k {
             var w = 0;
             while w < width() {
-                d[entry(e, j - 1) + w] = d[entry(e, j) + w];
+                d[entry(d, e, j - 1) + w] = d[entry(d, e, j) + w];
                 w = w + 1;
             }
             j = j + 1;
@@ -242,17 +259,17 @@ pub fn put[&d](d: &!d [int], e: int, id: int, attempts: int, why: int, died: int
         while j > k {
             var w = 0;
             while w < width() {
-                d[entry(e, j) + w] = d[entry(e, j - 1) + w];
+                d[entry(d, e, j) + w] = d[entry(d, e, j - 1) + w];
                 w = w + 1;
             }
             j = j - 1;
         }
     }
-    d[entry(e, at)] = id;
-    d[entry(e, at) + 1] = attempts * 65536 + why;
-    d[entry(e, at) + 2] = died;
-    d[entry(e, at) + 3] = offset + 1;
-    d[base(e)] = m + 1;
+    d[entry(d, e, at)] = id;
+    d[entry(d, e, at) + 1] = attempts * 65536 + why;
+    d[entry(d, e, at) + 2] = died;
+    d[entry(d, e, at) + 3] = offset + 1;
+    d[hb(e)] = m + 1;
     return verdict;
 }
 
@@ -263,12 +280,12 @@ pub fn clear_below[&d](d: &!d [int], e: int, id: int) -> [] int {
     if cut == 0 {
         return 0;
     }
-    let n = d[base(e)];
+    let n = d[hb(e)];
     var j = cut;
     while j < n {
         var w = 0;
         while w < width() {
-            d[entry(e, j - cut) + w] = d[entry(e, j) + w];
+            d[entry(d, e, j - cut) + w] = d[entry(d, e, j) + w];
             w = w + 1;
         }
         j = j + 1;
@@ -277,12 +294,12 @@ pub fn clear_below[&d](d: &!d [int], e: int, id: int) -> [] int {
     while j < n {
         var w = 0;
         while w < width() {
-            d[entry(e, j) + w] = 0;
+            d[entry(d, e, j) + w] = 0;
             w = w + 1;
         }
         j = j + 1;
     }
-    d[base(e)] = n - cut;
+    d[hb(e)] = n - cut;
     return cut;
 }
 
@@ -292,22 +309,22 @@ pub fn remove[&d](d: &!d [int], e: int, id: int) -> [] int {
     if k < 0 {
         return 0;
     }
-    let n = d[base(e)];
+    let n = d[hb(e)];
     var j = k;
     while j < n - 1 {
         var w = 0;
         while w < width() {
-            d[entry(e, j) + w] = d[entry(e, j + 1) + w];
+            d[entry(d, e, j) + w] = d[entry(d, e, j + 1) + w];
             w = w + 1;
         }
         j = j + 1;
     }
     var w = 0;
     while w < width() {
-        d[entry(e, n - 1) + w] = 0;
+        d[entry(d, e, n - 1) + w] = 0;
         w = w + 1;
     }
-    d[base(e)] = n - 1;
+    d[hb(e)] = n - 1;
     return 1;
 }
 
@@ -315,9 +332,9 @@ pub fn remove[&d](d: &!d [int], e: int, id: int) -> [] int {
 // is the attempt's number. Answers 1 if it was set.
 pub fn set_reason[&d](d: &!d [int], e: int, id: int, attempts: int, why: int) -> [] int {
     let k = find(d, e, id);
-    if k < 0 || d[entry(e, k) + 1] / 65536 != attempts {
+    if k < 0 || d[entry(d, e, k) + 1] / 65536 != attempts {
         return 0;
     }
-    d[entry(e, k) + 1] = attempts * 65536 + why;
+    d[entry(d, e, k) + 1] = attempts * 65536 + why;
     return 1;
 }

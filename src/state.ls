@@ -22,8 +22,15 @@ pub fn span() -> [] int {
     return 1024;
 }
 
-// How many endpoints the service has at once: the slots of the arrays below. (The disabled set is one integer, a bit a slot.)
+// How many endpoints the service has at once: the slots of the arrays below (`docs/design.md` section 41: it was 62, the width of the one integer that held
+// the disabled set; each flag is a word a slot now). This is the one place the number is written.
 pub fn max_endpoints() -> [] int {
+    return 1024;
+}
+
+// The slots below this are the ones every build has had (it was the limit, and the endpoint field of the format header is still written as it). A log that
+// uses a slot at or above it carries a record of kind `wide()` first, so that a build from before refuses it (section 41.5).
+pub fn first_wide() -> [] int {
     return 62;
 }
 
@@ -107,10 +114,15 @@ pub fn reason_replay() -> [] int {
 }
 
 // The header of a log written since there were formats (`docs/retention.md` section 4; kind 14 is the reason of a failed attempt): its `event` is the format's number, `next_at` the Unix ms
-// it was written, and its endpoint is `max_endpoints()`, which is no slot, so nothing that replays outcomes by endpoint takes it for one. The
+// it was written, and its endpoint is `format_slot()`, the number 62 that the limit was when it was designed and that is written still, so that a log is byte for byte
+// what it was. Since the limit passed 62 that is a slot, so nothing may take a record of this kind for one of its slot's (`scan_slots`, `replay`). The
 // previous version took it for a record that is not an outcome and refused the log.
 pub fn format() -> [] int {
     return 15;
+}
+
+pub fn format_slot() -> [] int {
+    return 62;
 }
 
 // A waiting replay was cancelled by a person (`docs/design.md` section 39.2): `endpoint` and `event` are the replay's; the other fields are 0. Recovery ends
@@ -126,6 +138,13 @@ pub fn replay_cancelled() -> [] int {
 // with it.
 pub fn dead_entry() -> [] int {
     return 17;
+}
+
+// A record that says the log uses a slot of `first_wide()` or above (`docs/design.md` section 41.5): written, flushed, before the first record about such a slot,
+// and by a snapshot while one has an owner. Its fields are 0. A build that does not know it reads it as "not an outcome" and refuses the log (status 15),
+// where it would otherwise have ignored the records of those slots without a word. `apply` does nothing with it.
+pub fn wide() -> [] int {
+    return 18;
 }
 
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
@@ -216,10 +235,14 @@ pub fn apply[&w, &c](w: &!w [int], cur: &!c [int], e: int, kind: int, id: int, a
 }
 
 // Forget everything about slot `e`: its window is empty and its cursor is `start`. What a `created` or a `removed` record does.
+// Only a cell that is not zero is written: the arrays are zero-filled when they are made, and a start gives a slot to every endpoint, so writing a zero over each
+// cell would make resident the 24 KiB of every slot there is, used or not (`docs/design.md` section 41.2). Reading a page that was never written is free.
 pub fn reset[&w, &c](w: &!w [int], cur: &!c [int], e: int, start: int) -> [] int {
     var i = 0;
     while i < span() * 3 {
-        w[e * span() * 3 + i] = 0;
+        if w[e * span() * 3 + i] != 0 {
+            w[e * span() * 3 + i] = 0;
+        }
         i = i + 1;
     }
     cur[e] = start;
@@ -257,7 +280,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 17 {
+    if kind < 1 || kind > 18 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

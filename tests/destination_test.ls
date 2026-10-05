@@ -116,7 +116,7 @@ fn test_a_name_is_never_allowed() -> [] int {
 
 fn test_the_endpoints_file_applies_the_rule() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         // whsec_ + base64("0123456789abcdef")
         let good = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";

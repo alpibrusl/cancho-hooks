@@ -300,8 +300,11 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(state.outcome_at(buf, 0).0, 17);
         test.assert_eq(state.outcome_at(buf, 0).3, 3 * 65536 + 13);
         test.assert_eq(state.outcome_at(buf, 0).4, 1767225600000);
+        // 18, the marker that the log uses a slot of 62 or above (section 41.5), reads back too and changes no cell
+        state.put_outcome(buf, 0, 14, state.wide(), 0, 0, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, 18);
         // one past the last kind is still not an outcome
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 18);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 19);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);
@@ -309,6 +312,7 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(state.apply(w, c, 0, state.paused(), 1, 0, 0), 0);
         test.assert_eq(state.apply(w, c, 0, state.replay_cancelled(), 1, 0, 0), 0);
         test.assert_eq(state.apply(w, c, 0, state.dead_entry(), 1, 65537, 5), 0);
+        test.assert_eq(state.apply(w, c, 0, state.wide(), 1, 0, 0), 0);
         test.assert_eq(c[0], 0);
         test.assert(!state.is_final(w, c, 0, 1));
         test.assert_eq(state.attempts(w, 0, 1), 0);

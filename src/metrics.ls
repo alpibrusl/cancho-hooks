@@ -11,7 +11,8 @@ import reason;
 // This module only formats. The caller (`GET /metrics` in `hooks.ls`, which knows where everything is kept) fills two arrays of integers and
 // hands them over: `g`, the numbers of the whole service, one cell each (`g_*` below), and `ep`, a row of `row()` cells for each endpoint
 // (`e_*`). The label values are all fixed names or endpoint ids, so nothing needs escaping, and the number of series is bounded: about 70 for
-// the service, and 8 for each of at most 62 endpoints.
+// the service, and 9 for each endpoint of a page, a page being `page_size()` endpoints (`docs/design.md` section 41.4: the server's queue for an answer is 64 KiB, so an
+// answer is a page, and the per-endpoint series of 1,024 endpoints are 16 of them).
 //
 // Counters are since this start (a restart is a counter reset, which Prometheus' `rate` and `increase` expect). A number the service does not
 // keep is not made up.
@@ -19,7 +20,24 @@ import reason;
 // ---- the cells of `g`
 
 pub fn g_size() -> [] int {
+    return 47;
+}
+
+// The endpoints one page of `/metrics` holds, and the most pages there can be.
+pub fn page_size() -> [] int {
+    return 64;
+}
+
+// How many pages there are (1 at least: page 0 is the service's own series).
+pub fn g_pages() -> [] int {
     return 46;
+}
+
+pub fn pages_for(endpoints: int) -> [] int {
+    if endpoints <= 0 {
+        return 1;
+    }
+    return (endpoints + page_size() - 1) / page_size();
 }
 
 pub fn g_uptime_ms() -> [] int {
@@ -310,8 +328,21 @@ fn seconds[&h, &n](heap: &!h Heap, q: buffer.Buffer, name: &n [byte], ms: int) -
 }
 
 pub fn render[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int, reasons: &r [int]) -> [heap] buffer.Buffer {
+    return render_page(heap, g, ep, n, reasons, true);
+}
+
+// One answer: with `service`, the service's own series and then the per-endpoint series of the `n` rows of `ep`; without it only the latter (a page after the
+// first, so that scraping every page counts nothing twice).
+pub fn render_page[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int, reasons: &r [int], service: bool) -> [heap] buffer.Buffer {
     var b = buffer.empty(heap, 8192);
-    b = head(heap, b, "hooks_uptime_seconds", "gauge", "Seconds since the process started.");
+    if service {
+        b = render_service(heap, b, g, reasons);
+    }
+    return render_endpoints(heap, b, ep, n);
+}
+
+fn render_service[&h, &g, &r](heap: &!h Heap, q: buffer.Buffer, g: &g [int], reasons: &r [int]) -> [heap] buffer.Buffer {
+    var b = head(heap, q, "hooks_uptime_seconds", "gauge", "Seconds since the process started.");
     b = seconds(heap, b, "hooks_uptime_seconds", g[g_uptime_ms()]);
     b = head(heap, b, "hooks_ready", "gauge", "1 if GET /readyz answers 200, else 0.");
     b = plain(heap, b, "hooks_ready", g[g_ready()]);
@@ -399,7 +430,13 @@ pub fn render[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int,
     b = plain(heap, b, "hooks_cron_errors_total", g[g_cron_errors()]);
     b = head(heap, b, "hooks_cron_skipped_total", "counter", "Fires skipped (catch-up off, or a window that passed).");
     b = plain(heap, b, "hooks_cron_skipped_total", g[g_cron_skipped()]);
+    b = head(heap, b, "hooks_metrics_pages", "gauge", "Pages of /metrics: page 0 has the service's series and the first 64 endpoints, page k the 64 after the 64 k endpoints before (GET /metrics?page=k).");
+    b = plain(heap, b, "hooks_metrics_pages", g[g_pages()]);
+    return b;
+}
 
+fn render_endpoints[&h, &e](heap: &!h Heap, q: buffer.Buffer, ep: &e [int], n: int) -> [heap] buffer.Buffer {
+    var b = q;
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_cursor", "gauge", "The largest event id such that every event up to it is final (delivered or dead) for the endpoint.", e_cursor());
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_lag_events", "gauge", "Events behind: the newest event id minus the endpoint's cursor.", e_lag());
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_disabled", "gauge", "1 if the endpoint gets no attempts (a 410, a person, or the circuit breaker).", e_disabled());
