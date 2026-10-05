@@ -416,6 +416,12 @@ def stage_b():
             time.sleep(rng.expovariate(1000.0 / MEAN_MS))
             if done.is_set():
                 break
+            try:
+                st = svc.get("/stats")
+                for k in earlier:
+                    earlier[k] += st[k]
+            except Exception:  # noqa: BLE001
+                pass
             svc.kill()
             kills[0] += 1
             time.sleep(rng.uniform(0.0, 0.05))
@@ -767,6 +773,7 @@ def stage_d():
     acked, lock = {}, threading.Lock()
     done = threading.Event()
     kills = [0]
+    earlier = {"segments_dropped": 0, "snapshots": 0}   # the counters of /stats are an incarnation's: those of each one are read before it is killed
     rng = random.Random(29)
     backups, failures = [], []
     outdir = os.path.join(WORK, "d-backups")
@@ -846,7 +853,8 @@ def stage_d():
     print(f"   {D_EVENTS} events of 1.4 KB, {kills[0]} kills as power cuts, {svc.starts} starts, {len(backups)} online backups in {time.time() - started:.1f}s; "
           f"the live service: {st['segments_dropped']} segments dropped, {st['segments_sealed']} sealed, {st['snapshots']} snapshots, events {st['events_first_id']}..{st['events_last_id']}, "
           f"{st['maintenance_lock_skips']} steps deferred by the backup's lock", flush=True)
-    check("13. retention was at work: segments dropped, the outcomes log replaced, while the backups ran", st["segments_dropped"] >= 2 and st["snapshots"] >= 1, str(st))
+    dropped, snaps = earlier["segments_dropped"] + st["segments_dropped"], earlier["snapshots"] + st["snapshots"]
+    check(f"13. retention was at work: segments dropped ({dropped}), the outcomes log replaced ({snaps}), while the backups ran", dropped >= 2 and snaps >= 1, str(st))
     check("13. every online backup exited 0", not failures and len(backups) >= 5, "; ".join(failures[:3]) + f" ({len(backups)} backups)")
 
     existing = [b for b in backups if os.path.isdir(b[0])]
