@@ -143,7 +143,7 @@ def run_scenarios(a, tools):
             print(f"{name}: {med([r['ingest_per_s'] for r in runs]):.0f} events/s (p50 {med([r['ingest_p50_ms'] for r in runs]):.2f} ms, p99 {med([r['ingest_p99_ms'] for r in runs]):.2f} ms), "
                   f"{med([r['ingest_cpu_us_per_event'] for r in runs]):.1f} us of CPU an event", flush=True)
     base_ingest_us = med([r["ingest_cpu_us_per_event"] for r in rows["ingest, 64 connections"]])
-    for endpoints in (1, 10, 62):
+    for endpoints in a.endpoint_counts:
         events = max(1000, a.events // max(1, endpoints // 2 or 1)) if endpoints > 1 else a.events
         runs = [one(a, endpoints, events, 64, 200, tools) for _ in range(a.reps)]
         for r in runs:
@@ -188,6 +188,7 @@ def main():
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--only", default="ingest,deliver,https")
     p.add_argument("--service-cpu", type=int, default=-1, help="the core of the service (default: the last)")
+    p.add_argument("--endpoint-counts", type=lambda v: [int(x) for x in v.split(",")], default=[1, 10, 62], help="the numbers of endpoints to deliver to, the last being the most the build takes (default 1,10,62)")
     p.add_argument("--https-deliveries", type=int, default=600)
     p.add_argument("--tmp", default=None, help="where the data directories go (a tmpfs makes the disk not part of the figure)")
     a = p.parse_args()

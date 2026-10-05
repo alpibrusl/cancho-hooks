@@ -48,7 +48,7 @@ hold the rate it was asked for is marked as such rather than passed.
 * **Idempotency.** Three in a hundred keyed events are posted again at once with the same key (the answer must be the same id), and one in a hundred
   again with the same key and a *different* body (must be a `422`). A post that failed because the service was killed is retried with its key, so a
   kill never makes two events from one `n`.
-* **Endpoints** (a mix, `--endpoints N`, default 12, at most 59 and the harness adds up to three that come and go):
+* **Endpoints** (a mix, `--endpoints N`, default 12; N plus the `--churn` threads, default 3, at most `--endpoint-limit`, default 62 as in the build the test was designed on: the limit is a parameter, so a build that takes more is tested with more):
 
   | class | what the receiver does | what it subscribes to | what must happen |
   |---|---|---|---|
