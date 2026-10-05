@@ -9,7 +9,7 @@ outcomes log's limit 64 KiB, so what takes a month in production takes seconds. 
 last fsync covered, plus a random part of the rest).
 
   bounded     4,000 events through one endpoint: segments are sealed and dropped, the outcomes log is replaced by snapshots, the disk holds a header
-              and not the history, event 1 is a 404 that says why, the next id is 4,001 and a restart changes nothing
+              and not the history, event 1 is a 410 (a tombstone) that says why, the next id is 4,001 and a restart changes nothing
   pins        an event that is not final at a paused endpoint, at a disabled one (a 410), or that has a replay waiting is never dropped, across
               snapshots and restarts; when the pin goes, the segments go
   snapshot    what the outcomes log replays to is the same after it is replaced by a snapshot: attempts so far, final events above the cursor
@@ -346,9 +346,17 @@ def stage_bounded():
     check("bounded: the outcomes log was replaced by snapshots (%d) and is small (%d bytes against %d outcomes of 77 bytes)" % (s["snapshots"], os.path.getsize(os.path.join(d, "delivery.seg")), total),
           s["snapshots"] >= 3 and os.path.getsize(os.path.join(d, "delivery.seg")) < 80000, str(s))
     code, body = svc.status_of("/events/1")
-    check("bounded: event 1 is a 404 that says retention dropped it", code == 404 and b"retention" in body, f"{code} {body}")
+    check("bounded: event 1 is a 410 that says retention dropped it (a tombstone: the id was an event)", code == 410 and b"retention" in body, f"{code} {body}")
     code, body = svc.status_of(f"/events/{total}")
-    check("bounded: ... and so is the last", code == 404, f"{code}")
+    check("bounded: ... and so is the last", code == 410, f"{code}")
+    code, body = svc.status_of(f"/events/{total + 50}")
+    check("bounded: an id that was never given is a 404", code == 404, f"{code} {body}")
+    try:
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{svc.port}/events/1/replay", data=b"", method="POST"), timeout=10) as rr:
+            code, body = rr.status, rr.read()
+    except urllib.error.HTTPError as e:
+        code, body = e.code, e.read()
+    check("bounded: a replay of a dropped event is a 410 that says it cannot be replayed", code == 410 and b"replayed" in body, f"{code} {body}")
     status, ans = svc.post({"type": "t", "n": total + 1, "pad": "y"})
     check("bounded: ids are not reused: the next event is %d" % (total + 1), status == 202 and ans["id"] == total + 1, f"{status} {ans}")
     ok = wait_for(lambda: r.distinct() == total + 1, 10)
@@ -889,7 +897,7 @@ def one_kill(template, n, pinned, driver, step, cur, nofn):
             bad.append((i, code))
     for i in range(1, first, 97):
         code, body = svc2.status_of(f"/events/{i}")
-        if code != 404:
+        if code != 410:
             bad.append((i, code))
     if bad:
         problems.append(f"events unreadable or not gone: {bad[:4]}")
