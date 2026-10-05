@@ -19,8 +19,8 @@
 
 | after an event is dropped | |
 |---|---|
-| the event's body, `GET /events/:id` | **gone**: `404`, "no such event" (the message says retention may be why) |
-| `POST /events/:id/replay` of it | **gone**: `404` |
+| the event's body, `GET /events/:id` | **gone**: `410`, "the event was dropped by retention" (an id that was never given is a `404`) |
+| `POST /events/:id/replay` of it | **gone**: `410` |
 | a dead letter older than the retention | **gone with its event** (it was final) |
 | its delivery state | nothing to recover: it is below every cursor, and the snapshot keeps the cursors |
 | the idempotency key it carried | **forgotten**: the same key posted again is a **new event** with a new id (the contract of the window, now enforced by memory and not only by the clock) |
@@ -185,7 +185,7 @@ Everything above was built without changing `lexsys-log`: its record and recover
 * One service per directory: no lock stops a second service from starting on the same files (as before). `compact.lock` protects against a backup, not against a second service.
 * `attempts` (PostgreSQL) is pruned by the service on its own setting, `history-days` (docs/design.md section 43), not by retention: a row says what happened to an attempt, and may be wanted longer or shorter than the event.
 * The sparse index and the scan are not parallel; the start is single threaded.
-* `GET /events/:id` of a dropped event is a `404`; there is no tombstone that says "dropped" as opposed to "never existed" (the message says either).
+* `GET /events/:id` of a dropped event is a `410` and of an id never given a `404` (docs/design.md section 44): the ids are dense and never reused, so the oldest id the log keeps is the whole tombstone. What the event was is not kept.
 
 ## 15. The gate, and where each part is tested
 
