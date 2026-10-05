@@ -277,6 +277,9 @@ class Run:
                   "next_idx": self.next_idx, "port": self.port, "ctl_port": self.ctl_port, "cron": self.cron_ids, "dns": self.dns,
                   "eps": {k: v.state() for k, v in self.eps.items()}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
                   "settled": {k: self.verifier.by_label[k].settled for k in self.eps if k in self.verifier.by_label}, "kills": self.verifier.kills[-50:]}
+            if self.poster:
+                st["poster_counts"] = dict(self.poster.counts)
+                st["bytes_ingested"] = self.poster.bytes_ingested
             st["excused"] = list(self.excused)
             st["unexpected_exits"] = list(self.unexpected_exits)
             st["unexpected"] = list(self.svc.unexpected[-200:]) if self.svc else []
@@ -524,6 +527,7 @@ class Run:
         self.dns = st.get("dns")
         self.counts.update(st.get("counts", {}))
         self.excused = [tuple(x) for x in st.get("excused", [])]
+        self.poster_before = (st.get("poster_counts", {}), st.get("bytes_ingested", 0))
         self.unexpected_exits = list(st.get("unexpected_exits", []))
         # what the run had found before it was interrupted is part of its verdict
         try:
@@ -628,6 +632,8 @@ class Run:
     def start_workload(self):
         a = self.args
         self.poster = Poster(self.port, INGEST, self.seed, self.path("acked.bin"), self.violations, a.rate, workers=a.workers, start_n=getattr(self, "poster_start_n", 1))
+        self.poster.counts.update(getattr(self, "poster_before", ({}, 0))[0])      # a resumed run goes on counting where the one before it stopped
+        self.poster.bytes_ingested = getattr(self, "poster_before", ({}, 0))[1]
         if self.checker is None:
             self.checker = monitor.Checker(self)
         self.watcher = monitor.Watcher(self)
