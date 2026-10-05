@@ -364,6 +364,8 @@ fn rt_switch[&l, &c, &v, &w, &t, &y](lg: &l evlog.Ev, fs: &c Fs(""), dir: &y [by
             evlog.step(lg, 19);
             dv[rt_at() + r_snapshots()] = dv[rt_at() + r_snapshots()] + 1;
             dv[rt_at() + r_snap_bytes()] = total;
+            // the snapshot states every cursor (`created`), and is the log now (`docs/design.md` section 42.3)
+            cursors_stated(dv);
             dv[rt_at() + r_msg()] = 3;
             dv[rt_at() + r_msg() + 1] = before;
             dv[rt_at() + r_msg() + 2] = total;
