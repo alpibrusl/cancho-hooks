@@ -29,6 +29,20 @@ pub fn may_drop(retention_ms: int, last_id: int, sealed_ms: int, floor: int, now
     return now - sealed_ms >= age;
 }
 
+// Has the oldest sealed segment passed the hard maximum age (`max-age-days`, `docs/design.md` section 47.2)? It goes then whatever pins it: nothing may keep
+// an event longer. `sealed_ms` is when the segment after it was created, so no event in it is younger.
+pub fn expired(max_age_ms: int, last_id: int, sealed_ms: int, now: int) -> [] bool {
+    if max_age_ms <= 0 || last_id < 1 {
+        return false;
+    }
+    return now - sealed_ms >= max_age_ms;
+}
+
+// Should the active segment be sealed for the maximum age? When it holds anything and has been open that long (else its events could never be dropped).
+pub fn roll_for_age(active_bytes: int, max_age_ms: int, created_ms: int, now: int) -> [] bool {
+    return max_age_ms > 0 && active_bytes > 0 && now - created_ms >= max_age_ms;
+}
+
 // Should the active segment be sealed? When it has reached its size, or (retention on) when it holds anything and has been open as long as an event
 // must be kept, so that a quiet service does not keep an old event in a segment that is never sealed.
 pub fn should_roll(active_bytes: int, limit: int, retention_ms: int, created_ms: int, now: int, age: int) -> [] bool {
