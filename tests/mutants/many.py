@@ -14,6 +14,12 @@ MUTANTS = [
  ("Q10", "src/hooks.ls", "    put_flag(dv, e, f_disabled(), on);\n    if !on {\n        dv[off_wake() + e] = 0;\n    }", "    put_flag(dv, e, f_disabled(), on);", ["many:flags", "gone", "breaker"]),
  ("Q11", "src/hooks.ls", "    if skips >= most_skips() {\n        dv[off_ex() + ex_again()] = 1;\n    }", "", ["many:quiet", "many:pool"]),
  ("Q12", "src/hooks.ls", "                if dv[off_ex() + ex_again()] == 1 {\n                    nap = 0;", "                if dv[off_ex() + ex_again()] == 7 {\n                    nap = 0;", ["many:quiet", "many:pool"]),
+ # the walk of the windows is bounded in a turn (most_walk)
+ ("Q13", "src/hooks.ls", "fn most_walk() -> [] int {\n    return 65536;", "fn most_walk() -> [] int {\n    return 65536000;", ["many:quiet"]),
+ ("Q14", "src/hooks.ls", "    if skips >= most_skips() || walked >= most_walk() && step < count {", "    if skips >= most_skips() {", ["many:quiet"]),
+ ("Q15", "src/hooks.ls", "                    id = id + 1;\n                    walked = walked + 1;", "                    id = id + 1;", ["many:quiet"]),
+ ("Q16", "src/hooks.ls", "    while step < count && budget > 0 && walked < most_walk() {", "    while step < count && budget > 0 {", ["many:quiet"]),
+ ("Q17", "src/hooks.ls", "    if skips >= most_skips() || walked >= most_walk() && step < count {", "    if skips >= most_skips() || walked >= most_walk() {", ["many:quiet"]),
  # the flags (a word a slot)
  ("F01", "src/hooks.ls", "    if put_flag(dv, e, f_draining(), on) == 1 {\n        if on {\n            dv[c_draining()] = dv[c_draining()] + 1;", "    if put_flag(dv, e, f_draining(), on) == 1 {\n        if on {\n            dv[c_draining()] = dv[c_draining()] + 2;", ["delete"]),
  ("F02", "src/hooks.ls", "fn f_paused() -> [] int {\n    return 2;\n}", "fn f_paused() -> [] int {\n    return 1;\n}", ["many:flags", "breaker"]),

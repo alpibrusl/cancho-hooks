@@ -2,12 +2,13 @@
 """What 1,024 endpoints cost (docs/design.md section 41.9), measured. A report, not a gate.
 
     gcc -O2 -o scripts/bench/mklog scripts/bench/mklog.c
-    HOOKS_BIN=build/hooks HOOKS_PG=host:port:user:database python3 scripts/bench/many_bench.py idle|worst|busy|api [N]
+    HOOKS_BIN=build/hooks HOOKS_PG=host:port:user:database python3 scripts/bench/many_bench.py idle|worst|busy|busy_nosnap|api [N]
 
   idle    the resident and virtual size, the time to `listening` and the CPU at rest, for 1, 62 and N endpoints of `endpoints.conf` (no database)
   worst   the start with N endpoints and N x 2,048 dead letters in delivery.seg (2,097,152 records at N = 1,024): the time to `listening`, the size
   busy    N endpoints that nothing listens for, N events: every window full of failed attempts (1,048,576 of them at 1,024); the resident size, the longest
           answer of /healthz while it ran (what a client sees of the loop's longest turn), the longest step of retention (`maintenance_ms_max`)
+  busy_nosnap  the same with delivery-log-bytes of 4 GiB, so that no snapshot is made: the longest turn of the loop apart from it
   api     N endpoints from the table: the time of GET /metrics (every page), GET /endpoints (every page), a DELETE of the first, and the start (to `endpoints loaded`)
 The machine is part of the result.
 """
@@ -100,10 +101,10 @@ def worst(n):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def busy(n):
+def busy(n, log_bytes=33554432):
     d = tempfile.mkdtemp(prefix="bench-busy-")
     conf(d, n, port=free_port())          # nothing listens there
-    p, port, took, _ = start(d, ["--schedule", "3600000,3600000", "--deadline-ms", "1000", "--delivery-log-bytes", "33554432"])
+    p, port, took, _ = start(d, ["--schedule", "3600000,3600000", "--deadline-ms", "1000", "--delivery-log-bytes", str(log_bytes)])
     worst, stop = [0.0], threading.Event()
 
     def probe():
@@ -180,4 +181,7 @@ def api(n):
 if __name__ == "__main__":
     what = sys.argv[1] if len(sys.argv) > 1 else "idle"
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
-    {"idle": idle, "worst": worst, "busy": busy, "api": api}[what](n)
+    if what == "busy_nosnap":     # the same with a log limit nothing reaches: the longest turn when the snapshot is not one of them
+        busy(n, 4 * 1024 ** 3)
+    else:
+        {"idle": idle, "worst": worst, "busy": busy, "api": api}[what](n)

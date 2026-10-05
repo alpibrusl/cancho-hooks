@@ -2872,6 +2872,14 @@ fn most_skips() -> [] int {
     return 4096;
 }
 
+// The most cells of windows one turn of `start_attempts` walks, in all (the check is made before an endpoint's pass, so a turn walks at most this and one window more: 66,560).
+// An endpoint that fails everything has a window of 1,024 events that are neither final nor due: its pass reads every cell once to learn when to look again (`off_wake`), and
+// 1,024 such endpoints would be a turn of 1,048,576 cells, about 100 ms in which no request is read (measured, section 41.12). A turn that stops for this reason makes the next
+// wait 0 (`ex_again`), and the endpoints it did not reach are the ones whose `off_wake` is still 0. Up to 62 full windows (63,488 cells) a turn is what it was.
+fn most_walk() -> [] int {
+    return 65536;
+}
+
 // Is the event `id`, which `scan_next` has just left in `window`, one that endpoint `e` (table index `i`) does not subscribe to? An endpoint with no
 // subscription wants everything and the record is not looked at; an event the endpoint has a trace of (final, or an attempt made: a restart finding
 // it under a subscription that has changed since) is not passed over. The type is read from the record's `typ` pair: no JSON is parsed.
@@ -2939,6 +2947,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     var budget = state.starts_allowed(held, attempt.slots(), most_starts());
     var written = 0;
     var skips = 0;
+    var walked = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
     dv[off_ex() + ex_turns()] = dv[off_ex() + ex_turns()] + 1;
@@ -2949,7 +2958,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     let newest = evlog.last_id(lg);
     let turn_now = clock_unix_ms(clock);
     var step = 0;
-    while step < count && budget > 0 {
+    while step < count && budget > 0 && walked < most_walk() {
         let i = (turn + step) % count;
         let e = dv[off_table() + i * endpoints.stride()];
         var reach = dv[off_cur() + e] + state.span();
@@ -3006,6 +3015,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
                         }
                     }
                     id = id + 1;
+                    walked = walked + 1;
                 }
             }
             // A pass that went through the whole window (it read every event there was to read, or it reached the end of the window) says when to look again. One that
@@ -3019,7 +3029,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
         }
         step = step + 1;
     }
-    if skips >= most_skips() {
+    if skips >= most_skips() || walked >= most_walk() && step < count {
         dv[off_ex() + ex_again()] = 1;
     }
     // Then the replays that are due, with what is left of the budget.

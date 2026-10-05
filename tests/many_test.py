@@ -515,6 +515,31 @@ def stage_quiet():
     check("quiet: 1,024 endpoints whose attempts failed and wait are not all looked at in each turn (fewer than a quarter on average, in at least 4 turns)", turns >= 4 and looks < N * turns / 4, f"{looks} looks in {turns} turns")
     check("quiet: ... and their retries are made when due (the second attempt of each, then a third)", wait_for(lambda: svc.stats()["attempts"] >= 3 * N, 90), str(svc.stats()["attempts"]))
     svc.stop()
+    # A turn walks a bounded number of cells of windows (hooks.ls most_walk(): 65,536). 1,024 endpoints that have failed 100 events each have 102,400 cells that are not
+    # final and not due, which each endpoint reads once to learn when to look again: more than one turn may walk. The turns that stop for it do not wait for the timer
+    # (/stats waits_skipped), the walk is finished, and then nothing is looked at while the retries wait. (Without the bound it is one turn of about 100 ms.)
+    mk.reset_db()
+    mk.insert_endpoints(N, dead_port)
+    d5 = tmp()
+    svc = service(d5, ["--schedule", "600000,600000", "--deadline-ms", "1000"])
+    svc.start(timeout=60)
+    posted = post_events(svc, range(1, 101))
+    ok = wait_for(lambda: svc.stats()["failed"] >= 100 * N, 120)
+    check("quiet: 100 events at 1,024 endpoints that refuse them: every first attempt fails (%d)" % svc.stats()["failed"], ok and len(posted) == 100, str(svc.stats()["failed"]))
+
+    # (the cells are walked in the turns after a start, which finds every window full of failures that wait: that is the walk this checks)
+    svc.stop()
+    svc = service(d5, ["--schedule", "600000,600000", "--deadline-ms", "1000"])
+    svc.start(timeout=120)
+
+    def settled():
+        x = svc.stats()["endpoints_looked_at"]
+        time.sleep(1.0)
+        return svc.stats()["endpoints_looked_at"] == x
+    check("quiet: ... after a restart the walk of their 102,400 cells ends, and then no endpoint is looked at while the retries wait", wait_for(settled, 60, 0.0))
+    st = svc.stats()
+    check("quiet: ... and it took more than one turn without a wait between them (/stats waits_skipped %d)" % st["waits_skipped"], st["waits_skipped"] >= 1, str(st))
+    svc.stop()
     # an attempt that ends while the turn is still looking at the endpoint (a multicast address: the kernel refuses the connection at once) is not a pass that "has seen
     # everything": its retries are made, to the last (a dead letter), though no event comes to wake the endpoint
     mk.reset_db()
