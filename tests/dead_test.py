@@ -559,7 +559,7 @@ def main():
     ents, top = all_dead(svc, a, "asc")
     check("9c. the dead letters of the dropped events are gone from the list, those of the events that are left are not", ents and ents[0]["event"] >= first and [e["event"] for e in ents] == list(range(ents[0]["event"], total + 1)) and top["held"] == len(ents), str((first, len(ents), ents[:1], top)))
     check("9c. no floor is left for events that are gone: the list is complete", not top["truncated"] and top["complete_above"] == 0, str(top))
-    check("9c. an event that is gone is 404, and a dead letter that is left can still be asked for", req(svc, "GET", "/events/1")[0] == 404 and req(svc, "GET", f"/events/{total}")[0] == 200, "")
+    check("9c. an event that is gone is 410 (a tombstone), and a dead letter that is left can still be asked for", req(svc, "GET", "/events/1")[0] == 410 and req(svc, "GET", f"/events/{total}")[0] == 200, "")
     ra.status = 204
     base = ra.count()
     taken, calls = 0, 0
