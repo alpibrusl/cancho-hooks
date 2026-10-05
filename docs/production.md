@@ -84,7 +84,7 @@ The README says "Not for production" today. That line comes off when the **gate 
 
 ## P2: operating it
 
-A `Dockerfile` and a `systemd` unit; a tested **backup and restore** (the two logs and the database, consistent: stop-the-world and online variants); an upgrade procedure with **log format versions** and a refusal, not a guess, on an unknown version; a runbook (what each log line and metric means, what to do); a release with a stable URL, checksums and an SBOM; a **soak test** of at least 24 hours under chaos (kills, a dead endpoint, a slow database) with memory, descriptors and disk watched, its numbers published; a capacity page with the method.
+A `Dockerfile` and a `systemd` unit; a tested **backup and restore** (the two logs and the database, consistent: stop-the-world and online variants); an upgrade procedure with **log format versions** and a refusal, not a guess, on an unknown version; a runbook (what each log line and metric means, what to do); a release with a stable URL, checksums and an SBOM; a **soak test** of at least 24 hours under chaos (kills, a dead endpoint, a slow database) with memory, descriptors and disk watched, its numbers published (**harness built, long run pending**: the method, the criteria and, when it has been run, the numbers are in [`soak.md`](soak.md)); a capacity page with the method (**built, figures from the long run pending**: [`capacity.md`](capacity.md)).
 
 **Status (packaging slice, built without touching `src/`):**
 
@@ -96,7 +96,7 @@ A `Dockerfile` and a `systemd` unit; a tested **backup and restore** (the two lo
 | runbook (`docs/runbook.md`) | **done** | every log line and `/stats` field read from the source; the disk-full and corrupted-log scenarios run. Some items marked planned there are built now (0.1, 0.3, 0.4, 0.5) |
 | release (`scripts/release.sh`) | **done** | tarball, `SHA256SUMS`, SBOM stub; the binary is bit-reproducible after stripping the pid-bearing symbol and the build-id (four builds, one hash). **Not done:** signing, a stable URL, a real SBOM format (CycloneDX or SPDX) |
 | log format versions and a refusal on an unknown version | **not built** | needs a change to the service and to lexsys-log |
-| soak test (24 h), capacity page | **not built** | |
+| soak test (24 h), capacity page | **harness built; long run pending** | `scripts/soak/` (the harness, its self-test and its report), [`soak.md`](soak.md) (what is run, the criteria written before any run; the result of the 24-hour run is published in its section 8) and [`capacity.md`](capacity.md) (the method and what was measured). **Not verified:** a run of 24 hours; the harness has run for minutes (`soak.md` section 8 says what it found) |
 
 ## P3: a hosted, multi-tenant service (not before P0 to P2)
 

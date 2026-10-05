@@ -220,6 +220,11 @@ jobs:
         working-directory: hooks
         run: shellcheck scripts/*.sh deploy/*.sh
 
+      # The checker of the soak test (docs/soak.md) against synthetic ledgers that are mutated: every mutation must be caught under its own tag. Seconds; no service.
+      - name: The soak harness's checker catches what it must
+        working-directory: hooks
+        run: python3 scripts/soak/soak.py --selftest-ledger
+
       - name: Three endpoints, signed, retried, dead-lettered, with the service killed
         working-directory: hooks
         run: python3 tests/delivery.py build/hooks 300 4 150

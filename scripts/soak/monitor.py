@@ -1,0 +1,259 @@
+"""The two threads that watch (docs/soak.md sections 2 and 3): the **checker**, which once a second reads each endpoint's cursor and *then* both ledgers and hands them to the
+verifier, and the **watcher**, which every `--sample-s` seconds writes one row of `metrics.csv` and one line of `samples.jsonl`.
+
+The order in the checker is the point: the cursor is the service's claim that everything up to it is delivered, and a receiver writes its ledger record before it answers, so
+whatever the service could have counted is in the ledger by the time the claim is read after it.
+"""
+import csv
+import json
+import os
+import re
+import threading
+import time
+
+from common import ACK, REC, read_records
+from service import dir_usage
+
+COLUMNS = ["t", "el", "inc", "pid", "up", "rss_kb", "hwm_kb", "threads", "fds", "cpu_s", "data_bytes", "seg_files", "files", "events_first", "events_last", "segments", "sealed",
+           "dropped", "snapshots", "maint_ms_max", "maint_errors", "lock_skips", "delivered", "failed", "dead", "filtered", "in_flight", "retries_waiting", "replays_waiting",
+           "lag_max", "lag_sum", "lag_over_1024", "db_reconnects", "db_failures", "db_losses", "hist_written", "hist_failed", "hist_dropped", "probe_max_ms", "probe_p99_ms",
+           "probe_errors", "control_max_ms", "ingest_per_s", "ingest_p50_ms", "ingest_p99_ms", "ingest_max_ms", "ingested_bytes", "deliv_lat_p50_ms", "deliv_lat_p99_ms",
+           "deliv_lat_max_ms", "harness_cpu_pct", "receivers_cpu_pct", "loadavg1", "recv_loop_lag_max_ms", "bursting", "acked"]
+
+SERIES = re.compile(r'^(hooks_[a-z_]+)\{endpoint="(\d+)"\} (\S+)$', re.M)
+PLAIN = re.compile(r'^(hooks_[a-z_]+) (\S+)$', re.M)
+
+
+def parse_series(text, name):
+    return {int(e): float(v) for n, e, v in SERIES.findall(text) if n == name}
+
+
+def sweep_sidecars(d):
+    """The fsync shim leaves `<file>.synced` beside every log it has seen; the service deletes the segment and the shim does not know. Take away the ones whose file is gone."""
+    try:
+        for n in os.listdir(d):
+            if n.endswith(".synced") and not os.path.exists(os.path.join(d, n[:-7])):
+                try:
+                    os.remove(os.path.join(d, n))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+class Checker(threading.Thread):
+    def __init__(self, run):
+        super().__init__(daemon=True, name="checker")
+        self.r = run
+        self.recv_off = 0
+        self.ack_off = 0
+        self.last_purge = 0.0
+        self.cycles = 0
+        self.recv_path = os.path.join(run.out, "ledger", "recv.bin")
+        self.ack_path = os.path.join(run.out, "acked.bin")
+
+    def seek_end_minus(self, seconds):
+        """On a resume: start the ledgers again from where the open window began, so that the counts of the newest events are rebuilt."""
+        for attr, path, st in (("recv_off", self.recv_path, REC), ("ack_off", self.ack_path, ACK)):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            ts_idx = 0 if st is REC else 0
+            off = size - size % st.size
+            lo, hi = 0, off // st.size
+            target = time.time() - seconds
+            with open(path, "rb") as f:
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    f.seek(mid * st.size)
+                    t = st.unpack(f.read(st.size))[ts_idx]
+                    if t < target:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+            setattr(self, attr, lo * st.size)
+
+    def drain(self):
+        """Both ledgers, to their ends. The poster's first, so that an event is acknowledged before its delivery is looked at."""
+        r = self.r
+        recs, self.ack_off = read_records(self.ack_path, self.ack_off, ACK, limit=64 << 20)
+        if recs:
+            r.verifier.ingest_acks(recs)
+        recs, self.recv_off = read_records(self.recv_path, self.recv_off, REC, limit=64 << 20)
+        if recs:
+            r.verifier.ingest(recs)
+        return len(recs)
+
+    def cycle(self):
+        r = self.r
+        inc, pid = r.svc.inc, r.svc.pid
+        s1, eps = r.read("/endpoints", timeout=3)
+        s2, st = r.read("/stats", timeout=3)
+        t = time.time()
+        with r.vlock:
+            self.drain()
+            if s1 == 200 and isinstance(eps, list) and r.svc.inc == inc and r.svc.pid == pid:
+                last_id = st.get("events_last_id") if s2 == 200 and isinstance(st, dict) else None
+                for e in eps:
+                    label = r.label_of.get(e["id"])
+                    if label is None:
+                        continue
+                    ep = r.eps[label]
+                    r.verifier.cursor_sample(label, e["cursor"], t, inc, last_id)
+                    r.verifier.settle(label, e["cursor"])
+                    ep.cursor = e["cursor"]
+                    if e.get("disabled") and ep.cls in ("oracle", "healthy", "healthy2", "filter", "slow", "flapping", "http5xx", "https", "rate", "churn"):
+                        r.verifier.v.add("F_disabled", ep=label, paused=e.get("paused"), t=t)
+                if s2 == 200 and isinstance(st, dict):
+                    r.last_stats = st
+                    r.last_stats_t = t
+            if t - self.last_purge > 10:
+                self.last_purge = t
+                r.verifier.purge(t)
+        self.cycles += 1
+
+    def sync_settle(self, label):
+        """A churn endpoint is about to go: its cursor has reached the newest event; read the ledger once more and judge everything up to it."""
+        r = self.r
+        ep = r.eps[label]
+        s, e = r.read(f"/endpoints/{ep.svc_id}", timeout=5)
+        if s != 200:
+            return
+        with r.vlock:
+            self.drain()
+            r.verifier.settle(label, e["cursor"])
+
+    def run(self):
+        r = self.r
+        while not r.stop_all.is_set():
+            t0 = time.time()
+            try:
+                self.cycle()
+            except Exception as ex:  # noqa: BLE001
+                r.log("checker_error", error=repr(ex))
+            r.stop_all.wait(max(0.05, 1.0 - (time.time() - t0)))
+
+
+class Watcher(threading.Thread):
+    def __init__(self, run):
+        super().__init__(daemon=True, name="watcher")
+        self.r = run
+        path = os.path.join(run.out, "metrics.csv")
+        fresh = not os.path.exists(path) or os.path.getsize(path) == 0
+        self.f = open(path, "a", newline="", buffering=1)
+        self.w = csv.DictWriter(self.f, fieldnames=COLUMNS, extrasaction="ignore")
+        if fresh:
+            self.w.writeheader()
+        self.js = open(os.path.join(run.out, "samples.jsonl"), "a", buffering=1)
+        self.probe_off = 0
+        self.last_sweep = 0.0
+        self.last = {"t": time.time(), "cpu": time.process_time(), "recv_cpu": None, "probe_cpu": None}
+        self.rows = []
+
+    def probe_windows(self):
+        out = []
+        path = os.path.join(self.r.out, "probe.jsonl")
+        try:
+            with open(path, "rb") as f:
+                f.seek(self.probe_off)
+                data = f.read()
+        except OSError:
+            return out
+        end = data.rfind(b"\n") + 1
+        self.probe_off += end
+        for line in data[:end].splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return out
+
+    def proc_cpu(self, pid):
+        try:
+            f = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+            return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+        except (OSError, IndexError, TypeError):
+            return 0.0
+
+    def sample(self):
+        r = self.r
+        now = time.time()
+        row = {"t": round(now, 3), "el": round(r.elapsed(), 1), "inc": r.svc.inc, "pid": r.svc.pid or "", "up": 0, "bursting": int(r.bursting), "acked": r.poster.counts["acked"],
+               "ingested_bytes": r.poster.bytes_ingested}
+        try:
+            row["loadavg1"] = os.getloadavg()[0]
+        except OSError:
+            pass
+        info = r.svc.proc_info()
+        if info:
+            row["up"] = 1
+            row["rss_kb"], row["hwm_kb"], row["threads"], row["fds"] = info
+            row["cpu_s"] = round(r.svc.cpu_s(), 2)
+        row["data_bytes"], row["files"], row["seg_files"] = dir_usage(r.datadir)
+        if now - self.last_sweep > 60:
+            self.last_sweep = now
+            sweep_sidecars(r.datadir)
+        detail = {"t": row["t"], "lag": {}, "dead": {}}
+        s, st = r.read("/stats", timeout=3)
+        if s == 200 and isinstance(st, dict):
+            for col, key in (("events_first", "events_first_id"), ("events_last", "events_last_id"), ("segments", "events_segments"), ("sealed", "segments_sealed"),
+                             ("dropped", "segments_dropped"), ("snapshots", "snapshots"), ("maint_ms_max", "maintenance_ms_max"), ("maint_errors", "maintenance_errors"),
+                             ("lock_skips", "maintenance_lock_skips"), ("delivered", "delivered"), ("failed", "failed"), ("dead", "dead"), ("filtered", "filtered"),
+                             ("db_reconnects", "database_reconnects"), ("db_failures", "database_failures"), ("db_losses", "database_losses"), ("hist_written", "history_written"),
+                             ("hist_failed", "history_failed"), ("hist_dropped", "history_dropped"), ("replays_waiting", "replays")):
+                row[col] = st.get(key, "")
+        s, text = r.read("/metrics", timeout=4, raw=True)
+        if s == 200 and isinstance(text, str):
+            plain = {n: float(v) for n, v in PLAIN.findall(text)}
+            row["in_flight"] = plain.get("hooks_attempts_in_flight", "")
+            row["retries_waiting"] = plain.get("hooks_retries_waiting", "")
+            lag = parse_series(text, "hooks_endpoint_lag_events")
+            dead = parse_series(text, "hooks_endpoint_dead_letters")
+            if lag:
+                row["lag_max"], row["lag_sum"], row["lag_over_1024"] = max(lag.values()), sum(lag.values()), sum(1 for v in lag.values() if v > 1024)
+            for sid, v in lag.items():
+                detail["lag"][r.label_of.get(sid, f"id{sid}")] = v
+            for sid, v in dead.items():
+                lb = r.label_of.get(sid)
+                detail["dead"][lb or f"id{sid}"] = v
+                if lb is not None:
+                    with r.vlock:
+                        r.verifier.dead_letters(lb, int(v), now)
+        pw = self.probe_windows()
+        if pw:
+            lat = sorted(x for w in pw for x in w.get("l", []))
+            row["probe_max_ms"] = max(w.get("max", 0) for w in pw)
+            row["probe_p99_ms"] = lat[min(len(lat) - 1, int(len(lat) * 0.99))] if lat else 0
+            row["probe_errors"] = sum(w.get("err", 0) for w in pw)
+            row["control_max_ms"] = max(w.get("ctl", 0) for w in pw)
+        w = r.poster.window()
+        row["ingest_per_s"], row["ingest_p50_ms"], row["ingest_p99_ms"], row["ingest_max_ms"] = round(w["per_s"], 1), round(w["p50"], 2), round(w["p99"], 2), round(w["max"], 2)
+        rs = r.recv({"op": "stats"})
+        dt = max(1e-3, now - self.last["t"])
+        if isinstance(rs, dict) and "cpu_s" in rs:
+            row["deliv_lat_p50_ms"], row["deliv_lat_p99_ms"], row["deliv_lat_max_ms"] = rs["lat_p50"], rs["lat_p99"], rs["lat_max"]
+            row["recv_loop_lag_max_ms"] = round(rs["loop_lag_max_ms"], 1)
+            if self.last["recv_cpu"] is not None:
+                row["receivers_cpu_pct"] = round((rs["cpu_s"] - self.last["recv_cpu"]) / dt * 100, 1)
+            self.last["recv_cpu"] = rs["cpu_s"]
+            r.recv_stats = rs
+        cpu = time.process_time()
+        pcpu = self.proc_cpu(r.probe.pid) if r.probe else 0.0
+        if self.last["probe_cpu"] is not None and "receivers_cpu_pct" in row:
+            row["harness_cpu_pct"] = round(((cpu - self.last["cpu"]) + (pcpu - self.last["probe_cpu"])) / dt * 100 + row["receivers_cpu_pct"], 1)
+        self.last.update(t=now, cpu=cpu, probe_cpu=pcpu)
+        self.w.writerow(row)
+        self.js.write(json.dumps(detail) + "\n")
+        self.rows.append(row)
+        return row
+
+    def run(self):
+        r = self.r
+        while not r.stop_all.is_set():
+            t0 = time.time()
+            try:
+                self.sample()
+            except Exception as ex:  # noqa: BLE001
+                r.log("watcher_error", error=repr(ex))
+            r.stop_all.wait(max(0.2, r.args.sample_s - (time.time() - t0)))

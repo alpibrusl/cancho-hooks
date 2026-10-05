@@ -1,0 +1,156 @@
+name: soak
+
+# The soak test of docs/soak.md. It is never run by a push or a pull request: by hand (Actions, "soak", Run workflow) or once a week.
+# A job on a GitHub-hosted runner may not run longer than six hours, so the run is of at most five and a half; the real 24-hour run is made on a machine of its own with
+#   python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out
+# and its report is published in docs/soak.md. The numbers of this job are those of a shared two-or-four-core virtual machine and say so in their report.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Hours to run (at most 5.5)"
+        default: "5.5"
+      seed:
+        description: "Seed of the schedule of faults"
+        default: "1"
+      rate:
+        description: "Events a second in the steady phases"
+        default: "40"
+      burst_rate:
+        description: "Events a second in a burst"
+        default: "120"
+      endpoints:
+        description: "Long-lived endpoints (the classes of docs/soak.md, in order)"
+        default: "12"
+      tmpfs_mb:
+        description: "Size in MB of a tmpfs for the data directory, which adds the disk-full fault (0: none)"
+        default: "0"
+  schedule:
+    - cron: "41 3 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # A PostgreSQL that wants a password, as in ci.yml. The soak truncates its endpoints, attempts and schedules tables: this one is its own.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pgpass
+          POSTGRES_DB: hooks_soak
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      HOOKS_PG: 127.0.0.1:5432:postgres:hooks_soak
+      HOOKS_PG_PASSWORD: pgpass
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: hooks
+
+      - name: Read the compiler pin from lex-sys.toml
+        id: pin
+        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.pin.outputs.rev }}
+          path: lex-sys
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: lex-sys/target/release/lex-sys
+          key: lex-sys-${{ steps.pin.outputs.rev }}
+
+      - name: Build lex-sys
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: lex-sys
+        run: cargo build --release -p lex-sys
+
+      - name: OpenSSL and the PostgreSQL client
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libssl-dev openssl postgresql-client
+          openssl version
+
+      - name: Build the service and the shims
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
+
+      - name: The harness against itself (the checker must catch every mutation of a ledger)
+        working-directory: hooks
+        run: python3 scripts/soak/soak.py --selftest-ledger
+
+      - name: Soak
+        id: soak
+        working-directory: hooks
+        run: |
+          hours="${{ github.event.inputs.hours || '5.5' }}"
+          python3 - "$hours" <<'PY'
+          import sys
+          h = float(sys.argv[1])
+          if not 0 < h <= 5.5:
+              sys.exit("hours must be above 0 and at most 5.5 on a GitHub-hosted runner")
+          PY
+          tmpfs="${{ github.event.inputs.tmpfs_mb || '0' }}"
+          python3 scripts/soak/soak.py --binary build/hooks --hours "$hours" \
+            --seed "${{ github.event.inputs.seed || '1' }}" \
+            --rate "${{ github.event.inputs.rate || '40' }}" \
+            --burst-rate "${{ github.event.inputs.burst_rate || '120' }}" \
+            --endpoints "${{ github.event.inputs.endpoints || '12' }}" \
+            --tmpfs-data "$tmpfs" \
+            --out "$RUNNER_TEMP/soak-out" --progress-s 300
+
+      - name: Report
+        if: always()
+        working-directory: hooks
+        run: |
+          if [ -f "$RUNNER_TEMP/soak-out/verdict.json" ]; then
+            python3 scripts/soak/report.py "$RUNNER_TEMP/soak-out"
+            cat "$RUNNER_TEMP/soak-out/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "the run left no verdict" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Keep the report and the series
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/soak-out/report.md
+            ${{ runner.temp }}/soak-out/report.json
+            ${{ runner.temp }}/soak-out/verdict.json
+            ${{ runner.temp }}/soak-out/run.json
+            ${{ runner.temp }}/soak-out/metrics.csv
+            ${{ runner.temp }}/soak-out/samples.jsonl
+            ${{ runner.temp }}/soak-out/probe.jsonl
+            ${{ runner.temp }}/soak-out/chaos.jsonl
+            ${{ runner.temp }}/soak-out/violations.jsonl
+            ${{ runner.temp }}/soak-out/service.log
+            ${{ runner.temp }}/soak-out/receivers.log
+          if-no-files-found: warn
+
+      # What a person needs to look at a failure: the data directory and both ledgers, compressed.
+      - name: Keep the data directory and the ledgers of a failed run
+        if: failure()
+        run: |
+          cd "$RUNNER_TEMP" && tar czf soak-evidence.tgz --exclude='soak-out/backups' soak-out/data soak-out/ledger soak-out/acked.bin soak-out/spec.json soak-out/state.json 2>/dev/null || true
+          ls -l soak-evidence.tgz || true
+
+      - name: Upload the evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/soak-evidence.tgz
+          if-no-files-found: ignore
