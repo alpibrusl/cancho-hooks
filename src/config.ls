@@ -38,6 +38,9 @@ import std.bytes;
 //     pg-attempt-ms  the longest one attempt to connect, log in and prepare may take   default 5000 (section 37)
 //     pg-request-ms  the longest a request to the database may wait for any answer before its connection is given up; 0 never   default 10000 (section 37)
 //     pg-start-wait-ms  how long the service may go without having read its endpoints from the database before it ends with status 20; 0 never   default 30000 (section 37)
+//     retry-jitter  how far each retry delay is moved either way, in percent of itself (0 to 50; 0 is exactly the schedule)   default 10 (section 39.3)
+//     endpoint-concurrency  the most attempts one endpoint has in flight (1 to 8; an endpoint's own "concurrency" replaces it)   default 8 (section 39.4)
+//     endpoint-rate  the most attempts one endpoint starts a second (0 to 100000, 0: no limit; an endpoint's own "rate" replaces it)   default 0 (section 39.4)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -52,6 +55,8 @@ import std.bytes;
 //     cfg[19] ingest-token length   cfg[20] read-token length   cfg[21] production (0 or 1)   cfg[22] rotation-grace-ms (86400000 until set)
 //     cfg[40] retention-days   cfg[41] segment-bytes   cfg[42] delivery-log-bytes   cfg[43] idem-keys   cfg[44] compact-now   cfg[45] retention-ms   cfg[46] compact-kill-at
 //     cfg[23] pg-backoff-min-ms (100 until set)   cfg[24] pg-backoff-max-ms (5000)   cfg[25] pg-attempt-ms (5000)   cfg[26] pg-request-ms (10000)   cfg[27] pg-start-wait-ms (30000)
+//     cfg[28] retry-jitter (0 to 50; 10 until set)   cfg[29] endpoint-concurrency (1 to 8; 8 until set)   cfg[30] endpoint-rate (0 to 100000)
+//     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
@@ -235,6 +240,19 @@ pub fn compact_kill_at[&c](cfg: &c [int]) -> [] int {
     return cfg[46];
 }
 
+// How far a retry delay is moved, in percent (`docs/design.md` section 39.3); the limits of an endpoint's attempts (section 39.4).
+pub fn retry_jitter[&c](cfg: &c [int]) -> [] int {
+    return cfg[28];
+}
+
+pub fn endpoint_concurrency[&c](cfg: &c [int]) -> [] int {
+    return cfg[29];
+}
+
+pub fn endpoint_rate[&c](cfg: &c [int]) -> [] int {
+    return cfg[30];
+}
+
 // The wait after a failed connection to the database starts at this many ms and doubles up to `pg_backoff_max_ms` (`docs/design.md` section 37).
 pub fn pg_backoff_min_ms[&c](cfg: &c [int]) -> [] int {
     return cfg[23];
@@ -289,6 +307,8 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[25] = 5000;
     cfg[26] = 10000;
     cfg[27] = 30000;
+    cfg[28] = 10;
+    cfg[29] = 8;
     return 0;
 }
 
@@ -483,6 +503,27 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[27] = n;
+        }
+    } else if bytes.equal(key, "retry-jitter") {
+        let n = number(value);
+        if n < 0 || n > 50 {
+            why = why_value();
+        } else {
+            cfg[28] = n;
+        }
+    } else if bytes.equal(key, "endpoint-concurrency") {
+        let n = number(value);
+        if n < 1 || n > 8 {
+            why = why_value();
+        } else {
+            cfg[29] = n;
+        }
+    } else if bytes.equal(key, "endpoint-rate") {
+        let n = number(value);
+        if n < 0 || n > 100000 {
+            why = why_value();
+        } else {
+            cfg[30] = n;
         }
     } else if bytes.equal(key, "pg-host") {
         if len(value) < 1 || len(value) > 253 {

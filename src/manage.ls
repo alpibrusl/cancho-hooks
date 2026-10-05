@@ -167,7 +167,7 @@ pub fn why(code: int) -> [] &static [byte] {
         return "a new endpoint starts from now: \"from\" may only be \"now\"";
     }
     if code == 7 {
-        return "a change needs at least one of \"host\", \"port\", \"secret\", \"rotate\", \"types\", \"headers\", \"keep_old_ms\" and \"keep_old\"";
+        return "a change needs at least one of \"host\", \"port\", \"secret\", \"rotate\", \"types\", \"headers\", \"keep_old_ms\", \"keep_old\", \"concurrency\" and \"rate\"";
     }
     if code == 8 {
         return "\"rotate\" must be true, and cannot be given with a \"secret\"";
@@ -343,7 +343,7 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
             }
             if code == 0 {
                 // The members of `epx.ls` (the subscription, the headers, how long the previous secret stays valid): judged there, named here.
-                if json.get(body, t, 0, "types") >= 0 || json.get(body, t, 0, "headers") >= 0 || json.get(body, t, 0, "keep_old_ms") >= 0 || json.get(body, t, 0, "keep_old") >= 0 {
+                if json.get(body, t, 0, "types") >= 0 || json.get(body, t, 0, "headers") >= 0 || json.get(body, t, 0, "keep_old_ms") >= 0 || json.get(body, t, 0, "keep_old") >= 0 || json.get(body, t, 0, "concurrency") >= 0 || json.get(body, t, 0, "rate") >= 0 {
                     fields = fields + 16;
                 }
             }

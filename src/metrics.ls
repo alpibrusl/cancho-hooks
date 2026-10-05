@@ -176,7 +176,7 @@ pub fn g_endpoints_loaded() -> [] int {
 // ---- the cells of an endpoint's row
 
 pub fn row() -> [] int {
-    return 9;
+    return 11;
 }
 
 pub fn e_id() -> [] int {
@@ -216,6 +216,16 @@ pub fn e_retries() -> [] int {
 
 pub fn e_in_flight() -> [] int {
     return 8;
+}
+
+// Attempts held back by the endpoint's rate limit since the start (`lim.held_back`).
+pub fn e_throttled() -> [] int {
+    return 9;
+}
+
+// Dead letters the endpoint holds now (`dead.count`).
+pub fn e_dead_letters() -> [] int {
+    return 10;
 }
 
 // ---- the text
@@ -384,6 +394,8 @@ pub fn render[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int,
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_paused", "gauge", "1 if the circuit breaker is what disabled the endpoint.", e_paused());
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_retries_waiting", "gauge", "Events that failed at least once and wait for the next attempt.", e_retries());
     b = endpoint_series(heap, b, ep, n, "hooks_endpoint_in_flight", "gauge", "Attempts on the wire to the endpoint.", e_in_flight());
+    b = endpoint_series(heap, b, ep, n, "hooks_endpoint_throttled_total", "counter", "Attempts held back by the endpoint's rate limit (a wait, not a failure), since the start.", e_throttled());
+    b = endpoint_series(heap, b, ep, n, "hooks_endpoint_dead_letters", "gauge", "Dead letters the endpoint holds, newest 2048 at most (GET /endpoints/:id/dead).", e_dead_letters());
     b = head(heap, b, "hooks_endpoint_failing_since_ms", "gauge", "Unix ms at which the endpoint's current run of failed attempts began, 0 if it has none.");
     var i = 0;
     while i < n {

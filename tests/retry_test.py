@@ -57,7 +57,8 @@ def start(schedule, recv):
     secret = "whsec_" + base64.b64encode(os.urandom(24)).decode()
     with open(os.path.join(datadir, "endpoints.conf"), "w") as f:
         f.write(f"0 127.0.0.1 {recv.port} {secret}\n")
-    svc = chaos.Service(chaos.free_port(), datadir, extra=(schedule,))
+    # `--retry-jitter 0`: this test measures the schedule itself, to the millisecond (jitter has its own, tests/jitter_test.py)
+    svc = chaos.Service(chaos.free_port(), datadir, extra=(schedule, 2000, 86400000, "--retry-jitter", "0"))
     svc.start()
     return svc, datadir
 

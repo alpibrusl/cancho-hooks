@@ -291,14 +291,24 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         state.put_outcome(buf, 0, 10, state.paused(), 4, 0, 0, 0);
         test.assert_eq(state.outcome_at(buf, 0).0, state.paused());
         test.assert_eq(state.outcome_at(buf, 0).1, 4);
+        // 16, a cancelled replay (section 39.2), and 17, a dead letter in a snapshot (section 39.1), read back; neither changes a cell
+        state.put_outcome(buf, 0, 12, state.replay_cancelled(), 4, 9, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, 16);
+        test.assert_eq(state.outcome_at(buf, 0).1, 4);
+        test.assert_eq(state.outcome_at(buf, 0).2, 9);
+        state.put_outcome(buf, 0, 13, state.dead_entry(), 4, 9, 3 * 65536 + 12 + 1, 1767225600000);
+        test.assert_eq(state.outcome_at(buf, 0).0, 17);
+        test.assert_eq(state.outcome_at(buf, 0).3, 3 * 65536 + 13);
+        test.assert_eq(state.outcome_at(buf, 0).4, 1767225600000);
         // one past the last kind is still not an outcome
-        state.put_outcome(buf, 0, 11, state.reason(), 4, 7, 2, 11);
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 16);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 18);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);
         test.assert_eq(state.apply(w, c, 0, state.streak(), 1, 0, 1767225600000), 0);
         test.assert_eq(state.apply(w, c, 0, state.paused(), 1, 0, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.replay_cancelled(), 1, 0, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.dead_entry(), 1, 65537, 5), 0);
         test.assert_eq(c[0], 0);
         test.assert(!state.is_final(w, c, 0, 1));
         test.assert_eq(state.attempts(w, 0, 1), 0);

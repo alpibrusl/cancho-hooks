@@ -113,6 +113,21 @@ pub fn format() -> [] int {
     return 15;
 }
 
+// A waiting replay was cancelled by a person (`docs/design.md` section 39.2): `endpoint` and `event` are the replay's; the other fields are 0. Recovery ends
+// the replay without an outcome, as `replay_dead` does, and the event stays what it was (a dead letter stays one). `apply` does nothing with it.
+pub fn replay_cancelled() -> [] int {
+    return 16;
+}
+
+// A dead letter, in a snapshot of the state (`docs/design.md` section 39.1): the snapshot has no `dead` record for an event that is final (it writes it as
+// `delivered`, which is all the window needs), so what the table of dead letters holds is written in these. `endpoint` and `event` are the dead
+// letter's; `attempts` is its attempts times 65536 plus the reason it died of (`reason.ls`), plus one; `next_at` is when it died (Unix ms). With
+// `attempts` 0 the record is the table's *floor* instead: `event` is the largest event id that was left out of the table for room. `apply` does nothing
+// with it.
+pub fn dead_entry() -> [] int {
+    return 17;
+}
+
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
 pub fn day_ms() -> [] int {
     return 86400000;
@@ -242,7 +257,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 15 {
+    if kind < 1 || kind > 17 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));

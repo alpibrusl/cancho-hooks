@@ -128,6 +128,17 @@ fn rt_floor[&d, &l](dv: &d [int], lg: &l evlog.Ev) -> [] int {
 // The snapshot
 // ---------------------------------------------------------------------
 
+// The dead letters whose events are gone from the events log go too (`dead.ls`): every slot's table, from the first event that is left.
+fn dead_expire_all[&l, &d](lg: &l evlog.Ev, dv: &!d [int]) -> [] int {
+    var e = 0;
+    var gone = 0;
+    while e < state.max_endpoints() {
+        gone = gone + dead.expire(dead_of_mut(dv), e, evlog.first_id(lg));
+        e = e + 1;
+    }
+    return gone;
+}
+
 // One outcome record into `buf` at `at`, with the next sequence number. Answers where the next goes.
 fn rt_put[&b, &v](buf: &!b [byte], at: int, dv: &!v [int], kind: int, e: int, id: int, tries: int, next_at: int) -> [] int {
     let n = state.put_outcome(buf, at, dv[c_seq()], kind, e, id, tries, next_at);
@@ -136,9 +147,9 @@ fn rt_put[&b, &v](buf: &!b [byte], at: int, dv: &!v [int], kind: int, e: int, id
 }
 
 // The bytes the snapshot of the delivery state needs at most: 62 slots of one record for the slot, one for each cell of its window, a few for its flags,
-// and the replays. (A little over 4.9 MB.)
+// and the replays (a little over 4.9 MB), and one for each dead letter the tables hold, 2,048 an endpoint, and the floor (9.8 MB more).
 fn rt_snapshot_room() -> [] int {
-    return 6291456;
+    return 16777216;
 }
 
 // The state as the shortest log that replays to it (`docs/retention.md` section 6): a header, then for each slot that has an endpoint (live, dormant or
@@ -161,11 +172,21 @@ fn rt_build[&b, &v](buf: &!b [byte], dv: &!v [int], now: int) -> [] (int, int) {
                 let tries = state.attempts(dv[off_cells()..off_flight()], e, id);
                 let next_at = state.next_at(dv[off_cells()..off_flight()], e, id);
                 if state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) {
-                    at = rt_put(buf, at, dv, state.dead(), e, id, tries, next_at);
+                    // final is all the window needs; which of them are dead letters is the table's (below)
+                    at = rt_put(buf, at, dv, state.delivered(), e, id, tries, next_at);
                 } else if tries > 0 || next_at > 0 {
                     at = rt_put(buf, at, dv, state.failed(), e, id, tries, next_at);
                 }
                 id = id + 1;
+            }
+            // the dead letters the table holds, oldest first, and the floor it has (what was left out for room)
+            var dk = 0;
+            while dk < dead.count(dead_of(dv), e) {
+                at = rt_put(buf, at, dv, state.dead_entry(), e, dead.id_at(dead_of(dv), e, dk), dead.attempts_at(dead_of(dv), e, dk) * 65536 + dead.reason_at(dead_of(dv), e, dk) + 1, dead.died_at(dead_of(dv), e, dk));
+                dk = dk + 1;
+            }
+            if dead.floor(dead_of(dv), e) > 0 {
+                at = rt_put(buf, at, dv, state.dead_entry(), e, dead.floor(dead_of(dv), e), 0, 0);
             }
             if is_paused(dv, e) {
                 at = rt_put(buf, at, dv, state.paused(), e, 0, 0, 0);
@@ -197,6 +218,7 @@ fn rt_build[&b, &v](buf: &!b [byte], dv: &!v [int], now: int) -> [] (int, int) {
 fn rt_write_snapshot[&h, &l, &v](heap: &!h Heap, lg: &l evlog.Ev, dv: &!v [int], now: int) -> [heap, fs_read(""), fs_write(""), file_write, poll] int {
     let fs = evlog.lend(lg);
     let dir = evlog.dir_of(lg);
+    dead_expire_all(lg, dv);
     let buf = box_slice(heap, rt_snapshot_room(), byte_of(0));
     var total = 0;
     var mid = 0;
@@ -421,6 +443,7 @@ fn rt_maintain[&h, &l, &v, &i, &a, &s, &k, &w](heap: &!h Heap, lg: &!l evlog.Ev,
                             idem.set_floor(ix, oldest.0);
                             idem.set_floor(ix[cat..len(ix)], oldest.0);
                             dv[rt_at() + r_dropped_id()] = oldest.0;
+                            dead_expire_all(lg, dv);
                             dv[rt_at() + r_msg()] = 2;
                             dv[rt_at() + r_msg() + 1] = oldest.0;
                             dv[rt_at() + r_msg() + 2] = events;
@@ -482,6 +505,7 @@ fn rt_compact_now[&h, &l, &v, &i, &a, &w](heap: &!h Heap, lg: &!l evlog.Ev, done
                             idem.set_floor(ix, oldest.0);
                             idem.set_floor(ix[cat..len(ix)], oldest.0);
                             dv[rt_at() + r_dropped_id()] = oldest.0;
+                            dead_expire_all(lg, dv);
                         } else {
                             more = false;
                             rc = 1;

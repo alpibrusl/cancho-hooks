@@ -305,7 +305,7 @@ fn test_every_reason_has_a_series_and_the_numbers_are_the_counters[&h](heap: &!h
     return 0;
 }
 
-// A row per endpoint: eight series each, labelled by the endpoint's id and nothing else; the reason of the last failure only where there is one.
+// A row per endpoint: ten series each, labelled by the endpoint's id and nothing else; the reason of the last failure only where there is one.
 fn test_each_endpoint_has_its_series[&h](heap: &!h Heap) -> [heap] int {
     region a {
         let g = alloc_slice[a](metrics.g_size(), 0);
@@ -334,8 +334,8 @@ fn test_each_endpoint_has_its_series[&h](heap: &!h Heap) -> [heap] int {
             test.assert(has(t, "hooks_endpoint_failing_since_ms{endpoint=\"12\"} 1767225600000\n"));
             test.assert(has(t, "hooks_endpoint_last_failure{endpoint=\"7\",reason=\"connect_refused\"} 1\n"));
             test.assert_eq(count_of(t, "hooks_endpoint_last_failure{"), 1);
-            // 2 endpoints x 7 per-endpoint families
-            test.assert_eq(count_of(t, "{endpoint="), 2 * 7 + 1);
+            // 2 endpoints x 9 per-endpoint families (section 39 added the throttled attempts and the dead letters)
+            test.assert_eq(count_of(t, "{endpoint="), 2 * 9 + 1);
         }
         buffer.drop(heap, text);
     }
@@ -364,8 +364,8 @@ fn test_sixty_two_endpoints_fit_one_answer[&h](heap: &!h Heap) -> [heap] int {
         let text = metrics.render(heap, g, ep, 62, rs);
         borrow text as &tb in {
             let t = buffer.bytes(tb);
-            test.assert(len(t) < 40000);
-            test.assert_eq(count_of(t, "{endpoint="), 62 * 8);
+            test.assert(len(t) < 52000);
+            test.assert_eq(count_of(t, "{endpoint="), 62 * 10);
         }
         buffer.drop(heap, text);
     }

@@ -411,8 +411,9 @@ def stage5():
     check("5a. ... /readyz is 503, check database", st == 503 and body.get("check") == "database", str((st, body)))
     st, data = svc.get("/endpoints")
     check("5a. ... GET /endpoints is 503: the endpoints are not loaded", st == 503 and b"not loaded" in data, str((st, data)))
-    codes = [svc.request(m, p, b"{}", {**AUTH})[0] for m, p in (("POST", "/endpoints"), ("PATCH", "/endpoints/0"), ("DELETE", "/endpoints/0"), ("POST", "/endpoints/0/enable"), ("POST", "/events/1/replay"))]
-    check("5a. ... so are the routes that change or use them", codes == [503] * 5, str(codes))
+    codes = [svc.request(m, p, b"{}", {**AUTH})[0] for m, p in (("POST", "/endpoints"), ("PATCH", "/endpoints/0"), ("DELETE", "/endpoints/0"), ("POST", "/endpoints/0/enable"), ("POST", "/events/1/replay"),
+                                                                                                             ("GET", "/endpoints/0/dead"), ("POST", "/endpoints/0/replay-dead"), ("DELETE", "/events/1/replay/0"), ("DELETE", "/endpoints/0/replays"))]
+    check("5a. ... so are the routes that change or use them, and the four of dead letters and cancelling a replay (design 39.1)", codes == [503] * 9, str(codes))
     ids = []
     for n in range(1, 6):
         s, data = svc.post_event(n)

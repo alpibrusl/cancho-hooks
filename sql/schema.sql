@@ -57,6 +57,13 @@ alter table endpoints add column if not exists headers text not null default '';
 alter table endpoints add column if not exists secret_old text not null default '';
 alter table endpoints add column if not exists secret_old_until bigint not null default 0;
 
+-- How fast an endpoint is attempted (docs/design.md section 39.4). `concurrency` is the most attempts the endpoint has in flight together (1 to 8)
+-- and `rate` the most it has *started* in a second (1 to 100000); 0 in either is "follow the service's endpoint-concurrency / endpoint-rate".
+-- A table made before these columns existed is given them with 0, which is what it did: the service's settings. Run this file BEFORE starting a
+-- binary that has the columns in its queries.
+alter table endpoints add column if not exists concurrency int not null default 0 check (concurrency between 0 and 8);
+alter table endpoints add column if not exists rate int not null default 0 check (rate between 0 and 100000);
+
 -- The ids `POST /endpoints` gives (docs/design.md section 25.2): a sequence, so that an id is never given twice even after its endpoint is
 -- deleted. An id somebody inserted by hand is skipped: the new id is the larger of the sequence and one more than the largest in the table.
 create sequence if not exists endpoint_ids minvalue 0 start 0;

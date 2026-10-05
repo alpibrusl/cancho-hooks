@@ -59,6 +59,10 @@ import filter;
 import wire;
 import hdrs;
 import dbup;
+import jitter;
+import lim;
+import dead;
+import bulk;
 
 fn max_len() -> [] int {
     return 65536;
@@ -469,6 +473,8 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
         ep[at + metrics.e_failing_since()] = dv[off_streak() + e];
         ep[at + metrics.e_last_reason()] = ops.last_reason(o, e);
         ep[at + metrics.e_in_flight()] = dv[off_flying() + e];
+        ep[at + metrics.e_throttled()] = lim.held_back(lim_of(dv), e);
+        ep[at + metrics.e_dead_letters()] = dead.count(dead_of(dv), e);
         flying = flying + dv[off_flying() + e];
         var waiting = 0;
         var id = cursor + 1;
@@ -537,7 +543,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         // Asked to stop (`docs/design.md` section 34.4): nothing new is taken, and the connection is closed after the answer.
         return server.failure(heap, out, 503, ops.stopping_message(), false);
     }
-    if (id >= 6 && id <= 9 || id >= 11 && id <= 14) && !history.endpoints_known(stats[off_hq()..off_hq() + history.size()]) {
+    if (id >= 6 && id <= 9 || id >= 11 && id <= 14 || id >= 20 && id <= 23) && !history.endpoints_known(stats[off_hq()..off_hq() + history.size()]) {
         // The endpoints are read from the table once the database is there (section 37.2); until then the service does not know who they are, and neither
         // lists, changes, replays nor enables them (an event is still taken: it waits in the log for them).
         return server.failure(heap, out, 503, "the endpoints are not loaded yet: the database has not answered since the service started", keep);
@@ -553,6 +559,16 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     if id >= 15 && id <= 19 {
         // /schedules (`docs/design.md` section 32): judged here, sent to the database by the loop (`note[0]` is -4), the answer held.
         return sched.judge(heap, id, request, table, path, params, body, scratch, sg, note, stats[off_token()..off_token() + manage.token_size()], history.enabled(stats[off_hq()..off_hq() + history.size()]), now / 1000, keep, out);
+    }
+    if id >= 20 && id <= 23 {
+        // Dead letters and cancelling replays (section 39.1).
+        if id == 20 {
+            return dead_list(heap, request, table, path, params, lg, window, done, stats, keep, out);
+        }
+        if id == 21 {
+            return dead_replay(heap, path, params, body, lg, window, done, stats, keep, out);
+        }
+        return cancel_route(heap, id, path, params, done, stats, keep, out);
     }
     if id == 1 {
         return server.reply(heap, out, 200, "{\"ok\":true}", keep);
@@ -776,6 +792,12 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 3));
         w = json.put_key(heap, w, "pg-start-wait-ms");
         w = json.put_int(heap, w, history.setting(stats[off_hq()..off_hq() + history.size()], 4));
+        w = json.put_key(heap, w, "retry-jitter");
+        w = json.put_int(heap, w, lim.jitter_percent(lim_of(stats)));
+        w = json.put_key(heap, w, "endpoint-concurrency");
+        w = json.put_int(heap, w, lim.conc_default(lim_of(stats)));
+        w = json.put_key(heap, w, "endpoint-rate");
+        w = json.put_int(heap, w, lim.rate_default(lim_of(stats)));
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -830,6 +852,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             w = json.put_key(heap, w, "failing_since");
             w = json.put_int(heap, w, stats[off_streak() + e]);
             w = epx.put_members(heap, w, stats[off_xt()..off_xt() + epx.xt_size()], i, now);
+            w = lim.put_members(heap, w, lim_of(stats), stats[off_xt()..off_xt() + epx.xt_size()], i);
             w = json.end_object(heap, w);
             i = i + 1;
         }
@@ -989,6 +1012,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_key(heap, w, "failing_since");
         w = json.put_int(heap, w, stats[off_streak() + slot]);
         w = epx.put_members(heap, w, stats[off_xt()..off_xt() + epx.xt_size()], wi, now);
+        w = lim.put_members(heap, w, lim_of(stats), stats[off_xt()..off_xt() + epx.xt_size()], wi);
         w = json.end_object(heap, w);
         let body = json.finish(w);
         var answer = out;
@@ -1112,6 +1136,384 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     return server.failure(heap, out, 404, "not found", keep);
 }
 
+// ---------------------------------------------------------------------
+// Dead letters, bulk replay, and cancelling a replay (`docs/design.md` section 39.1 and 36.2)
+// ---------------------------------------------------------------------
+
+// Where in the events log each dead letter of slot `e` starts, for the ones whose place is not known (a table built at start from the delivery log, which
+// does not say). One pass over the events log, from the record of the last entry whose place is known, to the last entry that needs it; the entries
+// and the log are both in event order, so it is a merge. Answers how many places were found.
+fn resolve_offsets[&l, &w, &d](lg: &!l evlog.Ev, window: &!w [byte], dv: &!d [int], e: int) -> [fs_read(""), file_read] int {
+    let n = dead.count(dead_of(dv), e);
+    var first = 0 - 1;
+    var k = 0;
+    while k < n && first < 0 {
+        if dead.offset_at(dead_of(dv), e, k) < 0 {
+            first = k;
+        }
+        k = k + 1;
+    }
+    if first < 0 {
+        return 0;
+    }
+    var p = first;
+    var at = 0;
+    if first > 0 {
+        p = first - 1;
+        at = dead.offset_at(dead_of(dv), e, first - 1);
+    }
+    var found = 0;
+    var going = true;
+    while going && p < n {
+        let r = evlog.read_at(lg, at, window);
+        if r.0 != 0 {
+            going = false;
+        } else {
+            let id = record.ms_of(window, 0);
+            while p < n && dead.id_at(dead_of(dv), e, p) < id {
+                p = p + 1;
+            }
+            if p < n && dead.id_at(dead_of(dv), e, p) == id {
+                if dead.offset_at(dead_of(dv), e, p) < 0 {
+                    dead.set_offset(dead_of_mut(dv), e, p, at);
+                    found = found + 1;
+                }
+                p = p + 1;
+            }
+            at = at + r.1;
+        }
+    }
+    return found;
+}
+
+// Read the event of entry `k` of slot `e`'s dead letters into `window`. Answers 1 if it is there (the place is known and the record at it is that event), else 0.
+fn load_dead[&l, &w, &d](lg: &!l evlog.Ev, window: &!w [byte], dv: &d [int], e: int, k: int) -> [fs_read(""), file_read] int {
+    let off = dead.offset_at(dead_of(dv), e, k);
+    if off < 0 {
+        return 0;
+    }
+    if evlog.read_at(lg, off, window).0 != 0 || record.ms_of(window, 0) != dead.id_at(dead_of(dv), e, k) {
+        return 0;
+    }
+    return 1;
+}
+
+fn put_dead_entry[&h, &l, &w, &d](heap: &!h Heap, wr: json.Writer, lg: &!l evlog.Ev, window: &!w [byte], dv: &d [int], e: int, k: int) -> [heap, fs_read(""), file_read] json.Writer {
+    var w = json.begin_object(heap, wr);
+    w = json.put_key(heap, w, "event");
+    w = json.put_int(heap, w, dead.id_at(dead_of(dv), e, k));
+    w = json.put_key(heap, w, "type");
+    var typed = false;
+    if load_dead(lg, window, dv, e, k) == 1 {
+        let t = filter.type_in(window);
+        if t.1 > 0 {
+            w = json.put_string(heap, w, window[t.0..t.0 + t.1]);
+            typed = true;
+        }
+    }
+    if !typed {
+        w = json.put_null(heap, w);
+    }
+    w = json.put_key(heap, w, "attempts");
+    w = json.put_int(heap, w, dead.attempts_at(dead_of(dv), e, k));
+    w = json.put_key(heap, w, "reason");
+    if dead.reason_at(dead_of(dv), e, k) == 0 {
+        w = json.put_string(heap, w, "unrecorded");
+    } else {
+        w = json.put_string(heap, w, reason.name(dead.reason_at(dead_of(dv), e, k)));
+    }
+    w = json.put_key(heap, w, "died_at");
+    w = json.put_int(heap, w, dead.died_at(dead_of(dv), e, k));
+    w = json.put_key(heap, w, "replaying");
+    w = json.put_bool(heap, w, rp_find(dv, e, dead.id_at(dead_of(dv), e, k)) >= 0);
+    return json.end_object(heap, w);
+}
+
+// `GET /endpoints/:id/dead`: a page of the endpoint's dead letters, newest first (or oldest, `order=asc`), from the entry after `after` in that order.
+fn dead_list[&h, &q, &t, &p, &l, &w, &g, &s](heap: &!h Heap, request: &q [byte], table: &t [int], path: &q [byte], params: &!p [int], lg: &!l evlog.Ev, window: &!w [byte], done: &!g log.Log, stats: &!s [int], keep: bool, out: buffer.Buffer) -> [heap, fs_read(""), file_read] buffer.Buffer {
+    let want = route.param_nat(path, params, 0);
+    if want < 0 {
+        return server.failure(heap, out, 400, "the id must be a number", keep);
+    }
+    let wi = index_of_id(stats, want);
+    if wi < 0 {
+        return server.failure(heap, out, 404, "no such endpoint", keep);
+    }
+    let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+    let page = bulk.parse_page(http.query(request, table));
+    if page.0 != 0 {
+        return server.failure(heap, out, 400, bulk.why(page.0), keep);
+    }
+    // a table that was short of dead letters and has room now is completed from the log first; the ones whose events retention has dropped are gone
+    dead_complete(done, window, stats, e);
+    dead.expire(dead_of_mut(stats), e, evlog.first_id(lg));
+    let n = dead.count(dead_of(stats), e);
+    // where the page starts, and which way it goes
+    var at = 0;
+    if page.2 {
+        at = n - 1;
+        if page.3 >= 0 {
+            at = dead.below(dead_of(stats), e, page.3) - 1;
+        }
+    } else if page.3 >= 0 {
+        at = dead.upto(dead_of(stats), e, page.3);
+    }
+    // the places of the events of the page, if they are not known: one pass for all of them
+    var need = false;
+    var j = 0;
+    var k = at;
+    while j < page.1 && k >= 0 && k < n {
+        if dead.offset_at(dead_of(stats), e, k) < 0 {
+            need = true;
+        }
+        if page.2 {
+            k = k - 1;
+        } else {
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    if need {
+        resolve_offsets(lg, window, stats, e);
+    }
+    var wr = json.writer(heap, 1024);
+    wr = json.begin_object(heap, wr);
+    wr = json.put_key(heap, wr, "endpoint");
+    wr = json.put_int(heap, wr, want);
+    wr = json.put_key(heap, wr, "order");
+    if page.2 {
+        wr = json.put_string(heap, wr, "desc");
+    } else {
+        wr = json.put_string(heap, wr, "asc");
+    }
+    wr = json.put_key(heap, wr, "held");
+    wr = json.put_int(heap, wr, n);
+    wr = json.put_key(heap, wr, "truncated");
+    wr = json.put_bool(heap, wr, dead.floor(dead_of(stats), e) > 0);
+    wr = json.put_key(heap, wr, "complete_above");
+    wr = json.put_int(heap, wr, dead.floor(dead_of(stats), e));
+    wr = json.put_key(heap, wr, "dead");
+    wr = json.begin_array(heap, wr);
+    var last = 0 - 1;
+    j = 0;
+    k = at;
+    while j < page.1 && k >= 0 && k < n {
+        wr = put_dead_entry(heap, wr, lg, window, stats, e, k);
+        last = dead.id_at(dead_of(stats), e, k);
+        if page.2 {
+            k = k - 1;
+        } else {
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    wr = json.end_array(heap, wr);
+    wr = json.put_key(heap, wr, "next");
+    if j == page.1 && k >= 0 && k < n {
+        wr = json.put_int(heap, wr, last);
+    } else {
+        wr = json.put_null(heap, wr);
+    }
+    wr = json.end_object(heap, wr);
+    let body = json.finish(wr);
+    var answer = out;
+    borrow body as &sb in {
+        answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, body);
+    return answer;
+}
+
+// `POST /endpoints/:id/replay-dead`: send the endpoint's dead letters again, oldest first, as replays (section 23), as many as the table of waiting replays has room
+// for (32 in all) and `limit` allows; the answer says how many were taken and how many are left, and a caller goes on until none is.
+fn dead_replay[&h, &q, &p, &b, &l, &w, &g, &s](heap: &!h Heap, path: &q [byte], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, window: &!w [byte], done: &!g log.Log, stats: &!s [int], keep: bool, out: buffer.Buffer) -> [heap, fs_read(""), file_read, file_write] buffer.Buffer {
+    let want = route.param_nat(path, params, 0);
+    if want < 0 {
+        return server.failure(heap, out, 400, "the id must be a number", keep);
+    }
+    let wi = index_of_id(stats, want);
+    if wi < 0 {
+        return server.failure(heap, out, 404, "no such endpoint", keep);
+    }
+    let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+    region a {
+        let list = alloc_slice[a](filter.max_list() + 8, 0);
+        let parsed = bulk.parse_body(heap, body, list);
+        if parsed.0 != 0 {
+            return server.failure(heap, out, 400, bulk.why(parsed.0), keep);
+        }
+        dead_complete(done, window, stats, e);
+        dead.expire(dead_of_mut(stats), e, evlog.first_id(lg));
+        var room = rp_free(stats);
+        if parsed.1 > 0 && parsed.1 < room {
+            room = parsed.1;
+        }
+        let n = dead.count(dead_of(stats), e);
+        if parsed.3 > 0 {
+            // a subscription is read from the events themselves
+            resolve_offsets(lg, window, stats, e);
+        }
+        // oldest first, past `after`: the ones that are not already replaying and are of the types asked for. The first `room` are taken; the rest are counted.
+        let picked = alloc_slice[a](2 * rp_cap() + 2, 0);
+        var taken = 0;
+        var remaining = 0;
+        var k = dead.upto(dead_of(stats), e, parsed.2);
+        while k < n {
+            let id = dead.id_at(dead_of(stats), e, k);
+            var wanted = rp_find(stats, e, id) < 0;
+            if wanted && parsed.3 > 0 {
+                wanted = false;
+                if load_dead(lg, window, stats, e, k) == 1 {
+                    let t = filter.type_in(window);
+                    wanted = filter.accepts(list, parsed.3, window[t.0..t.0 + t.1]);
+                }
+            }
+            if wanted {
+                if taken < room && taken < rp_cap() {
+                    picked[2 * taken] = id;
+                    picked[2 * taken + 1] = dead.offset_at(dead_of(stats), e, k);
+                    taken = taken + 1;
+                } else {
+                    remaining = remaining + 1;
+                }
+            }
+            k = k + 1;
+        }
+        // The records first, then one flush, and only then the table: a replay that was not stored is not started (as `POST /events/:id/replay`).
+        var i = 0;
+        while i < taken {
+            if note_outcome(done, stats, state.replay(), e, picked[2 * i], 0, 0) == 0 {
+                return server.failure(heap, out, 503, "the replays could not be stored", keep);
+            }
+            i = i + 1;
+        }
+        if taken > 0 && log.flush(done) != 0 {
+            return server.failure(heap, out, 503, "the replays could not be stored", keep);
+        }
+        i = 0;
+        while i < taken {
+            rp_put(stats, e, picked[2 * i], picked[2 * i + 1]);
+            i = i + 1;
+        }
+        var wr = json.writer(heap, 160);
+        wr = json.begin_object(heap, wr);
+        wr = json.put_key(heap, wr, "endpoint");
+        wr = json.put_int(heap, wr, want);
+        wr = json.put_key(heap, wr, "taken");
+        wr = json.put_int(heap, wr, taken);
+        wr = json.put_key(heap, wr, "remaining");
+        wr = json.put_int(heap, wr, remaining);
+        wr = json.put_key(heap, wr, "waiting");
+        wr = json.put_int(heap, wr, rp_cap() - rp_free(stats));
+        wr = json.put_key(heap, wr, "next");
+        if taken > 0 {
+            wr = json.put_int(heap, wr, picked[2 * (taken - 1)]);
+        } else {
+            wr = json.put_null(heap, wr);
+        }
+        wr = json.end_object(heap, wr);
+        let payload = json.finish(wr);
+        var status = 200;
+        if taken > 0 {
+            status = 202;
+        }
+        var answer = out;
+        borrow payload as &sb in {
+            answer = server.reply(heap, answer, status, buffer.bytes(sb), keep);
+        }
+        buffer.drop(heap, payload);
+        return answer;
+    }
+}
+
+// Cancel the waiting replays of endpoint slot `e`: of the event `only` (0: of all). A replay with an attempt on the wire is left (its outcome is recorded when
+// it ends). Each cancelled replay is a record (`state.replay_cancelled()`), one flush for all of them, and the table changes after it. Answers
+// `(cancelled, busy)`, or `(-1, 0)` if the records could not be stored (nothing changed).
+fn cancel_replays[&g, &d](done: &!g log.Log, dv: &!d [int], e: int, only: int) -> [file_write] (int, int) {
+    var cancelled = 0;
+    var busy = 0;
+    var r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 1] == e && (only == 0 || dv[b + 2] == only) {
+            if dv[b + 6] == 1 {
+                busy = busy + 1;
+            } else if note_outcome(done, dv, state.replay_cancelled(), e, dv[b + 2], 0, 0) == 1 {
+                cancelled = cancelled + 1;
+            } else {
+                return (0 - 1, 0);
+            }
+        }
+        r = r + 1;
+    }
+    if cancelled > 0 && log.flush(done) != 0 {
+        return (0 - 1, 0);
+    }
+    // the table, after the records are down: the same entries again, those that were not busy
+    r = 0;
+    while r < rp_cap() && cancelled > 0 {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 1] == e && (only == 0 || dv[b + 2] == only) && dv[b + 6] == 0 {
+            dv[b] = 0;
+        }
+        r = r + 1;
+    }
+    return (cancelled, busy);
+}
+
+// `DELETE /events/:id/replay/:endpoint` (id 22) and `DELETE /endpoints/:id/replays` (id 23).
+fn cancel_route[&h, &q, &p, &g, &s](heap: &!h Heap, id: int, path: &q [byte], params: &!p [int], done: &!g log.Log, stats: &!s [int], keep: bool, out: buffer.Buffer) -> [heap, file_write] buffer.Buffer {
+    var event = 0;
+    var endpoint = 0 - 1;
+    if id == 22 {
+        event = route.param_nat(path, params, 0);
+        if event < 1 {
+            return server.failure(heap, out, 400, "the id must be a positive number", keep);
+        }
+        endpoint = route.param_nat(path, params, 1);
+    } else {
+        endpoint = route.param_nat(path, params, 0);
+    }
+    if endpoint < 0 {
+        return server.failure(heap, out, 400, "the endpoint must be a number", keep);
+    }
+    let wi = index_of_id(stats, endpoint);
+    if wi < 0 {
+        return server.failure(heap, out, 404, "no such endpoint", keep);
+    }
+    let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+    if id == 22 && rp_find(stats, e, event) < 0 {
+        return server.failure(heap, out, 404, "no replay of that event is waiting for that endpoint", keep);
+    }
+    let (cancelled, busy) = cancel_replays(done, stats, e, event);
+    if cancelled < 0 {
+        return server.failure(heap, out, 503, "the cancellation could not be stored", keep);
+    }
+    if id == 22 && busy > 0 {
+        return server.failure(heap, out, 409, "an attempt of that replay is on the wire; ask again when it has ended", keep);
+    }
+    var wr = json.writer(heap, 96);
+    wr = json.begin_object(heap, wr);
+    if id == 22 {
+        wr = json.put_key(heap, wr, "event");
+        wr = json.put_int(heap, wr, event);
+    }
+    wr = json.put_key(heap, wr, "endpoint");
+    wr = json.put_int(heap, wr, endpoint);
+    wr = json.put_key(heap, wr, "cancelled");
+    wr = json.put_int(heap, wr, cancelled);
+    wr = json.put_key(heap, wr, "busy");
+    wr = json.put_int(heap, wr, busy);
+    wr = json.end_object(heap, wr);
+    let payload = json.finish(wr);
+    var answer = out;
+    borrow payload as &sb in {
+        answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, payload);
+    return answer;
+}
+
 fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     var r = route.empty(heap);
     r = route.add(heap, r, "GET", "/healthz", 1);
@@ -1133,6 +1535,10 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "GET", "/schedules/:id", 17);
     r = route.add(heap, r, "PATCH", "/schedules/:id", 18);
     r = route.add(heap, r, "DELETE", "/schedules/:id", 19);
+    r = route.add(heap, r, "GET", "/endpoints/:id/dead", 20);
+    r = route.add(heap, r, "POST", "/endpoints/:id/replay-dead", 21);
+    r = route.add(heap, r, "DELETE", "/events/:id/replay/:endpoint", 22);
+    r = route.add(heap, r, "DELETE", "/endpoints/:id/replays", 23);
     r = route.add(heap, r, "GET", "/readyz", 40);
     r = route.add(heap, r, "GET", "/metrics", 41);
     return r;
@@ -1405,6 +1811,8 @@ fn clear_slot[&d](dv: &!d [int], e: int) -> [] int {
     dv[scan_id(e)] = 0;
     dv[scan_off(e)] = 0 - 1;
     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], e, 0);
+    lim.clear_slot(lim_of_mut(dv), e);
+    dead.clear(dead_of_mut(dv), e);
     return 0;
 }
 
@@ -1473,9 +1881,34 @@ fn ex_type() -> [] int {
     return 8;
 }
 
-// Retention's block (`compact.ls`) follows the extras.
-fn dv_size() -> [] int {
+// The limits on the pace of attempts and the spread of retries (`lim.ls`, section 39), and the dead letters of each endpoint (`dead.ls`, section 39.1): the last
+// regions of the state, after retention's block (`compact.ls`).
+fn off_lim() -> [] int {
     return rt_at() + rt_size();
+}
+
+fn off_dead() -> [] int {
+    return off_lim() + lim.size();
+}
+
+fn dv_size() -> [] int {
+    return off_dead() + dead.size();
+}
+
+fn lim_of[&d](dv: &d [int]) -> [] &d [int] {
+    return dv[off_lim()..off_lim() + lim.size()];
+}
+
+fn lim_of_mut[&d](dv: &!d [int]) -> [] &!d [int] {
+    return dv[off_lim()..off_lim() + lim.size()];
+}
+
+fn dead_of[&d](dv: &d [int]) -> [] &d [int] {
+    return dv[off_dead()..off_dead() + dead.size()];
+}
+
+fn dead_of_mut[&d](dv: &!d [int]) -> [] &!d [int] {
+    return dv[off_dead()..off_dead() + dead.size()];
 }
 
 // A replay attempt's id for the attempt machinery: the event's id plus this, so `finish_attempt` can tell it from a window's.
@@ -1551,11 +1984,6 @@ fn pq_cap() -> [] int {
 
 fn query_wait_ms() -> [] int {
     return 5000;
-}
-
-// The most attempts one endpoint has in flight together: a stalled endpoint holds this many slots and no more.
-fn per_endpoint() -> [] int {
-    return 8;
 }
 
 // How long an attempt may take in all (connect, send, and the wait for the status line) unless the fourth argument says.
@@ -1795,6 +2223,77 @@ fn place_new[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
     return 0;
 }
 
+// What one record of the delivery log does to the table of dead letters (`dead.ls`): a dead letter (`dead`, or a replay's `replay_dead`) enters it, with the
+// time it died (the record's fifth field) and no reason yet; a delivered replay takes its event out; the reason a dead letter died of is in the record behind
+// its outcome, and is taken only while the entry has none (a later failure of a replay is not it). Recovery and `dead_fold` both go through here.
+fn dead_note[&d](dv: &!d [int], kind: int, e: int, id: int, tries: int, fifth: int) -> [] int {
+    if kind == state.dead() || kind == state.replay_dead() {
+        dead.put(dead_of_mut(dv), e, id, tries, 0, fifth, 0 - 1);
+    } else if kind == state.replay_delivered() {
+        dead.remove(dead_of_mut(dv), e, id);
+    } else if kind == state.dead_entry() {
+        // a snapshot's: the entry (`tries` is attempts * 65536 + reason + 1), or, with 0, the floor it was written with
+        if tries > 0 {
+            dead.put(dead_of_mut(dv), e, id, (tries - 1) / 65536, (tries - 1) % 65536, fifth, 0 - 1);
+        } else {
+            dead.raise_floor(dead_of_mut(dv), e, id);
+        }
+    } else if kind == state.reason() {
+        let k = dead.find(dead_of(dv), e, id);
+        if k >= 0 && dead.reason_at(dead_of(dv), e, k) == 0 {
+            dead.set_reason(dead_of_mut(dv), e, id, tries, fifth % state.reason_replay());
+        }
+    }
+    return 0;
+}
+
+// One pass over the delivery log for the dead letters of slot `e` with an event id below `below` (0: every one), put into the endpoint's table as recovery
+// would. A `created` or a `removed` record is the slot passing to another endpoint: what the table holds below `below` from before is not this one's.
+fn dead_fold[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int], e: int, below: int) -> [file_read] int {
+    var at = 0;
+    var going = true;
+    while going {
+        let r = log.read_at(done, at, window);
+        if r.0 != 0 {
+            going = false;
+        } else {
+            let o = state.outcome_at(window, 0);
+            if o.0 != 0 && o.1 == e {
+                if o.0 == state.created() || o.0 == state.removed() {
+                    if below == 0 {
+                        dead.clear(dead_of_mut(dv), e);
+                    } else {
+                        dead.clear_below(dead_of_mut(dv), e, below);
+                    }
+                } else if below == 0 || o.2 < below {
+                    dead_note(dv, o.0, o.1, o.2, o.3, o.4);
+                }
+            }
+            at = at + r.1;
+        }
+    }
+    return 0;
+}
+
+// Complete slot `e`'s table from the log while it is short of dead letters it could hold (some were left out, and it has room now): one fold for the events
+// below the floor, as many times as it takes (each lowers the floor), at most 64. Answers the passes made; 0 for a table that is as complete as it can be.
+fn dead_complete[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int], e: int) -> [file_read] int {
+    var rounds = 0;
+    while dead.wants_refold(dead_of(dv), e) && rounds < 64 {
+        // the events at or below the floor: a fold takes the ids below its argument
+        let below = dead.floor(dead_of(dv), e) + 1;
+        let before = dead.count(dead_of(dv), e);
+        dead.reset_floor(dead_of_mut(dv), e);
+        dead_fold(done, window, dv, e, below);
+        rounds = rounds + 1;
+        if dead.count(dead_of(dv), e) == before {
+            // the log has nothing more below the floor (after a snapshot it never does): not asked again until another is left out
+            dead.settle(dead_of_mut(dv), e);
+        }
+    }
+    return rounds;
+}
+
 // Apply one replay record to the table of replays (`docs/design.md` section 23): asked for, failed (with its count and the time of
 // the next attempt), or ended.
 fn recover_replay[&d](dv: &!d [int], kind: int, e: int, id: int, tries: int, next_at: int) -> [] int {
@@ -1832,13 +2331,15 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             let o = state.outcome_at(window, 0);
             if o.0 == 0 {
                 odd = odd + 1;
-            } else if o.0 >= state.replay() && o.0 <= state.replay_dead() {
+            } else if o.0 >= state.replay() && o.0 <= state.replay_dead() || o.0 == state.replay_cancelled() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
                     recover_replay(dv, o.0, o.1, o.2, o.3, o.4);
                     if o.0 == state.replay_delivered() {
                         dv[off_streak() + o.1] = 0;
                         ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, 0);
                     }
+                    // a replay that was delivered is no longer a dead letter, and one that died is one again (one of a deleted endpoint is skipped above)
+                    dead_note(dv, o.0, o.1, o.2, o.3, o.4);
                 }
             } else if o.0 == state.created() || o.0 == state.removed() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() {
@@ -1877,12 +2378,14 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             } else if o.0 == state.reason() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, o.4 % state.reason_replay());
+                    dead_note(dv, o.0, o.1, o.2, o.3, o.4);
                 }
             } else if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                 if o.0 == state.delivered() {
                     dv[off_streak() + o.1] = 0;
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, 0);
                 }
+                dead_note(dv, o.0, o.1, o.2, o.3, o.4);
                 state.apply(dv[off_cells()..dv_size()], dv[off_cur()..off_cur() + state.max_endpoints()], o.1, o.0, o.2, o.3, o.4);
             }
             if record.ms_of(window, 0) >= dv[c_seq()] {
@@ -1946,8 +2449,9 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
         kind = state.replay_delivered();
     } else if code == 410 || tries >= dv[off_sched()] + 1 {
         kind = state.replay_dead();
+        next_at = clock_unix_ms(clock);
     } else {
-        next_at = clock_unix_ms(clock) + dv[off_sched() + tries];
+        next_at = clock_unix_ms(clock) + jitter.delay(dv[off_sched() + tries], lim.jitter_percent(lim_of(dv)), ident_of_slot(dv, e), id, tries);
     }
     var ok = 0;
     if note_outcome(done, dv, kind, e, id, tries, next_at) == 1 {
@@ -1965,6 +2469,12 @@ fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, 
                 }
             }
         } else {
+            // A replay ends: delivered, it is no longer a dead letter; dead, it is one again, with this death's attempts, reason and time.
+            if kind == state.replay_delivered() {
+                dead.remove(dead_of_mut(dv), e, id);
+            } else {
+                dead.put(dead_of_mut(dv), e, id, tries, reason.of(code), next_at, dv[b + 5]);
+            }
             dv[b] = 0;
             if kind == state.replay_delivered() {
                 dv[c_delivered()] = dv[c_delivered()] + 1;
@@ -2014,8 +2524,10 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
         // A `410 Gone` is the receiver saying the endpoint no longer exists: this event is a dead letter at once, and the
         // endpoint stops being tried (below).
         kind = state.dead();
+        // The fifth field of a dead letter's record is when it died (Unix ms): the list of dead letters (section 39.1) says so.
+        next_at = clock_unix_ms(clock);
     } else {
-        next_at = clock_unix_ms(clock) + dv[off_sched() + tries];
+        next_at = clock_unix_ms(clock) + jitter.delay(dv[off_sched() + tries], lim.jitter_percent(lim_of(dv)), ident_of_slot(dv, e), id, tries);
     }
     var ok = 0;
     region a {
@@ -2038,6 +2550,9 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
         let why = reason.of(code);
         history.push(dv[off_hq()..off_hq() + history.size()], ident_of_slot(dv, e), id, 0, tries, kind, reason.legacy_status(code), clock_unix_ms(clock), latency, why);
         note_reason(done, dv, e, id, tries, why, 0);
+        if kind == state.dead() {
+            dead.put(dead_of_mut(dv), e, id, tries, why, next_at, dv[offs_at(e, id)]);
+        }
         ops.attempt_ended(dv[off_ops()..off_ops() + ops.size()], e, why);
         track_health(done, dv, clock, e, kind == state.delivered(), code);
     }
@@ -2227,14 +2742,19 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     var skips = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
+    lim.begin_turn(lim_of_mut(dv));
+    let mono = clock_ms(clock);
     var step = 0;
     while step < count && budget > 0 {
         let i = (turn + step) % count;
         let e = dv[off_table() + i * endpoints.stride()];
         let now = clock_unix_ms(clock);
+        // The endpoint's own limits, or the service's (`lim.ls`): attempts in flight together, and attempts started a second.
+        let cap = lim.conc_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
+        let rate = lim.rate_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
         var id = dv[off_cur() + e] + 1;
         var going = true;
-        while going && budget > 0 && skips < most_skips() && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < per_endpoint() {
+        while going && budget > 0 && skips < most_skips() && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < cap {
             var loaded = false;
             if id > dv[scan_id(e)] {
                 if scan_next(lg, window, dv, e, id) == 1 {
@@ -2251,10 +2771,15 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
                     dv[off_ex() + ex_filtered()] = dv[off_ex() + ex_filtered()] + 1;
                     skips = skips + 1;
                 } else if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
-                    budget = budget - 1;
-                    let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, loaded, token0);
-                    table = grown;
-                    written = written + w;
+                    if lim.admit(lim_of_mut(dv), e, mono, rate) {
+                        budget = budget - 1;
+                        let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, loaded, token0);
+                        table = grown;
+                        written = written + w;
+                    } else {
+                        // Held back by the endpoint's rate limit: not a failure. The event waits where it is and is looked at again when a token is due.
+                        going = false;
+                    }
                 }
                 id = id + 1;
             }
@@ -2266,9 +2791,9 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     var rr = 0;
     while rr < rp_cap() && budget > 0 {
         let base = off_rp() + rr * rp_stride();
-        if dv[base] == 1 && dv[base + 6] == 0 && dv[base + 4] <= now && !is_disabled(dv, dv[base + 1]) && dv[off_flying() + dv[base + 1]] < per_endpoint() {
+        if dv[base] == 1 && dv[base + 6] == 0 && dv[base + 4] <= now && !is_disabled(dv, dv[base + 1]) {
             let i = index_of(dv, dv[base + 1]);
-            if i >= 0 {
+            if i >= 0 && dv[off_flying() + dv[base + 1]] < lim.conc_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i) && lim.admit(lim_of_mut(dv), dv[base + 1], mono, lim.rate_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i)) {
                 budget = budget - 1;
                 let (grown, w) = start_replay(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, rr, token0);
                 table = grown;
@@ -2597,9 +3122,9 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
             let began_ms = clock_ms(clock);
             var seen_live = 0;
             while running {
-                // The longest the wait may be: 50 ms, or less when the pool has something to do sooner (a backoff that ends, a login with a key to
+                // The longest the wait may be: 50 ms (less while an endpoint waits for a token of its rate limit: `lim.wait_ms`), or less when the pool has something to do sooner (a backoff that ends, a login with a key to
                 // derive, an attempt or a request that runs out of time). The poller wakes the loop for the rest of what the pool waits for.
-                var nap = 50;
+                var nap = lim.wait_ms(lim_of(dv));
                 if history.enabled(dv[off_hq()..off_hq() + history.size()]) {
                     borrow pl as &qr in {
                         let due = pool.next_wake(qr, clock_ms(clock));
@@ -3293,6 +3818,15 @@ fn settle_endpoints[&g, &l, &w, &d](lg: &!g evlog.Ev, done: &!l log.Log, window:
         if place_new(done, dv) != 0 {
             return 17;
         }
+        // The tables of dead letters that recovery could not fill (a fold drops the old ones while newer ones are there, and cannot bring them back): completed from the log
+        var de = 0;
+        while de < state.max_endpoints() {
+            if dv[off_slotid() + de] >= 0 && index_of_id(dv, dv[off_slotid() + de]) >= 0 {
+                dead_complete(done, window, dv, de);
+            }
+            de = de + 1;
+        }
+        dead_expire_all(lg, dv);
         if dv[c_seq()] < 1 {
             dv[c_seq()] = 1;
         }
@@ -3501,11 +4035,11 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
         let tn = epx.pending_types_into(xg, types);
         let sn = epx.pending_spec_into(xg, spec);
         if dv[off_mg() + manage.mg_kind()] != 1 {
-            return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn]);
+            return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
         }
         if dv[off_mg() + manage.mg_fields()] & ~3 != 0 {
             let mask = epx.pending_mask(xg);
-            return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0);
+            return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
     }
     return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
@@ -3724,6 +4258,12 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
             if mask & epx.m_headers() != 0 {
                 epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], i, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
             }
+            if mask & epx.m_conc() != 0 {
+                epx.set_conc(dv[off_xt()..off_xt() + epx.xt_size()], i, epx.pending_conc(dv[off_xg()..off_xg() + epx.xg_size()]));
+            }
+            if mask & epx.m_rate() != 0 {
+                epx.set_rate(dv[off_xt()..off_xt() + epx.xt_size()], i, epx.pending_rate(dv[off_xg()..off_xg() + epx.xg_size()]));
+            }
             var overlap = 0;
             if fields & 12 != 0 {
                 // A new secret: the one it replaces stays only if asked to.
@@ -3836,6 +4376,8 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         epx.clear_row(dv[off_xt()..off_xt() + epx.xt_size()], count);
         epx.set_types(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_types[0..epx.pending_types_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_types)]);
         epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
+        epx.set_conc(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_conc(dv[off_xg()..off_xg() + epx.xg_size()]));
+        epx.set_rate(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_rate(dv[off_xg()..off_xg() + epx.xg_size()]));
         dv[c_endpoints()] = grown;
         var wr = json.writer(heap, 256);
         wr = json.begin_object(heap, wr);
@@ -4275,6 +4817,7 @@ fn main(world: World) -> [] int {
                                                                             contents(dvw)[c_production()] = 1;
                                                                         }
                                                                         contents(dvw)[off_ex() + ex_grace()] = config.rotation_grace_ms(cfg);
+                                                                        lim.init(lim_of_mut(contents(dvw)), config.retry_jitter(cfg), config.endpoint_concurrency(cfg), config.endpoint_rate(cfg));
                                                                         // The database, if one was named (section 37): the pool is told how to log in and how to come back, and the loop makes its
                                                                         // connections in the background, without waiting; nothing is dialed here. The history, the endpoints, the schedules and the management
                                                                         // routes all use it (`history.ls`, `dbup.ls`).

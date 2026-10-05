@@ -131,7 +131,7 @@ class Svc:
     pass
 
 
-def start(d, extra=None, schedule="100", deadline="5000", private=True, env=None):
+def start(d, extra=None, schedule="100", deadline="5000", private=True, env=None, wait_loaded=True):
     port = chaos.free_port()
     flags = pg_flags() + ["--admin-token", TOKEN] if extra is None else extra
     priv = ["--allow-private-hosts", "1"] if private else []
@@ -143,7 +143,7 @@ def start(d, extra=None, schedule="100", deadline="5000", private=True, env=None
         lines.append(line)
         if line in ("listening", ""):
             break
-    gone = line == "listening" and pgwait.after_listening(proc, lines, flags)
+    gone = line == "listening" and wait_loaded and pgwait.after_listening(proc, lines, flags)
     svc = Svc()
     svc.port, svc.proc, svc.lines, svc.exited, svc.dir = port, proc, lines, line != "listening" or gone, d
     STARTED.append(svc)
