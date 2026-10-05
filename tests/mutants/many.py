@@ -12,7 +12,7 @@ MUTANTS = [
  ("Q08", "src/hooks.ls", "    dv[c_attempts()] = dv[c_attempts()] + 1;\n    dv[off_wake() + e] = 0;\n    if dv[off_flying() + e] > 0 {\n        dv[off_flying() + e] = dv[off_flying() + e] - 1;\n    }\n    let r = rp_find", "    dv[c_attempts()] = dv[c_attempts()] + 1;\n    if dv[off_flying() + e] > 0 {\n        dv[off_flying() + e] = dv[off_flying() + e] - 1;\n    }\n    let r = rp_find", ["replay", "dead", "cancel"]),
  ("Q09", "src/hooks.ls", "    take_tripped(dv, e);\n    dv[off_wake() + e] = 0;\n", "    take_tripped(dv, e);\n", ["delete", "slots", "many:limit"]),
  ("Q10", "src/hooks.ls", "    put_flag(dv, e, f_disabled(), on);\n    if !on {\n        dv[off_wake() + e] = 0;\n    }", "    put_flag(dv, e, f_disabled(), on);", ["many:flags", "gone", "breaker"]),
- ("Q11", "src/hooks.ls", "    if skips >= most_skips() {\n        dv[off_ex() + ex_again()] = 1;\n    }", "", ["many:quiet", "many:pool"]),
+ ("Q11", "src/hooks.ls", "    if skips >= most_skips() || walked >= most_walk() && step < count {", "    if walked >= most_walk() && step < count {", ["many:quiet", "many:pool"]),
  ("Q12", "src/hooks.ls", "                if dv[off_ex() + ex_again()] == 1 {\n                    nap = 0;", "                if dv[off_ex() + ex_again()] == 7 {\n                    nap = 0;", ["many:quiet", "many:pool"]),
  # the walk of the windows is bounded in a turn (most_walk)
  ("Q13", "src/hooks.ls", "fn most_walk() -> [] int {\n    return 65536;", "fn most_walk() -> [] int {\n    return 65536000;", ["many:quiet"]),
