@@ -155,6 +155,38 @@ class Verifier:
         if t_end - t_start > 6:
             ep.overlaps.append((t_start + 3.0, t_end - 3.0))
 
+    # ---- a resumed run (docs/soak.md section 6): what the checker was told, and what it was holding open, is kept with the state of the run
+    def export_notes(self):
+        """The part of the checker's state that is not in the ledgers: what the harness told it (kills, stops, absences, replays, the windows in which an endpoint was made to fail,
+        the overlaps of rotations) and what it held open (events that failed at a `sick` endpoint and may be dead, cursors read lately)."""
+        return {
+            "kills": self.kills[-300:], "stops": self.stops[-300:], "away": self.away[-400:], "restarts": self.restarts[-300:], "recoveries": self.recoveries[-2000:],
+            "repl": [[k[0], k[1], n] for k, n in self.repl.items() if n][-30000:], "replayed": [[k, t] for k, t in self.replayed.items()][-30000:],
+            "eps": {label: {"windows": ep.windows[-200:], "overlaps": ep.overlaps[-100:], "failed_once": sorted(ep.failed_once)[-50000:], "deferred": sorted(ep.deferred)[-50000:],
+                            "hist": list(ep.hist), "last_cursor": ep.last_cursor}
+                    for label, ep in self.by_label.items()},
+        }
+
+    def import_notes(self, n):
+        self.kills = sorted(n.get("kills", []))
+        self.stops = [tuple(x) for x in n.get("stops", [])]
+        self.away = [tuple(x) for x in n.get("away", [])]
+        self.restarts = list(n.get("restarts", []))
+        self.recoveries = list(n.get("recoveries", []))
+        self.repl = Counter({(i, e): c for i, e, c in n.get("repl", [])})
+        self.replayed = {e: t for e, t in n.get("replayed", [])}
+        for label, d in n.get("eps", {}).items():
+            ep = self.by_label.get(label)
+            if ep is None:
+                continue
+            ep.windows = [tuple(x) for x in d.get("windows", [])]
+            ep.overlaps = [tuple(x) for x in d.get("overlaps", [])]
+            ep.failed_once = set(d.get("failed_once", []))
+            ep.deferred = set(d.get("deferred", []))
+            ep.hist = deque(tuple(x) for x in d.get("hist", []))
+            lc = d.get("last_cursor")
+            ep.last_cursor = tuple(lc) if lc else None
+
     def note_restart(self, inc, t_stop, kind):
         """The service has been started again as incarnation `inc` after a stop of `kind` ('kill' or 'term') at t_stop: what its first cursors must reach."""
         self.restarts.append(t_stop)
