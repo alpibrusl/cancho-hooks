@@ -9,9 +9,11 @@
 #                             but libc, so it needs neither `libssl-dev` nor `scripts/cc-ssl.sh`.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
+# The compiler may be named by a path relative to where this is run (CI does: `../lex-sys/target/release/lex-sys`); `--pure` runs it from `pure/`, so name it in full.
+absolute() { case "$1" in */*) printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")" ;; *) printf '%s' "$1" ;; esac; }
 LEX_SYS=${LEX_SYS:-lex-sys}
 if [ "${1:-}" = --pure ]; then
-  LEX_SYS_PURE=${LEX_SYS_PURE:-$LEX_SYS}
+  LEX_SYS_PURE=$(absolute "${LEX_SYS_PURE:-$LEX_SYS}")
   python3 "$here/scripts/make_pure.py"
   (cd "$here/pure" && "$LEX_SYS_PURE" build)
   exit 0

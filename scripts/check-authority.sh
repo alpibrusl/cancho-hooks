@@ -17,7 +17,9 @@
 # including any field a later compiler adds.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
-LEX_SYS=${LEX_SYS:-lex-sys}
+# The compiler may be named by a path relative to where this is run (CI does: `../lex-sys/target/release/lex-sys`); `--pure` runs it from `pure/`, so name it in full.
+absolute() { case "$1" in */*) printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")" ;; *) printf '%s' "$1" ;; esac; }
+LEX_SYS=$(absolute "${LEX_SYS:-lex-sys}")
 
 mode=compare
 variant=default
