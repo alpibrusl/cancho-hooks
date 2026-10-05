@@ -433,6 +433,9 @@ pub fn check_name(code: int) -> [] &static [byte] {
     if code == 5 {
         return "database";
     }
+    if code == 6 {
+        return "audit_log";
+    }
     return "";
 }
 
@@ -451,6 +454,9 @@ pub fn why_not(code: int) -> [] &static [byte] {
     }
     if code == 5 {
         return "the database is named and the service has no live connection to it, or has not read its endpoints from it yet; it reconnects by itself, backing off between attempts (GET /stats and /metrics say how it is going)";
+    }
+    if code == 6 {
+        return "the audit log did not take the last write (the disk is full, or the file cannot be written): what is read and changed is not being written down";
     }
     return "";
 }

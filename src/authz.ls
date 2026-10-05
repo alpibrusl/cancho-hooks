@@ -5,6 +5,7 @@ module authz;
 import std.buffer;
 import http.server;
 import manage;
+import std.http;
 
 // `authz` -- who may call which route (`docs/design.md` section 33).
 //
@@ -208,6 +209,27 @@ pub fn judge[&q, &t, &k](id: int, request: &q [byte], table: &t [int], tokens: &
         return forbidden();
     }
     return unauthorized();
+}
+
+// The token a request presented, for the audit log (`audit.ls`): 0 none (no `Authorization`), 1 the admin token, 2 the read token, 3 the ingest token, 4 one that
+// is none of them. All three are compared, as `judge` does.
+pub fn presented[&q, &t, &k](request: &q [byte], table: &t [int], tokens: &k [int]) -> [] int {
+    let admin = manage.authorize(request, table, tokens[0..manage.token_size()]);
+    let ingest = manage.authorize(request, table, tokens[ingest_at()..ingest_at() + manage.token_size()]);
+    let read = manage.authorize(request, table, tokens[read_at()..read_at() + manage.token_size()]);
+    if admin == 0 {
+        return 1;
+    }
+    if read == 0 {
+        return 2;
+    }
+    if ingest == 0 {
+        return 3;
+    }
+    if http.find_header(request, table, "authorization") < 0 {
+        return 0;
+    }
+    return 4;
 }
 
 // The scope a refused request needed, in words.

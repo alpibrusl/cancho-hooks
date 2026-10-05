@@ -144,6 +144,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/dbname_test.py build/hooks
 
+      - name: "The audit log (what is written and what is not, a held change and its outcome, no secret in the file, rotation, production refuses it off, a full disk)"
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/audit_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks
