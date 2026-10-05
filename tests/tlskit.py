@@ -507,3 +507,22 @@ def rss_kb(pid):
             if line.startswith("VmRSS:"):
                 kb = int(line.split()[1])
     return kb, len(os.listdir(f"/proc/{pid}/fd"))
+
+
+def mappings_kb(pid):
+    """The resident KiB of each mapping of a process ({"start-end name": KiB}), to say where a jump of the resident set went."""
+    out, key = {}, None
+    with open(f"/proc/{pid}/smaps") as f:
+        for line in f:
+            head = line.split()
+            if head and "-" in head[0] and not head[0].endswith(":"):
+                key = head[0] + (" " + head[5] if len(head) > 5 else " [anon]")
+            elif head and head[0] == "Rss:" and key:
+                out[key] = int(head[1])
+    return out
+
+
+def grown(before, after, top=5):
+    """The mappings whose resident size grew most between two `mappings_kb`, as text."""
+    d = sorted(((after.get(k, 0) - before.get(k, 0), k) for k in set(before) | set(after)), reverse=True)
+    return "; ".join(f"{k} +{n} KiB" for n, k in d[:top] if n > 0) or "no mapping grew"
