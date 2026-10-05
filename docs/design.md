@@ -2145,6 +2145,44 @@ The README and the page are the coordinator's; this change edits only the pages 
 | `docs/index.html`, the evidence table | (no row) | a row for `tests/many_test.py` (nine stages, a tenth against the build before; 41.10) |
 | `docs/index.html`, "What it costs" | (no row) | a row for 1,024 endpoints with the figures of 41.12 |
 
+## 42. A restart that remembers where an endpoint was: the `advanced` record (the soak's findings 1 and 4)
+
+### 42.1 What happens today
+
+An event an endpoint's subscription does not want is final there at once and leaves no record (35.3: "no record, so a restart decides again"). The outcomes log therefore does not say how far such an endpoint's cursor went: replayed, the log puts the cursor where the last record that is contiguous with it leaves it, and the cursor stops at the first unwanted event above it. `state.apply` drops an outcome whose event is more than a window (1,024 ids) above the cursor (it cannot be placed in a cell). So after a restart an endpoint whose events are partly unwanted has lost the records of every delivery that was made more than a window past where the replay leaves its cursor, and when the re-walk of the events log reaches those ids it sends them again. `scripts/soak/repro_restart_repeat.py` (one endpoint, `types=t.a`, half the events unwanted, its cursor held behind one refused event while the window moves): after a clean `SIGTERM` and a start, **987 of 1,499 events are delivered a second time** about 30 s later, while the cursor climbs from 0 (finding 4) at about 50 ids a second. The soak sees it after every restart on endpoints with a list of types: thousands of repeats. At-least-once allows it; it is a delivery storm after every restart, and it grows with the backlog.
+
+D10 named the cure, a sparse `advance` record, and it was not built because a new kind of record makes an older build refuse the log, and retention was about to decide the log's formats. Retention (38) and the 1,024 endpoints (41.5, kind 18) have since settled how that is done: an older build refuses a kind it does not know with status 15, which is the honest answer for a log it would replay wrongly.
+
+### 42.2 The record
+
+Kind **19, `advanced`**: `endpoint` is the slot, `event` is a cursor (every event up to it is final for the slot's endpoint), the other fields are 0. Replayed, it moves the slot's cursor up to that id if it is below it (the cells it passes are cleared: they are final), and then over any final cells at the front, as a delivery does. A cursor at or below the replayed one changes nothing. It is about the slot's current owner: before a `created` it is about an endpoint that is gone, like any other record of the slot.
+
+### 42.3 When it is written
+
+The rule has one aim: **when a window outcome (`delivered`, `failed`, `dead`) of event `X` is replayed, the replayed cursor is at least `X - 1,024`**, so the record lands in a cell.
+
+* Each slot keeps `adv` (the largest cursor the log states for it: from `created`, a snapshot, or an `advanced` record; after the start, the cursor the replay reached) and `lag` (an unwanted event has been made final, with no record, since `adv` was last set).
+* While `lag` is clear the replayed cursor equals the live one (every final event has a record), so nothing is needed.
+* Before a window outcome of `X` for a slot whose `lag` is set and with `X > adv + 1,024`, the service appends `advanced(slot, cursor)` first, in the same flush, and sets `adv` to the cursor and clears `lag`. The live cursor is at least `X - 1,024` (the event is in its window), so the replayed one will be.
+* A **clean stop** writes `advanced` for every slot whose `lag` is set and whose cursor is above `adv`, so a start after it re-walks nothing (finding 4, for the clean case).
+* A **snapshot** states every cursor (`created(slot, id, cursor)`): once it is the log, `adv` is the cursor it wrote and `lag` is clear.
+
+At most one record a window of progress, only for endpoints that pass events over: a deployment without lists of types never writes one, and its log stays one an older build reads.
+
+### 42.4 What does not change, and the older build
+
+The events log, the snapshot's shape and the outcomes header are unchanged. A log with kind 19 is refused by a build from before this change with status 15 (`delivery.seg has records this version does not understand`), as for kind 18; `--compact-now` with the new build writes a snapshot, which has no kind 19, and the build before reads that again (as 41.5 says of wide slots). `scripts/logcheck.py` knows kind 19, and counts its cursor as a reference to an event (`delivery.seg` may not refer to an event `events.seg` lacks).
+
+### 42.5 Gates, stated before the numbers
+
+| gate | how |
+|---|---|
+| no repeat after a clean restart | the reproducer's scenario as a test: 0 events delivered a second time after `SIGTERM` and a start (it was 987 of 1,499) |
+| no repeat after `kill -9` beyond the kill's own | the same scenario with a `kill -9` (the fsync shim) after the release: no event whose delivery record was flushed before the kill is sent again |
+| the cursor after a clean restart | at the cursor it had before the stop within one second of `listening` (it climbed from 0 at about 50 ids a second) |
+| snapshots | the scenario with a `delivery-log-bytes` small enough that the outcomes log is replaced during it: the same |
+| an older build | refuses a log with kind 19 with status 15, and reads it again after `--compact-now` |
+| the cost | records of kind 19 written in the scenario: at most one per window of progress (1,500 wanted of 3,000 events: a handful), none for an endpoint without a list |
 ## 46. Small pages for the process (transparent huge pages)
 
 **What CI showed.** `tests/leak_test.py` passed on a 16-core host (a fire kept 68 bytes) and failed on CI's runners (17 to 70 KB a fire, 3.5 KB a keyed event), and the growth, by `/proc/pid/smaps`, was all in one anonymous mapping of about 280 MiB, **in whole multiples of 2 MiB** (+2,044, +2,052, +8,168 KiB). That mapping is the delivery state: one zero-filled block resident only where it is written (41.2). The host runs transparent huge pages in `madvise` mode; the runners in `always`, in which the first write to a stretch of an anonymous mapping makes 2 MiB resident instead of 4 KiB. So the service's memory followed how many 2 MiB stretches of the block had been written once, up to all of it: the figures of 41.12 (an idle endpoint 0.15 KB, 1,024 idle endpoints 9.3 MB) hold only with small pages, and a host with `always` (the default of some distributions) could have held the whole block resident.
