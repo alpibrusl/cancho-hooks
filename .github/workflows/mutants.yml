@@ -1,0 +1,103 @@
+name: mutants
+
+# A list of mutants (tests/mutants/*.py) run on the kind of machine CI uses, by hand (Actions, "mutants", Run workflow). `scripts/mutate.py` copies the
+# tree, builds each mutant and runs the test sets it names until one fails; the work tree is never changed. The list is cut into shards that run side by side,
+# each against a PostgreSQL of its own; the log of each shard ends with what was killed, what survived and what did not compile. A survivor is a finding to
+# read, not a failure of this workflow by itself: the job is red when one survives, and the design section of the list says which survivors are equivalent.
+
+on:
+  workflow_dispatch:
+    inputs:
+      list:
+        description: "The list of mutants (a file under tests/mutants/)"
+        default: "tests/mutants/many.py"
+      shards:
+        description: "How many shards (1 to 8)"
+        default: "6"
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pgpass
+          POSTGRES_DB: hooks
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - name: Is this shard used
+        id: used
+        run: echo "go=$([ "${{ matrix.shard }}" -lt "${{ github.event.inputs.shards || '6' }}" ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.used.outputs.go == '1'
+        with:
+          path: hooks
+
+      - name: Read the compiler pin from lex-sys.toml
+        if: steps.used.outputs.go == '1'
+        id: pin
+        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.used.outputs.go == '1'
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.pin.outputs.rev }}
+          path: lex-sys
+
+      - name: Cache the compiler
+        if: steps.used.outputs.go == '1'
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: lex-sys/target/release/lex-sys
+          key: lex-sys-${{ steps.pin.outputs.rev }}
+
+      - name: Build lex-sys
+        if: steps.used.outputs.go == '1' && steps.compiler.outputs.cache-hit != 'true'
+        working-directory: lex-sys
+        run: cargo build --release -p lex-sys
+
+      - name: OpenSSL, the PostgreSQL client and the reference library
+        if: steps.used.outputs.go == '1'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libssl-dev openssl postgresql-client
+          pip install standardwebhooks
+
+      - name: The ids of this shard
+        if: steps.used.outputs.go == '1'
+        id: ids
+        working-directory: hooks
+        run: |
+          echo "ids=$(python3 - "${{ github.event.inputs.list || 'tests/mutants/many.py' }}" "${{ matrix.shard }}" "${{ github.event.inputs.shards || '6' }}" <<'PY'
+          import sys
+          ns = {}
+          exec(open(sys.argv[1]).read(), ns)
+          k, n = int(sys.argv[2]), int(sys.argv[3])
+          print(" ".join(m[0] for i, m in enumerate(ns["MUTANTS"]) if i % n == k))
+          PY
+          )" >> "$GITHUB_OUTPUT"
+
+      - name: The mutants of this shard
+        if: steps.used.outputs.go == '1'
+        working-directory: hooks
+        env:
+          HOOKS_PG: 127.0.0.1:5432:postgres:hooks
+          HOOKS_PG_PASSWORD: pgpass
+          LEX_SYS: ${{ github.workspace }}/lex-sys/target/release/lex-sys
+        run: |
+          echo "shard ${{ matrix.shard }}: ${{ steps.ids.outputs.ids }}"
+          python3 scripts/mutate.py "${{ github.event.inputs.list || 'tests/mutants/many.py' }}" ${{ steps.ids.outputs.ids }}

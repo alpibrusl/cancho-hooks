@@ -469,6 +469,8 @@ pub fn request_for[&h, &s](heap: &!h Heap, sg: &s [int]) -> [heap] buffer.Buffer
         return queries.delete_schedule_start(heap, sg[o_target()]);
     }
     let fields = sg[o_fields()];
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252).
+    var q = buffer.empty(heap, 0);
     region a {
         let expr = alloc_slice[a](100, byte_of(0));
         let kind_text = alloc_slice[a](64, byte_of(0));
@@ -476,11 +478,14 @@ pub fn request_for[&h, &s](heap: &!h Heap, sg: &s [int]) -> [heap] buffer.Buffer
         let el = bytes_of(sg, o_expr(), sg[o_expr_len()], expr);
         let tl = bytes_of(sg, o_type(), sg[o_type_len()], kind_text);
         let bl = bytes_of(sg, o_body(), sg[o_body_len()], text);
+        buffer.drop(heap, q);
         if kind == 1 {
-            return queries.create_schedule_start(heap, expr[0..el], kind_text[0..tl], text[0..bl], sg[o_enabled()] == 1, sg[o_now()]);
+            q = queries.create_schedule_start(heap, expr[0..el], kind_text[0..tl], text[0..bl], sg[o_enabled()] == 1, sg[o_now()]);
+        } else {
+            q = queries.patch_schedule_start(heap, sg[o_target()], expr[0..el], fields & 1 != 0, kind_text[0..tl], fields & 2 != 0, text[0..bl], fields & 4 != 0, sg[o_enabled()] == 1, fields & 8 != 0, sg[o_now()]);
         }
-        return queries.patch_schedule_start(heap, sg[o_target()], expr[0..el], fields & 1 != 0, kind_text[0..tl], fields & 2 != 0, text[0..bl], fields & 4 != 0, sg[o_enabled()] == 1, fields & 8 != 0, sg[o_now()]);
     }
+    return q;
 }
 
 // Every statement that answers with a schedule answers with the same eight columns (id, expr, event_type, body, enabled, created_at, last_fired,

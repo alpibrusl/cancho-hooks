@@ -286,77 +286,85 @@ pub fn parse[&t, &o](text: &t [byte], seconds: bool, out: &!o [int]) -> [] int {
     if len(text) > max_len() {
         return 6;
     }
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every schedule a fire reads.
+    var rc = 0;
     region a {
         let starts = alloc_slice[a](14, 0);
-        var count = 0;
-        var i = 0;
-        while i < len(text) {
-            let c = int_of(text[i]);
-            if c == ' ' || c == '\t' {
-                i = i + 1;
-            } else {
-                var j = i;
-                while j < len(text) && int_of(text[j]) != ' ' && int_of(text[j]) != '\t' {
-                    j = j + 1;
-                }
-                if count < 7 {
-                    starts[count] = i;
-                    starts[count + 7] = j;
-                }
-                count = count + 1;
-                i = j;
-            }
-        }
-        var want = 5;
-        if seconds {
-            want = 6;
-        }
-        if count != want {
-            if seconds {
-                return 8;
-            }
-            return 1;
-        }
-        var k = 0;
-        if seconds {
-            let f = field(text[starts[0]..starts[7]], 0, 59, false);
-            if f.0 != 0 {
-                return f.0;
-            }
-            out[0] = f.1;
-            k = 1;
-        } else {
-            out[0] = 1;
-        }
-        let m = field(text[starts[k]..starts[k + 7]], 0, 59, false);
-        if m.0 != 0 {
-            return m.0;
-        }
-        let h = field(text[starts[k + 1]..starts[k + 8]], 0, 23, false);
-        if h.0 != 0 {
-            return h.0;
-        }
-        let dom = field(text[starts[k + 2]..starts[k + 9]], 1, 31, false);
-        if dom.0 != 0 {
-            return dom.0;
-        }
-        let mon = field(text[starts[k + 3]..starts[k + 10]], 1, 12, false);
-        if mon.0 != 0 {
-            return mon.0;
-        }
-        let dw = field(text[starts[k + 4]..starts[k + 11]], 0, 7, true);
-        if dw.0 != 0 {
-            return dw.0;
-        }
-        out[1] = m.1;
-        out[2] = h.1;
-        out[3] = dom.1;
-        out[4] = mon.1;
-        out[5] = dw.1;
-        out[6] = dom.2;
-        out[7] = dw.2;
-        return 0;
+        rc = parse_in(text, seconds, out, starts);
     }
+    return rc;
+}
+
+// The body of `parse`, with the room it works in given to it.
+fn parse_in[&t, &o, &s](text: &t [byte], seconds: bool, out: &!o [int], starts: &!s [int]) -> [] int {
+    var count = 0;
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c == ' ' || c == '\t' {
+            i = i + 1;
+        } else {
+            var j = i;
+            while j < len(text) && int_of(text[j]) != ' ' && int_of(text[j]) != '\t' {
+                j = j + 1;
+            }
+            if count < 7 {
+                starts[count] = i;
+                starts[count + 7] = j;
+            }
+            count = count + 1;
+            i = j;
+        }
+    }
+    var want = 5;
+    if seconds {
+        want = 6;
+    }
+    if count != want {
+        if seconds {
+            return 8;
+        }
+        return 1;
+    }
+    var k = 0;
+    if seconds {
+        let f = field(text[starts[0]..starts[7]], 0, 59, false);
+        if f.0 != 0 {
+            return f.0;
+        }
+        out[0] = f.1;
+        k = 1;
+    } else {
+        out[0] = 1;
+    }
+    let m = field(text[starts[k]..starts[k + 7]], 0, 59, false);
+    if m.0 != 0 {
+        return m.0;
+    }
+    let h = field(text[starts[k + 1]..starts[k + 8]], 0, 23, false);
+    if h.0 != 0 {
+        return h.0;
+    }
+    let dom = field(text[starts[k + 2]..starts[k + 9]], 1, 31, false);
+    if dom.0 != 0 {
+        return dom.0;
+    }
+    let mon = field(text[starts[k + 3]..starts[k + 10]], 1, 12, false);
+    if mon.0 != 0 {
+        return mon.0;
+    }
+    let dw = field(text[starts[k + 4]..starts[k + 11]], 0, 7, true);
+    if dw.0 != 0 {
+        return dw.0;
+    }
+    out[1] = m.1;
+    out[2] = h.1;
+    out[3] = dom.1;
+    out[4] = mon.1;
+    out[5] = dw.1;
+    out[6] = dom.2;
+    out[7] = dw.2;
+    return 0;
 }
 
 // Parse `text` as `parse` does and also refuse an expression that never fires (`never`, code 7). `out` is not meant to be used after a refusal.

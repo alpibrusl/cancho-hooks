@@ -55,7 +55,7 @@ The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/le
 [`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `unsafe`, and foreign authority only through `Ffi`, per library, for exactly the symbols
 [`authority.json`](authority.json) lists, 33 in all (**the report is pinned in CI**: `scripts/check-authority.sh` regenerates it and fails on any difference, so a new foreign symbol is a red diff that only a commit of the new file turns green):
 
-* **libc**, one function, `statx`, which reads the mode of the data directory for the production profile (`src/perm.ls`; lex-sys has no file-mode builtin: lex-sys#243).
+* **libc**, two functions: `statx`, which reads the mode of the data directory for the production profile (`src/perm.ls`; lex-sys has no file-mode builtin: lex-sys#243), and `prctl`, called once at the start to ask the kernel for small pages for the process (`src/thp.ls`, design.md section 46).
   How the service learns it was asked to stop is not foreign: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability (`Signals("INT,TERM")`, `src/ops.ls`) and
   watches the claim in the same poller as its sockets, so a stop wakes the loop at once.
 * **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/tls.ls`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,

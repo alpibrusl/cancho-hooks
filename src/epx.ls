@@ -314,21 +314,24 @@ pub fn set_spec[&x, &s](xt: &!x [int], i: int, spec: &s [byte]) -> [] int {
         xt[i * hdr_size() + 1] = 0;
         return 0;
     }
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252).
+    var rc = 0;
     region a {
         let wire = alloc_slice[a](hdrs.max_wire(), 0);
         let n = hdrs.decode(spec, wire);
         if n < 0 {
-            return 0 - 1;
+            rc = 0 - 1;
+        } else {
+            var k = 0;
+            while k < n {
+                xt[bodyat(xt, i) + wire_at() + k] = wire[k];
+                k = k + 1;
+            }
+            zero_tail(xt, i, wire_at(), n, xt[i * hdr_size() + 1]);
+            xt[i * hdr_size() + 1] = n;
         }
-        var k = 0;
-        while k < n {
-            xt[bodyat(xt, i) + wire_at() + k] = wire[k];
-            k = k + 1;
-        }
-        zero_tail(xt, i, wire_at(), n, xt[i * hdr_size() + 1]);
-        xt[i * hdr_size() + 1] = n;
     }
-    return 0;
+    return rc;
 }
 
 // The previous secret of row `i` set to `key` (the key bytes) valid until `until` (Unix ms); an empty key or an `until` of 0 ends the overlap.

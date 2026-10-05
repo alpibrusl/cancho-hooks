@@ -220,6 +220,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/retention_test.py build/hooks
 
+      - name: "No memory kept by a call that changes the database, or by a schedule's fire (PATCH, create and delete, bulk replay, schedules, keyed events; two rounds, the second at most 1 KiB a call)"
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/leak_test.py build/hooks
+
       - name: The shell scripts
         working-directory: hooks
         run: shellcheck scripts/*.sh scripts/soak/*.sh deploy/*.sh
@@ -254,6 +258,10 @@ jobs:
         run: |
           HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/metrics_test.py build/hooks
           HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ready_test.py build/hooks
+
+      - name: "A full data directory does not make the service send the same events again (no event more than twice while full, every acknowledged one after a restart)"
+        working-directory: hooks
+        run: python3 tests/fulldisk_test.py build/hooks
 
       - name: Why an attempt failed (a receiver for each reason; in /attempts, /metrics, the history table and the delivery log)
         working-directory: hooks
