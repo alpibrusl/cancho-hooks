@@ -715,8 +715,8 @@ def stage_formats():
     recs = mk.delivery_records(d)
     check("formats: a snapshot made when the only endpoint in a wide slot is the one in slot 62 carries the marker once, right after the header",
           p.returncode == 0 and [r[0] for r in recs[:2]] == [15, 18] and len([r for r in recs if r[0] == 18]) == 1, p.stderr[-200:] + str([r[0] for r in recs[:3]]))
-    # 3. a record of a kind this build does not know is a refusal with status 15 (what a build from before does with kind 18; 19 is `advanced`, section 42)
-    append_records(d, [(20, 0, 0, 0, 0)])
+    # 3. a record of a kind this build does not know is a refusal with status 15 (what a build from before does with kind 18; 19 is `advanced`, section 42, 20 `erased`, section 47.3)
+    append_records(d, [(21, 0, 0, 0, 0)])
     before = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d) if n.endswith((".seg", ".first"))}
     svc = service(d, args, port=svc.port)
     svc.start(timeout=20, loaded=False)

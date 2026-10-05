@@ -185,7 +185,7 @@ Settings come from a file (`--config hooks.conf`, `key = value` a line), from fl
 * **Not for production.** No 24-hour soak test has been run: the harness and its criteria are built ([docs/soak.md](docs/soak.md)), and so is the method of capacity ([docs/capacity.md](docs/capacity.md)), but the long run that fills both is not made; the figures in [docs/status.md](docs/status.md) come from short runs on shared machines.
 * **One process, one thread, one core**, at most 1,024 endpoints (a constant of the build; [status.md](docs/status.md)), 64 attempts in flight.
 * **`https` uses OpenSSL in the process** until lex-sys has its own TLS; no revocation checks, client certificates or IPv6, and each delivery costs a handshake.
-* **No TLS on the service's own port** (put a reverse proxy in front), no audit log; signing secrets are stored in the clear in the database, which is the trust boundary.
+* **No TLS on the service's own port** (put a reverse proxy in front); signing secrets are stored in the clear in the database, which is the trust boundary.
 * **The endpoints table is read once**, and a host *name* for `pg-host` stalls the loop: give an address.
 * **An event dropped by retention is gone**; delivery is at least once, and not strictly ordered.
 
