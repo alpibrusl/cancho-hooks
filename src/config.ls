@@ -3,6 +3,7 @@ edition 5;
 module config;
 
 import std.bytes;
+import destination;
 
 // `config` -- the service's settings, from a file and from flags (`docs/design.md` section 20).
 //
@@ -41,6 +42,9 @@ import std.bytes;
 //     retry-jitter  how far each retry delay is moved either way, in percent of itself (0 to 50; 0 is exactly the schedule)   default 10 (section 39.3)
 //     endpoint-concurrency  the most attempts one endpoint has in flight (1 to 8; an endpoint's own "concurrency" replaces it)   default 8 (section 39.4)
 //     endpoint-rate  the most attempts one endpoint starts a second (0 to 100000, 0: no limit; an endpoint's own "rate" replaces it)   default 0 (section 39.4)
+//     dns-server   the name server that resolves the names of endpoints, `ip` or `ip:port` (IPv4)   default the first `nameserver` of /etc/resolv.conf, port 53 (section 40)
+//     tls-ca-file  the PEM file of certificates an `https` endpoint's chain must lead to, instead of the system's   default none: the system's trust store (section 40)
+//     tls-resume   `1`: keep a TLS session for each `https` endpoint and resume it; `0`: a full handshake every time   default 1 (section 40)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -56,17 +60,22 @@ import std.bytes;
 //     cfg[40] retention-days   cfg[41] segment-bytes   cfg[42] delivery-log-bytes   cfg[43] idem-keys   cfg[44] compact-now   cfg[45] retention-ms   cfg[46] compact-kill-at
 //     cfg[23] pg-backoff-min-ms (100 until set)   cfg[24] pg-backoff-max-ms (5000)   cfg[25] pg-attempt-ms (5000)   cfg[26] pg-request-ms (10000)   cfg[27] pg-start-wait-ms (30000)
 //     cfg[28] retry-jitter (0 to 50; 10 until set)   cfg[29] endpoint-concurrency (1 to 8; 8 until set)   cfg[30] endpoint-rate (0 to 100000)
+//     cfg[31] dns-server address (packed, 0 until set)   cfg[32] its port (53 until set)   cfg[33] tls-ca-file length   cfg[34] tls-resume (0 or 1; 1 until set)
 //     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
 //     and password (256), at `pg_host_at()` and the offsets after it, then the admin token (256), the ingest token (256) and the read
-//     token (256), at `token_at()`, `ingest_token_at()` and `read_token_at()`
+//     token (256), at `token_at()`, `ingest_token_at()` and `read_token_at()`, then the tls-ca-file (256) at `ca_file_at()`
 
 pub fn size() -> [] int {
     return 48;
 }
 
 pub fn blob_size() -> [] int {
+    return 3968;
+}
+
+pub fn ca_file_at() -> [] int {
     return 3712;
 }
 
@@ -285,6 +294,24 @@ pub fn pg_status[&c](cfg: &c [int]) -> [] int {
     return 0;
 }
 
+// The name server that was named (`dns-server`), packed, or 0 if none was: the caller then asks the system (`resolve.ls`).
+pub fn dns_server[&c](cfg: &c [int]) -> [] int {
+    return cfg[31];
+}
+
+pub fn dns_port[&c](cfg: &c [int]) -> [] int {
+    return cfg[32];
+}
+
+// The length of the path of the trust store file (`tls-ca-file`), 0 for the system's.
+pub fn ca_file_len[&c](cfg: &c [int]) -> [] int {
+    return cfg[33];
+}
+
+pub fn tls_resume[&c](cfg: &c [int]) -> [] bool {
+    return cfg[34] == 1;
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -298,6 +325,8 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[15] = 1;
     cfg[17] = 5000;
     cfg[22] = 86400000;
+    cfg[32] = 53;
+    cfg[34] = 1;
     cfg[40] = 30;
     cfg[41] = 67108864;
     cfg[42] = 33554432;
@@ -619,6 +648,41 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[18] = 1;
         } else if bytes.equal(value, "0") {
             cfg[18] = 0;
+        } else {
+            why = why_value();
+        }
+    } else if bytes.equal(key, "dns-server") {
+        // `ip` or `ip:port`, an IPv4 literal (any: it is the operator's own, and is not an endpoint).
+        var colon = len(value);
+        var i = 0;
+        while i < len(value) {
+            if int_of(value[i]) == ':' {
+                colon = i;
+            }
+            i = i + 1;
+        }
+        let a = destination.address(value[0..colon]);
+        var port = 53;
+        if colon < len(value) {
+            port = number(value[colon + 1..len(value)]);
+        }
+        if a <= 0 || port < 1 || port > 65535 {
+            why = why_value();
+        } else {
+            cfg[31] = a;
+            cfg[32] = port;
+        }
+    } else if bytes.equal(key, "tls-ca-file") {
+        if len(value) < 1 || len(value) > 255 {
+            why = why_value();
+        } else {
+            cfg[33] = keep(value, blob, ca_file_at());
+        }
+    } else if bytes.equal(key, "tls-resume") {
+        if bytes.equal(value, "1") {
+            cfg[34] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[34] = 0;
         } else {
             why = why_value();
         }

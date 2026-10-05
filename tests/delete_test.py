@@ -676,7 +676,7 @@ def main():
           seq[0][0] == CREATED and [r[0] for r in seq[-4:]] == [REPLAY, REPLAY_DEAD, REMOVED, CREATED]
           and {FAILED, DEAD, DISABLED} <= {r[0] for r in seq[1:-4]}, str(seq))
     check("8. ... the first created says id 99, the last id 100 and start 5", seq[0][2] == 99 and seq[-1][2:4] == (100, 5), str((seq[0], seq[-1])))
-    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 100] == [{"id": 100, "port": rn.port, "cursor": 5, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}], str((listing(svc), stats(svc))))
+    check("8. the new endpoint inherits nothing: enabled, no replay, cursor 5", stats(svc)["replays"] == 0 and [e for e in listing(svc) if e["id"] == 100] == [{"id": 100, "port": rn.port, "scheme": "http", "cursor": 5, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}], str((listing(svc), stats(svc))))
     # post enough events that the ring of the slot (1,024 cells) would reach the cells the old endpoint left above its cursor (events 3 and 4)
     total = 1040
     for n in range(6, total + 1):
@@ -710,7 +710,7 @@ def main():
     svc = start(d, schedule="3600000")
     check("8. restart with a row added by hand (150): it takes the slot that 100 left (1)", created_slot(d, 150) == 1 and ids(svc) == [98, 150], str((of_kind(d, CREATED), listing(svc))))
     check("8. ... at the cursor of the slowest endpoint it knows (the other one's), enabled, no replay",
-          [e for e in listing(svc) if e["id"] == 150] == [{"id": 150, "port": r150.port, "cursor": 1041, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
+          [e for e in listing(svc) if e["id"] == 150] == [{"id": 150, "port": r150.port, "scheme": "http", "cursor": 1041, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}] and stats(svc)["replays"] == 0, str((listing(svc), stats(svc))))
     post_event(svc, 1042)
     check("8. ... it gets event 1042 and nothing before it", wait_for(lambda: r150.events() == [1042], 6), str(r150.seen))
     time.sleep(0.5)

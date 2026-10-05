@@ -114,7 +114,7 @@ def stage1():
     check("1. failures by reason: 129 status_5xx (B: 3 attempts x 43), 129 connect_refused (C)", by_reason == {"status_5xx": 129, "connect_refused": 129}, str(by_reason))
     check("1. ... equal to the reason records of delivery.seg (kind 14)", reasons == by_reason and kinds.get("reason") == 258, f"{reasons} {kinds}")
     check("1. ... and to failed + dead", sum(by_reason.values()) == st["failed"] + st["dead"])
-    check("1. every reason has its own series, and only the 16 reasons that are not `none`", len(m.series("hooks_attempt_failures_total")) == 16)
+    check("1. every reason has its own series, and only the 26 reasons that are not `none` (16 until names and TLS: docs/design.md section 40)", len(m.series("hooks_attempt_failures_total")) == 26)
     cur = {int(dict(k)["endpoint"]): int(v) for k, v in m.series("hooks_endpoint_cursor").items()}
     lag = {int(dict(k)["endpoint"]): int(v) for k, v in m.series("hooks_endpoint_lag_events").items()}
     check("1. per endpoint: cursor 43 and lag 0 for A, B and C (dead is final)", cur == {0: 43, 1: 43, 2: 43} and lag == {0: 0, 1: 0, 2: 0}, f"{cur} {lag}")

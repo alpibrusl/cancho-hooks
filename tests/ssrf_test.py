@@ -4,14 +4,19 @@
     HOOKS_PG=host:port:user:database [HOOKS_PG_PASSWORD=...] python3 tests/ssrf_test.py build/hooks
 
 An endpoint is an address the service will POST to from inside the operator's network. Unless `allow-private-hosts` is 1 the host
-must be an IPv4 literal outside the private, loopback, link-local and reserved ranges; a name, and every spelling of an address a
-resolver accepts and a person does not expect, is refused.
+must be an IPv4 literal outside the private, loopback, link-local and reserved ranges, or a name; every spelling of an address a
+resolver accepts and a person does not expect (`127.1`, `2130706433`, `0x7f.0.0.1`), and anything that is not a name, is refused.
 
-  1. endpoints.conf: every private, reserved, malformed and named host is refused before the service listens (status 13) and the
-     message says which line; every public one (the edges of the ranges included) is accepted and listed by GET /endpoints
-  2. `allow-private-hosts 1`: the same hosts, names included, are accepted
+CHANGED with docs/design.md section 40 (names, resolved by the service at every attempt: tests/names_test.py is where a name that resolves to a
+private address is refused): a **name** used to be refused at the write because it could not be judged, and is accepted now, because it is judged
+when it is used. `localhost`, `example.com`, `metadata.google.internal` and `8.8.8.8.nip.io` moved from REFUSED to NAMES below. Everything that
+is not a name is still refused, and `allow-private-hosts 1` no longer accepts a host that is neither an address nor a name.
+
+  1. endpoints.conf: every private, reserved and malformed host is refused before the service listens (status 13) and the
+     message says which line; every public one (the edges of the ranges included) and every name is accepted and listed by GET /endpoints
+  2. `allow-private-hosts 1`: private addresses and names are accepted; what is neither is still refused
   3. POST /endpoints: each refused host is a 400 that says why, nothing is stored (no row, no record in the log); a public host
-     is a 201; with `allow-private-hosts 1` a loopback one is a 201 too
+     or a name is a 201; with `allow-private-hosts 1` a loopback one is a 201 too
   4. a row put in the table by hand with a private host stops the service from starting (status 13); `--import-endpoints 1` refuses it
   5. a redirect is not followed: a receiver that answers 302 to another receiver is sent one request, the other none, and the
      attempt is a failure (only 2xx is delivered)
@@ -46,10 +51,14 @@ REFUSED = [
     "127.0.0.1", "127.255.255.254", "10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254",
     "169.254.0.1", "100.64.0.1", "100.127.255.255", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "240.0.0.1", "255.255.255.255",
     "192.0.0.8", "192.0.2.1", "192.88.99.1", "198.18.0.1", "198.19.1.1", "198.51.100.1", "203.0.113.1",
-    # not a literal in the sense of destination.ls: a name, a short or number form, a leading zero, IPv6, junk
-    "localhost", "example.com", "metadata.google.internal", "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "127.0.0.01", "010.0.0.1",
-    "1.2.3", "1.2.3.4.5", "256.1.1.1", "::1", "[::1]", "::ffff:127.0.0.1", "8.8.8.8.nip.io", "1.1.1.1.",
+    # neither a literal nor a name in the sense of destination.ls: a short or number form, a leading zero, IPv6, junk, a scheme, a path, a port, a user
+    "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "127.0.0.01", "010.0.0.1",
+    "1.2.3", "1.2.3.4.5", "256.1.1.1", "::1", "[::1]", "::ffff:127.0.0.1", "1.1.1.1.", "example.com.", "-a.example", "a..example", "a b.example",
+    "http://example.com", "ftp://example.com", "example.com/hook", "example.com:8080", "user@example.com", "*.example.com", "exa_mple.com/",
 ]
+PRIVATE_ADDRESSES = REFUSED[:REFUSED.index("127.1")]
+# names: valid hosts. Whether the address one resolves to is allowed is decided at every attempt (tests/names_test.py).
+NAMES = ["localhost", "example.com", "metadata.google.internal", "8.8.8.8.nip.io", "my_service.internal", "receiver", "A.B-c.Example"]
 PUBLIC = [
     "1.1.1.1", "8.8.8.8", "9.255.255.255", "11.0.0.1", "100.63.255.255", "100.128.0.1", "126.255.255.255", "128.0.0.1", "169.253.255.255",
     "169.255.0.1", "172.15.255.255", "172.32.0.1", "192.0.1.1", "192.0.3.1", "192.167.255.255", "192.169.0.1", "198.17.255.255",
@@ -138,16 +147,16 @@ def main():
         stop(svc)
         shutil.rmtree(d)
     check(f"1. all {len(REFUSED)} refused hosts stop the start with status 13 and name the line", not bad, str(bad[:3]))
-    # all the public ones in one file (23 endpoints), listed by GET /endpoints
+    # all the public ones and all the names in one file, listed by GET /endpoints
     d = tmp()
-    conf(d, PUBLIC)
+    conf(d, PUBLIC + NAMES)
     svc = start(d)
     ok = not svc.exited
     listed = []
     if ok:
         status, body = req(svc, "GET", "/endpoints")
         listed = body
-    check(f"1. all {len(PUBLIC)} public hosts, the edges of every range, are accepted and listed", ok and len(listed) == len(PUBLIC), str((svc.lines, len(listed))))
+    check(f"1. all {len(PUBLIC)} public hosts, the edges of every range, and {len(NAMES)} names are accepted and listed", ok and len(listed) == len(PUBLIC) + len(NAMES), str((svc.lines, len(listed))))
     stop(svc)
     shutil.rmtree(d)
 
@@ -159,6 +168,26 @@ def main():
     ok = not svc.exited
     n = len(req(svc, "GET", "/endpoints")[1]) if ok else 0
     check("2. with allow-private-hosts 1 private addresses and names are accepted", ok and n == len(some), str((svc.lines, n)))
+    stop(svc)
+    shutil.rmtree(d)
+    # CHANGED: open used to accept any text, because the connect resolved whatever it was given; the service resolves names itself now, and what is neither an address nor a name
+    # cannot be used. So the hosts that are not an address and not a name are refused under allow-private-hosts as well (the addresses of the REFUSED list are not).
+    open_bad = [h for h in REFUSED if h not in PRIVATE_ADDRESSES]
+    bad = []
+    for h in open_bad:
+        d = tmp()
+        conf(d, ["8.8.8.8", h])
+        svc = start(d, ["--allow-private-hosts", "1"])
+        if not (svc.exited and svc.status == 13):
+            bad.append((h, svc.status, svc.lines))
+        stop(svc)
+        shutil.rmtree(d)
+    check(f"2. ... but the {len(open_bad)} hosts that are neither an address nor a name are refused with allow-private-hosts 1 as well", not bad, str(bad[:3]))
+    d = tmp()
+    conf(d, PRIVATE_ADDRESSES)
+    svc = start(d, ["--allow-private-hosts", "1"])
+    n = len(req(svc, "GET", "/endpoints")[1]) if not svc.exited else 0
+    check(f"2. ... and all {len(PRIVATE_ADDRESSES)} private and reserved addresses are accepted with it", not svc.exited and n == len(PRIVATE_ADDRESSES), str((svc.lines, n)))
     stop(svc)
     shutil.rmtree(d)
 
@@ -183,6 +212,12 @@ def main():
           (not os.path.exists(log) or chaos.read_log(open(log, "rb").read())[0] == []), str((psql("select count(*) from endpoints"), os.path.getsize(log))))
     status, body = req(svc, "POST", "/endpoints", {"host": "8.8.8.8", "port": 9}, TOKEN)
     check("3. a public host is a 201", status == 201 and body["host"] == "8.8.8.8", str((status, body)))
+    named = []
+    for h in NAMES:
+        status, body = req(svc, "POST", "/endpoints", {"host": h, "port": 9}, TOKEN)
+        if status != 201:
+            named.append((h, status, body))
+    check(f"3. each of the {len(NAMES)} names is a 201: what it resolves to is judged when it is used", not named, str(named[:3]))
     stop(svc)
     psql("truncate endpoints")
     shutil.rmtree(d)

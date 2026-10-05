@@ -19,7 +19,7 @@ import reason;
 // ---- the cells of `g`
 
 pub fn g_size() -> [] int {
-    return 44;
+    return 46;
 }
 
 pub fn g_uptime_ms() -> [] int {
@@ -158,7 +158,7 @@ pub fn g_db_connecting() -> [] int {
 }
 
 pub fn g_db_reconnects() -> [] int {
-    return 38;
+    return 40;
 }
 
 pub fn g_db_failures() -> [] int {
@@ -171,6 +171,15 @@ pub fn g_db_losses() -> [] int {
 
 pub fn g_endpoints_loaded() -> [] int {
     return 41;
+}
+
+// TLS handshakes since the start, and how many resumed a session.
+pub fn g_tls_handshakes() -> [] int {
+    return 44;
+}
+
+pub fn g_tls_resumed() -> [] int {
+    return 45;
 }
 
 // ---- the cells of an endpoint's row
@@ -349,6 +358,9 @@ pub fn render[&h, &g, &e, &r](heap: &!h Heap, g: &g [int], ep: &e [int], n: int,
         b = labelled(heap, b, "hooks_attempt_failures_total", "reason", reason.name(k), reasons[k]);
         k = k + 1;
     }
+    b = head(heap, b, "hooks_tls_handshakes_total", "counter", "TLS handshakes made to https endpoints, by result: full (the certificate chain was verified) or resumed (a session of the endpoint's was resumed).");
+    b = labelled(heap, b, "hooks_tls_handshakes_total", "result", "full", g[g_tls_handshakes()] - g[g_tls_resumed()]);
+    b = labelled(heap, b, "hooks_tls_handshakes_total", "result", "resumed", g[g_tls_resumed()]);
     b = head(heap, b, "hooks_attempts_in_flight", "gauge", "Attempts on the wire now.");
     b = plain(heap, b, "hooks_attempts_in_flight", g[g_in_flight()]);
     b = head(heap, b, "hooks_retries_waiting", "gauge", "Events that failed at least once and wait for their next attempt, over all endpoints.");

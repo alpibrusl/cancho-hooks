@@ -63,6 +63,9 @@ import jitter;
 import lim;
 import dead;
 import bulk;
+import tls;
+import destination;
+import resolve;
 
 fn max_len() -> [] int {
     return 65536;
@@ -345,6 +348,14 @@ fn store_event[&c, &b, &t, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte],
 }
 
 // The counters of `ops.ls`, as a slice of the delivery state.
+// The scheme of an endpoint as the API prints it: `https` or `http` (`endpoints.scheme_of`).
+fn scheme_name(scheme: int) -> [] &static [byte] {
+    if scheme == 1 {
+        return "https";
+    }
+    return "http";
+}
+
 fn ops_of[&d](dv: &d [int]) -> [] &d [int] {
     return dv[off_ops()..off_ops() + ops.size()];
 }
@@ -415,6 +426,8 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
     }
     g[metrics.g_commits_events()] = ops.commits(o, 0);
     g[metrics.g_commits_delivery()] = ops.commits(o, 1);
+    g[metrics.g_tls_handshakes()] = ops.tls_handshakes(o);
+    g[metrics.g_tls_resumed()] = ops.tls_resumed(o);
     g[metrics.g_size_events()] = evlog.disk_bytes(lg);
     g[metrics.g_size_delivery()] = log.size(done);
     g[metrics.g_synced_events()] = evlog.disk_synced(lg);
@@ -830,7 +843,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         return server.reply(heap, out, 200, "{\"enabled\":true}", keep);
     }
     if id == 7 {
-        // GET /endpoints: each endpoint's id, port, cursor (every event up to it is final), whether it is disabled, whether the circuit
+        // GET /endpoints: each endpoint's id, port, scheme, cursor (every event up to it is final), whether it is disabled, whether the circuit
         // breaker is what disabled it, and when its current run of failed attempts began (Unix ms, 0 if it has none). Not the host and
         // not the secret.
         var w = json.writer(heap, 160);
@@ -843,6 +856,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             w = json.put_int(heap, w, endpoints.ident_of(stats[off_table()..off_table() + endpoints.table_size()], i));
             w = json.put_key(heap, w, "port");
             w = json.put_int(heap, w, endpoints.port_of(stats[off_table()..off_table() + endpoints.table_size()], i));
+            w = json.put_key(heap, w, "scheme");
+            w = json.put_string(heap, w, scheme_name(endpoints.scheme_of(stats[off_table()..off_table() + endpoints.table_size()], i)));
             w = json.put_key(heap, w, "cursor");
             w = json.put_int(heap, w, stats[off_cur() + e]);
             w = json.put_key(heap, w, "disabled");
@@ -1003,6 +1018,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, want);
         w = json.put_key(heap, w, "port");
         w = json.put_int(heap, w, endpoints.port_of(stats[off_table()..off_table() + endpoints.table_size()], wi));
+        w = json.put_key(heap, w, "scheme");
+        w = json.put_string(heap, w, scheme_name(endpoints.scheme_of(stats[off_table()..off_table() + endpoints.table_size()], wi)));
         w = json.put_key(heap, w, "cursor");
         w = json.put_int(heap, w, stats[off_cur() + slot]);
         w = json.put_key(heap, w, "disabled");
@@ -2565,32 +2582,32 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
 }
 
 // The poller woke the attempt in `slot`: move it along, and if it ended, free its slot and record how. Answers 1 if an outcome
-// was written.
-fn settle[&g, &d, &k, &t, &p, &a, &r, &s](done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], slot: int, token0: int) -> [file_write, clock, conn_read, conn_write, poll] int {
-    let code = attempt.advance(atab, poller, at, req, resp, slot, token0);
-    if code == attempt.pending() {
+// was written. An attempt whose name has just been resolved is not ended: `delivery_turn` redials it.
+fn settle[&f, &g, &d, &k, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], slot: int, token0: int) -> [ffi("libcrypto"), ffi("libssl"), file_write, clock, conn_read, conn_write, poll] int {
+    let code = attempt.advance(ffi, atab, poller, at, req, resp, slot, token0);
+    if code == attempt.pending() || code == attempt.resolved() {
         return 0;
     }
+    return conclude(ffi, done, dv, clock, atab, at, slot, code);
+}
+
+// The attempt in `slot` ended with `code`: free its slot and record how. Answers 1 if an outcome was written.
+fn conclude[&f, &g, &d, &k, &t, &a](ffi: &f Ffi("libssl"), done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, at: &!a [int], slot: int, code: int) -> [ffi("libssl"), file_write, clock] int {
     let e = attempt.endpoint_of(at, slot);
     let id = attempt.event_of(at, slot);
     let latency = clock_ms(clock) - (attempt.deadline_of(at, slot) - dv[c_deadline()]);
-    attempt.finish(atab, at, slot);
+    attempt.finish(ffi, atab, at, slot);
     return finish_attempt(done, dv, clock, e, id, code, latency);
 }
 
 // End every attempt that has run past its deadline, as a timeout. Answers how many outcomes were written.
-fn sweep[&g, &d, &k, &t, &a](done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, at: &!a [int]) -> [file_write, clock] int {
+fn sweep[&f, &g, &d, &k, &t, &a](ffi: &f Ffi("libssl"), done: &!g log.Log, dv: &!d [int], clock: &k Clock, atab: &!t conns.Table, at: &!a [int]) -> [ffi("libssl"), file_write, clock] int {
     let now = clock_ms(clock);
     var written = 0;
     var slot = 0;
     while slot < attempt.slots() {
         if attempt.expired(at, slot, now) {
-            let e = attempt.endpoint_of(at, slot);
-            let id = attempt.event_of(at, slot);
-            let latency = now - (attempt.deadline_of(at, slot) - dv[c_deadline()]);
-            let code = attempt.timeout_of(at, slot);
-            attempt.finish(atab, at, slot);
-            written = written + finish_attempt(done, dv, clock, e, id, code, latency);
+            written = written + conclude(ffi, done, dv, clock, atab, at, slot, attempt.timeout_of(at, slot));
         }
         slot = slot + 1;
     }
@@ -2609,7 +2626,7 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
         }
     }
     let p = record.pair_at(window, record.first_pair(0));
-    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock));
+    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
@@ -2650,7 +2667,7 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
         return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
     let p = record.pair_at(window, record.first_pair(0));
-    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock));
+    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
@@ -2808,7 +2825,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
 // One turn of delivery. `ev` holds the `(token, readiness)` pairs the poller reported for handles that are not the server's:
 // the attempts' connections. Move each of those attempts along, end the ones past their deadline, start new ones, and flush the
 // outcomes once. Answers the attempts' connection table and how many outcomes were written.
-fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], ev: &e [int], nev: int, token0: int, atab: conns.Table) -> [heap, fs_read(""), file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] (conns.Table, int) {
+fn delivery_turn[&f, &h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](ffi: &f Ffi("libcrypto,libssl"), heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], blob: &b [byte], net: &n Net(""), clock: &k Clock, poller: &!p Poller, at: &!a [int], req: &!r [byte], resp: &!s [byte], ev: &e [int], nev: int, token0: int, atab: conns.Table) -> [ffi("libcrypto"), ffi("libssl"), heap, fs_read(""), file_read, file_write, net_out(""), conn_read, conn_write, poll, clock] (conns.Table, int) {
     var table = atab;
     var written = 0;
     var j = 0;
@@ -2816,13 +2833,23 @@ fn delivery_turn[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](heap: &!h H
         let slot = ev[2 * j] - token0;
         if attempt.busy(at, slot) {
             borrow mut table as &!tw in {
-                written = written + settle(done, dv, clock, tw, poller, at, req, resp, slot, token0);
+                written = written + settle(ffi, done, dv, clock, tw, poller, at, req, resp, slot, token0);
+            }
+            if attempt.redial_due(at, slot) {
+                // The name is resolved and every address judged: connect to the one that was (`attempt.redial`), or end the attempt if that cannot be done.
+                let (redialed, code) = attempt.redial(heap, table, poller, net, at, slot, token0);
+                table = redialed;
+                if code != attempt.pending() {
+                    borrow mut table as &!tw in {
+                        written = written + conclude(ffi, done, dv, clock, tw, at, slot, code);
+                    }
+                }
             }
         }
         j = j + 1;
     }
     borrow mut table as &!tw in {
-        written = written + sweep(done, dv, clock, tw, at);
+        written = written + sweep(ffi, done, dv, clock, tw, at);
     }
     // A deleted endpoint's slot is free once its last attempt has ended (`finish_drains`).
     written = written + finish_drains(done, dv);
@@ -3066,7 +3093,7 @@ fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int 
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), err_write] int {
+fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int, ssl: &c Ffi("libcrypto,libssl"), tls_ctx: int, ns: int, ns_port: int, resume: bool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libcrypto"), ffi("libssl"), err_write] int {
     // The outcomes log is owned here, by value: a snapshot replaces it (`compact.ls`), and a resource can only be replaced by its owner.
     var done = done0;
     match poller_new() {
@@ -3093,6 +3120,11 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
             // The delivery attempts in flight: their state, request and response bytes, the poller events that concern them, and
             // their connections.
             let at = box_slice(heap, attempt.at_size(), 0);
+            // What the attempts share (`docs/design.md` section 40): the TLS context (the trust store is read once, here, never per attempt), the name server, the
+            // address policy, and whether sessions are kept.
+            borrow mut at as &!aw0 in {
+                attempt.configure(contents(aw0), tls_ctx, ns, ns_port, dv[c_private()] == 1, resume);
+            }
             let req = box_slice(heap, attempt.req_size(), byte_of(0));
             let resp = box_slice(heap, attempt.resp_size(), byte_of(0));
             let events = box_slice(heap, 256, 0);
@@ -3209,8 +3241,15 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                             // database and hold the connection until the database answers; or say at once that it cannot be done.
                             var sent = 0 - 1;
                             var made = 0;
-                            if dv[off_mg() + manage.mg_kind()] == 1 && fill_change(dv, blob) != 0 {
-                                made = 0 - 1;
+                            var unfit = false;
+                            if dv[off_mg() + manage.mg_kind()] == 1 {
+                                let filled = fill_change(dv, blob);
+                                if filled != 0 {
+                                    made = 0 - 1;
+                                }
+                                if filled == 2 {
+                                    unfit = true;
+                                }
                             }
                             if made == 0 && dv[off_mg() + manage.mg_make()] == 1 {
                                 made = manage.make_secret(heap, evlog.lend(lg), dv[off_mg()..off_mg() + manage.mg_size()]);
@@ -3219,7 +3258,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                                 region ra {
                                     let hl = dv[off_mg() + manage.mg_host_len()];
                                     let sl = dv[off_mg() + manage.mg_secret_len()];
-                                    let host = alloc_slice[ra](253, byte_of(0));
+                                    let host = alloc_slice[ra](264, byte_of(0));
                                     let secret = alloc_slice[ra](96, byte_of(0));
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), hl, host);
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_secret(), sl, secret);
@@ -3232,7 +3271,15 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                                     buffer.drop(heap, request);
                                 }
                             }
-                            if sent == 0 {
+                            if unfit {
+                                dv[off_mg() + manage.mg_state()] = 0;
+                                out = server.failure(heap, out, 400, manage.why(6), keep == 1);
+                                borrow mut srv as &!sw in {
+                                    borrow out as &ob in {
+                                        server.respond(sw, buffer.bytes(ob));
+                                    }
+                                }
+                            } else if sent == 0 {
                                 var ticket = 0 - 1;
                                 borrow mut srv as &!sw in {
                                     ticket = server.hold(sw);
@@ -3418,9 +3465,10 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                                 borrow mut resp as &!pw in {
                                     borrow events as &er in {
                                         borrow mut done as &!dgw in {
-                                            let (grown, written) = delivery_turn(heap, lg, dgw, window, dv, blob, net, clock, server.poller(sw), contents(aw), contents(qw), contents(pw), contents(er), nev, token0, atab);
+                                            let (grown, written) = delivery_turn(ssl, heap, lg, dgw, window, dv, blob, net, clock, server.poller(sw), contents(aw), contents(qw), contents(pw), contents(er), nev, token0, atab);
                                             atab = grown;
                                         }
+                                        ops.set_tls(ops_of_mut(dv), attempt.handshakes(contents(aw)), attempt.resumed(contents(aw)));
                                     }
                                 }
                             }
@@ -3488,10 +3536,24 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
                                     }
                                 } else if tag == dv[off_mg() + manage.mg_tag()] && dv[off_mg() + manage.mg_state()] == 2 {
                                     // the database has answered the insert of a new endpoint
+                                    // The saved TLS session of the endpoint a change or a delete is for is dropped, whatever the change was (`attempt.drop_session`): after a
+                                    // change of host, port, scheme or secret the next attempt makes a full handshake and verifies the certificate again.
+                                    var changed = 0 - 1;
+                                    if dv[off_mg() + manage.mg_kind()] != 0 {
+                                        let ti = index_of_id(dv, dv[off_mg() + manage.mg_target()]);
+                                        if ti >= 0 {
+                                            changed = endpoints.slot_of(dv[off_table()..off_table() + endpoints.table_size()], ti);
+                                        }
+                                    }
                                     var created = buffer.empty(heap, 0);
                                     borrow mut done as &!dgw in {
                                         buffer.drop(heap, created);
                                         created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                    }
+                                    if changed >= 0 {
+                                        borrow mut at as &!aw2 in {
+                                            attempt.drop_session(ssl, contents(aw2), changed);
+                                        }
                                     }
                                     borrow created as &cb in {
                                         server.answer(sw, dv[off_mg() + manage.mg_ticket()], buffer.bytes(cb));
@@ -3686,6 +3748,9 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e](heap: &!h Hea
             }
             pool.close(heap, pl);
             conns.drop(heap, atab);
+            borrow mut at as &!aw1 in {
+                attempt.close_tls(ssl, contents(aw1));
+            }
             unbox_slice(heap, at);
             unbox_slice(heap, req);
             unbox_slice(heap, resp);
@@ -4001,21 +4066,44 @@ fn report_trips[&i, &d](out: &!i Io, dv: &!d [int]) -> [err_write] int {
 // cursor at the last event so that it gets what comes after and not the log's past, add it to the table, and answer `201` with the secret,
 // which nothing answers again. Answers the whole HTTP response. Nothing is changed in memory or in the log unless the database said commit.
 // The members of a change that the request did not name, filled in from the endpoint as it is now (a `PATCH` that names only the
-// secret still sends the host and the port, so one statement serves). Answers 0, or 1 if the endpoint is not there.
+// secret still sends the host and the port, so one statement serves). Answers 0, 1 if the endpoint is not there, or 2 if the host and the scheme together are not
+// acceptable (an address with `https`).
 fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
     let f = dv[off_mg() + manage.mg_fields()];
     let i = index_of_id(dv, dv[off_mg() + manage.mg_target()]);
     if i < 0 {
         return 1;
     }
-    if f & 1 == 0 {
-        let host = endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i);
+    // The host as it will be stored (`destination.ls`): the host the change names, or the endpoint's own, and the scheme the change names, or the endpoint's own,
+    // judged together. A host alone is judged against the scheme the endpoint has: an address is not a host for `https`.
+    var https = endpoints.scheme_of(dv[off_table()..off_table() + endpoints.table_size()], i) == 1;
+    if f & 32 != 0 {
+        https = dv[off_mg() + manage.mg_scheme()] == 1;
+    }
+    region r {
+        let named = alloc_slice[r](264, byte_of(0));
+        let stored = alloc_slice[r](264, byte_of(0));
+        var n = 0;
+        if f & 1 != 0 {
+            n = dv[off_mg() + manage.mg_host_len()];
+            manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), n, named);
+        } else {
+            let own = destination.bare(endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i));
+            while n < len(own) {
+                named[n] = own[n];
+                n = n + 1;
+            }
+        }
+        let m = manage.stored_host(named[0..n], https, dv[c_private()] == 1, stored);
+        if m < 0 {
+            return 2;
+        }
         var k = 0;
-        while k < len(host) {
-            dv[off_mg() + manage.mg_host() + k] = int_of(host[k]);
+        while k < m {
+            dv[off_mg() + manage.mg_host() + k] = int_of(stored[k]);
             k = k + 1;
         }
-        dv[off_mg() + manage.mg_host_len()] = len(host);
+        dv[off_mg() + manage.mg_host_len()] = m;
     }
     if f & 2 == 0 {
         dv[off_mg() + manage.mg_port()] = endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i);
@@ -4037,7 +4125,7 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
         if dv[off_mg() + manage.mg_kind()] != 1 {
             return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
         }
-        if dv[off_mg() + manage.mg_fields()] & ~3 != 0 {
+        if dv[off_mg() + manage.mg_fields()] & ~35 != 0 {
             let mask = epx.pending_mask(xg);
             return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
@@ -4211,7 +4299,7 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
     let scratch = box_slice(heap, endpoints.text_limit(), byte_of(0));
     var failed = false;
     region a {
-        let host = alloc_slice[a](253, byte_of(0));
+        let host = alloc_slice[a](264, byte_of(0));
         let secret = alloc_slice[a](96, byte_of(0));
         let key = alloc_slice[a](96, byte_of(0));
         manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
@@ -4286,7 +4374,9 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
             wr = json.put_key(heap, wr, "id");
             wr = json.put_int(heap, wr, target);
             wr = json.put_key(heap, wr, "host");
-            wr = json.put_string(heap, wr, host[0..hl]);
+            wr = json.put_string(heap, wr, destination.bare(host[0..hl]));
+            wr = json.put_key(heap, wr, "scheme");
+            wr = json.put_string(heap, wr, scheme_name(endpoints.scheme_of(dv[off_table()..off_table() + endpoints.table_size()], i)));
             wr = json.put_key(heap, wr, "port");
             wr = json.put_int(heap, wr, port);
             if fields & 12 != 0 {
@@ -4330,7 +4420,7 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
     let sl = dv[mg + manage.mg_secret_len()];
     let port = dv[mg + manage.mg_port()];
     region a {
-        let host = alloc_slice[a](253, byte_of(0));
+        let host = alloc_slice[a](264, byte_of(0));
         let secret = alloc_slice[a](96, byte_of(0));
         let key = alloc_slice[a](96, byte_of(0));
         manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
@@ -4384,7 +4474,9 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         wr = json.put_key(heap, wr, "id");
         wr = json.put_int(heap, wr, ident);
         wr = json.put_key(heap, wr, "host");
-        wr = json.put_string(heap, wr, host[0..hl]);
+        wr = json.put_string(heap, wr, destination.bare(host[0..hl]));
+        wr = json.put_key(heap, wr, "scheme");
+        wr = json.put_string(heap, wr, scheme_name(endpoints.scheme_of(dv[off_table()..off_table() + endpoints.table_size()], count)));
         wr = json.put_key(heap, wr, "port");
         wr = json.put_int(heap, wr, port);
         wr = json.put_key(heap, wr, "secret");
@@ -4464,11 +4556,28 @@ fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte], open: bool) -> [heap] in
     return count;
 }
 
+// The TLS client's context (`tls.context`): the system's trust store, or exactly the file `cafile` names (empty: the system's). 0 if it cannot be made.
+fn start_tls[&f, &c](libssl: &f Ffi("libssl"), cafile: &c [byte]) -> [ffi("libssl")] int {
+    region r {
+        let path = alloc_slice[r](len(cafile) + 1, byte_of(0));
+        var i = 0;
+        while i < len(cafile) {
+            path[i] = cafile[i];
+            i = i + 1;
+        }
+        if len(cafile) == 0 {
+            return tls.context(libssl, path[0..0]);
+        }
+        return tls.context(libssl, path);
+    }
+}
+
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    // The only foreign authority the service holds: one libc function, `statx`, for the modes of the data directory (`src/perm.ls`; the production
-    // profile only). How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
-    let libc = narrow(ffi, "libc");
+    // The only foreign authority the service holds, by library: libc (one function, `statx`, for the modes of the data directory, `src/perm.ls`; the
+    // production profile only), libssl and libcrypto (the TLS client of an `https` endpoint, `src/tls.ls`). `scripts/check-authority.sh` pins the exact
+    // list of symbols. How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
+    let libc = narrow(ffi, "libc,libcrypto,libssl");
     let stop = narrow(signals, "INT,TERM");
     var fs = fs;
     var port = 0 - 1;
@@ -4784,6 +4893,24 @@ fn main(world: World) -> [] int {
                                                             rt_say_start(iwr, lw);
                                                         }
                                                     }
+                                                    // The TLS client's trust store is read once, here (`src/tls.ls`): a store that cannot be read is a refusal to start, never a
+                                                    // client that does not verify. And the name server for the names of endpoints (`src/resolve.ls`). (Not in `compact-now`, which serves nothing.)
+                                                    var tls_ctx = 0;
+                                                    var ns = config.dns_server(cfg);
+                                                    if status == 0 && !config.compact_now(cfg) {
+                                                        borrow libc as &lt in {
+                                                            tls_ctx = start_tls(lt, cblob[config.ca_file_at()..config.ca_file_at() + config.ca_file_len(cfg)]);
+                                                        }
+                                                        if tls_ctx == 0 {
+                                                            status = 21;
+                                                            borrow mut io as &!i in {
+                                                                say(i, "hooks: the TLS trust store cannot be loaded (tls-ca-file, or the system's certificates); an https endpoint could not be verified\n");
+                                                            }
+                                                        }
+                                                        if ns == 0 {
+                                                            ns = resolve.from_system(evlog.lend(lw));
+                                                        }
+                                                    }
                                                     if status != 0 {
                                                         log.close(dl);
                                                     } else if config.compact_now(cfg) {
@@ -4846,7 +4973,9 @@ fn main(world: World) -> [] int {
                                                                                         borrow stop as &sr in {
                                                                                             match signals_watch(sr) {
                                                                                                 Watching::Ok(claim) => {
-                                                                                                    status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg));
+                                                                                                    borrow libc as &lb in {
+                                                                                                        status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), lb, tls_ctx, ns, config.dns_port(cfg), config.tls_resume(cfg));
+                                                                                                    }
                                                                                                 }
                                                                                                 Watching::Failed(e) => {
                                                                                                     say(iw, "hooks: SIGINT and SIGTERM cannot be claimed (errno ");
@@ -4864,11 +4993,15 @@ fn main(world: World) -> [] int {
                                                                         }
                                                                         route.drop(h, router);
                                                                     }
+                                                                    // (the context is freed by `attempt.close_tls`, at the end of `run`)
                                                                     listener_close(listener);
                                                                 }
                                                                 Listening::Failed(e) => {
                                                                     status = 11;
                                                                     log.close(dl);
+                                                                    borrow libc as &lt in {
+                                                                        tls.free_context(lt, tls_ctx);
+                                                                    }
                                                                 }
                                                             }
                                                         }

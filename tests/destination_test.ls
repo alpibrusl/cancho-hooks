@@ -105,6 +105,7 @@ fn test_the_edges_of_those_ranges_are_public() -> [] int {
     return 0;
 }
 
+// `allowed` is the rule of an address: a name is not one. (Unchanged: what a name may be is `host_ok`, below.)
 fn test_a_name_is_never_allowed() -> [] int {
     test.assert(!is_allowed("example.com"));
     test.assert(!is_allowed("localhost"));
@@ -123,11 +124,134 @@ fn test_the_endpoints_file_applies_the_rule() -> [] int {
         let loopback = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 127.0.0.1 9002 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
         test.assert_eq(endpoints.parse(loopback, table, blob, false), 0 - 2);
         test.assert_eq(endpoints.parse(loopback, table, blob, true), 2);
+        // CHANGED (docs/design.md section 40): a name used to be refused at the write, because it could not be judged. It is a valid host now and is judged at every attempt
+        // (`attempt.ls`, `tests/names_test.py`); what stays refused at the write is a text that is not a name.
         let named = "# a name\n1 example.com 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
-        test.assert_eq(endpoints.parse(named, table, blob, false), 0 - 2);
+        test.assert_eq(endpoints.parse(named, table, blob, false), 1);
         test.assert_eq(endpoints.parse(named, table, blob, true), 1);
         let short = "1 127.1 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
         test.assert_eq(endpoints.parse(short, table, blob, false), 0 - 1);
+        // CHANGED: open used to accept any text; it does not make an address out of what is not one
+        test.assert_eq(endpoints.parse(short, table, blob, true), 0 - 1);
+        let secure = "1 https://hooks.example.com 443 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 8.8.8.8 9002 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
+        test.assert_eq(endpoints.parse(secure, table, blob, false), 2);
+        test.assert_eq(endpoints.scheme_of(table, 0), 1);
+        test.assert_eq(endpoints.scheme_of(table, 1), 0);
+        test.assert(destination.is_https(endpoints.host_of(table, blob, 0)));
+        // https takes a name, not an address, open or not
+        let secure_address = "1 https://8.8.8.8 443 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
+        test.assert_eq(endpoints.parse(secure_address, table, blob, false), 0 - 1);
+        test.assert_eq(endpoints.parse(secure_address, table, blob, true), 0 - 1);
     }
+    return 0;
+}
+
+fn test_a_name_is_a_name_when_its_labels_and_its_last_label_say_so() -> [] int {
+    test.assert(destination.name_ok("example.com"));
+    test.assert(destination.name_ok("localhost"));
+    test.assert(destination.name_ok("receiver"));
+    test.assert(destination.name_ok("my_service.internal"));
+    test.assert(destination.name_ok("a-b.c-d.example"));
+    test.assert(destination.name_ok("Hooks.Example.COM"));
+    test.assert(destination.name_ok("8.8.8.8.nip.io"));
+    test.assert(destination.name_ok("1a.example"));
+    test.assert(destination.name_ok("xn--bcher-kva.example"));
+    // an address, or something a person would read as one, or something that is not a name
+    test.assert(!destination.name_ok(""));
+    test.assert(!destination.name_ok("127.1"));
+    test.assert(!destination.name_ok("2130706433"));
+    test.assert(!destination.name_ok("0x7f.0.0.1"));
+    test.assert(!destination.name_ok("1.2.3"));
+    test.assert(!destination.name_ok("1.2.3.4.5"));
+    test.assert(!destination.name_ok("256.1.1.1"));
+    test.assert(!destination.name_ok("example.com."));
+    test.assert(!destination.name_ok(".example.com"));
+    test.assert(!destination.name_ok("a..b"));
+    test.assert(!destination.name_ok("-a.example"));
+    test.assert(!destination.name_ok("a-.example"));
+    test.assert(!destination.name_ok("a b.example"));
+    test.assert(!destination.name_ok("a/b.example"));
+    test.assert(!destination.name_ok("user@example.com"));
+    test.assert(!destination.name_ok("example.com:80"));
+    test.assert(!destination.name_ok("[::1]"));
+    test.assert(!destination.name_ok("::1"));
+    test.assert(!destination.name_ok("*.example.com"));
+    test.assert(!destination.name_ok("exa\tmple.com"));
+    return 0;
+}
+
+fn test_a_label_is_63_bytes_at_most_and_a_name_253() -> [] int {
+    let l63 = "0123456789012345678901234567890123456789012345678901234567890ab";
+    test.assert_eq(len(l63), 63);
+    test.assert(destination.name_ok(l63));
+    test.assert(!destination.name_ok("01234567890123456789012345678901234567890123456789012345678901ab"));
+    region a {
+        // three labels of 63 and one of 61, with their dots: 253 bytes
+        let long = alloc_slice[a](253, byte_of('a'));
+        var i = 63;
+        while i < 253 {
+            long[i] = byte_of('.');
+            i = i + 64;
+        }
+        test.assert(destination.name_ok(long));
+        // one more byte in the last label: 254
+        let too = alloc_slice[a](254, byte_of('a'));
+        i = 63;
+        while i < 253 {
+            too[i] = byte_of('.');
+            i = i + 64;
+        }
+        test.assert(!destination.name_ok(too));
+        // a dot in place of the last byte of the full name leaves a trailing dot, which is not a name here
+        long[252] = byte_of('.');
+        test.assert(!destination.name_ok(long));
+    }
+    return 0;
+}
+
+fn test_a_host_is_judged_in_the_form_it_is_stored() -> [] int {
+    test.assert(destination.host_ok("example.com", false));
+    test.assert(destination.host_ok("https://example.com", false));
+    test.assert(destination.host_ok("8.8.8.8", false));
+    test.assert(!destination.host_ok("127.0.0.1", false));
+    test.assert(destination.host_ok("127.0.0.1", true));
+    test.assert(destination.host_ok("localhost", false));
+    // https takes a name only
+    test.assert(!destination.host_ok("https://8.8.8.8", false));
+    test.assert(!destination.host_ok("https://127.0.0.1", true));
+    // another scheme is not a host, whatever open says
+    test.assert(!destination.host_ok("http://example.com", false));
+    test.assert(!destination.host_ok("ftp://example.com", true));
+    test.assert(!destination.host_ok("https://", false));
+    test.assert(!destination.host_ok("https:///x", true));
+    test.assert(!destination.host_ok("https://127.1", true));
+    test.assert(!destination.host_ok("127.1", true));
+    test.assert(!destination.host_ok("::1", true));
+    return 0;
+}
+
+fn test_localhost_is_the_loopback_in_any_case() -> [] int {
+    test.assert(destination.is_localhost("localhost"));
+    test.assert(destination.is_localhost("LocalHost"));
+    test.assert(destination.is_localhost("app.localhost"));
+    test.assert(destination.is_localhost("a.b.LOCALHOST"));
+    test.assert(!destination.is_localhost("notlocalhost"));
+    test.assert(!destination.is_localhost("localhost.example.com"));
+    test.assert(!destination.is_localhost("xlocalhost"));
+    test.assert(!destination.is_localhost("local"));
+    test.assert(!destination.is_localhost(".localhost"));
+    test.assert(!destination.is_localhost(""));
+    return 0;
+}
+
+fn test_the_scheme_is_part_of_the_host() -> [] int {
+    test.assert(destination.is_https("https://a.example"));
+    test.assert(!destination.is_https("http://a.example"));
+    test.assert(!destination.is_https("a.example"));
+    test.assert(!destination.is_https("https:/a.example"));
+    test.assert(!destination.is_https("HTTPS://a.example"));
+    test.assert(!destination.is_https(""));
+    test.assert_eq(len(destination.bare("https://a.example")), 9);
+    test.assert_eq(len(destination.bare("a.example")), 9);
     return 0;
 }

@@ -16,6 +16,9 @@ import std.bytes;
 //
 //     <id> <host> <port> <secret> [types=<patterns>] [headers=<spec>] [old=<secret>@<until>] [concurrency=<1 to 8>] [rate=<1 to 100000>]
 //
+// where `<host>` is an IPv4 address or a host name, with `https://` in front of it for an endpoint that is delivered to over TLS (`destination.ls`; the port is
+// the port, `443` for most). A line without the scheme is what it always was.
+//
 // with `#` comments and blank lines ignored. The words after the secret are optional and in any order, each at most once (design section 35):
 // `types=` the event types the endpoint subscribes to, comma separated (`filter.ls`: `invoice.paid,user.*`; none: every event), `headers=` the
 // custom headers of every attempt, `Name:value` pairs separated by commas with each value percent-encoded (`hdrs.ls`), and `old=` the previous
@@ -25,9 +28,11 @@ import std.bytes;
 // must not change when the file is reordered: it is written, not counted. The secret is a Standard
 // Webhooks one (`whsec_` and base64); what is kept is the key it decodes to.
 //
-// `parse` fills a table of seven integers per endpoint, in the order the lines came:
+// `parse` fills a table of eight integers per endpoint, in the order the lines came:
 //
-//     [slot, port, host_start, host_len, key_start, key_len, id]
+//     [slot, port, host_start, host_len, key_start, key_len, id, scheme]
+//
+// where the host is as written (`https://` and all) and `scheme` is 1 for `https` and 0 for plain.
 //
 // where the starts index `blob`. The caller sizes both: `table` for `state.max_endpoints()` endpoints, `blob` for the file's
 // own length (a host and a key are never longer than the line they came from). The **id** is the endpoint's identity (what the
@@ -35,11 +40,11 @@ import std.bytes;
 // `parse` cannot know: it writes the id there, and `hooks.ls` replaces it once it has read the log (`docs/design.md` section 25).
 
 pub fn stride() -> [] int {
-    return 7;
+    return 8;
 }
 
 pub fn table_size() -> [] int {
-    return 7 * state.max_endpoints();
+    return 8 * state.max_endpoints();
 }
 
 // The most bytes of text (a file, or the database's table written as one) that `parse` is given.
@@ -100,9 +105,9 @@ pub fn number_ms[&t](text: &t [byte], from: int, to: int) -> [] int {
 }
 
 // Parse the file. Answers the number of endpoints, or `0 - line` (the 1-based line number, negated) of the first line that is
-// wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a host that is not a public IPv4 address (unless `open`: section 26), a secret that
-// is not base64, a host that is not a public IPv4 address (unless `open`: `destination.ls`), a word after the secret that is not one of the three above
-// or is one twice or is not good, or more than `state.max_endpoints()` endpoints.
+// wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a host that is neither a host name nor a
+// public IPv4 address (an address in the private, loopback, link-local and reserved ranges only if `open`; an `https://` host is a name: `destination.host_ok`),
+// a secret that is not base64, a word after the secret that is not one of the three above or is one twice or is not good, or more than `state.max_endpoints()` endpoints.
 //
 // `xt` is where the optional words go (`epx.ls`: a row of `epx.stride()` integers an endpoint, in the table's order): they are judged whatever its
 // length, and kept in it only if it holds a row for the endpoint. `parse` is this without somewhere to keep them.
@@ -130,7 +135,7 @@ pub fn parse_x[&t, &n, &b, &x](text: &t [byte], table: &!n [int], blob: &!b [byt
             if id < 0 || p < 1 || p > 65535 || count >= state.max_endpoints() {
                 return 0 - line;
             }
-            if !open && !destination.allowed(text[host.0..host.1]) {
+            if host.1 - host.0 > 256 || !destination.host_ok(text[host.0..host.1], open) {
                 return 0 - line;
             }
             var i = 0;
@@ -158,6 +163,7 @@ pub fn parse_x[&t, &n, &b, &x](text: &t [byte], table: &!n [int], blob: &!b [byt
             table[base + 4] = used;
             table[base + 5] = klen;
             table[base + 6] = id;
+            table[base + 7] = scheme_of_host(text[host.0..host.1]);
             // The optional words. Their bytes go to `xt`, not to `blob`; the old key is decoded into the free end of `blob` for a moment.
             let keep = len(xt) >= (count + 1) * epx.stride();
             if keep {
@@ -254,6 +260,18 @@ pub fn ident_of[&n](table: &n [int], i: int) -> [] int {
     return table[i * stride() + 6];
 }
 
+// 1 if the `i`th endpoint is delivered to over TLS (its host starts with `https://`), else 0.
+pub fn scheme_of[&n](table: &n [int], i: int) -> [] int {
+    return table[i * stride() + 7];
+}
+
+fn scheme_of_host[&h](host: &h [byte]) -> [] int {
+    if destination.is_https(host) {
+        return 1;
+    }
+    return 0;
+}
+
 pub fn set_slot[&n](table: &!n [int], i: int, slot: int) -> [] int {
     table[i * stride()] = slot;
     return 0;
@@ -317,6 +335,7 @@ pub fn append[&n, &b, &h, &k](table: &!n [int], blob: &!b [byte], count: int, sl
     table[base + 4] = at + len(host);
     table[base + 5] = len(key);
     table[base + 6] = ident;
+    table[base + 7] = scheme_of_host(host);
     return count + 1;
 }
 
@@ -387,6 +406,7 @@ pub fn replace[&n, &b, &h, &k, &s](table: &!n [int], blob: &!b [byte], count: in
     table[base + 3] = len(host);
     table[base + 4] = at + len(host);
     table[base + 5] = len(key);
+    table[base + 7] = scheme_of_host(host);
     return 0;
 }
 

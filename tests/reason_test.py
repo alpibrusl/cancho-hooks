@@ -95,7 +95,7 @@ def main():
     by_reason = {dict(k)["reason"]: int(v) for k, v in m.series("hooks_attempt_failures_total").items() if v}
     expect = {reason: 1 for name, (reason, _) in want.items() if reason != "none"}
     check("2. /metrics counts one failure for each reason, and none for the delivery", by_reason == expect, f"{by_reason} {expect}")
-    check("2. ... and every reason that did not happen is a series at 0", len(m.series("hooks_attempt_failures_total")) == 16)
+    check("2. ... and every reason that did not happen is a series at 0 (26 series: 16 until names and TLS, docs/design.md section 40)", len(m.series("hooks_attempt_failures_total")) == 26)
     check("2. the outcomes: 1 delivered, 1 dead (the 410), the rest failed", (m.value("hooks_attempts_total", outcome="delivered"), m.value("hooks_attempts_total", outcome="dead"),
           m.value("hooks_attempts_total", outcome="failed")) == (1, 1, n - 2))
 

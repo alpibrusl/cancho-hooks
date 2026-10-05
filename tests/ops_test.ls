@@ -113,6 +113,43 @@ fn test_failures_are_counted_by_reason_and_remembered_per_endpoint() -> [] int {
     return 0;
 }
 
+// Every reason has a counter of its own (`reason.count()` of them, the newest the last), and none of them is another cell of the array: the probe's round, the last
+// reasons and the counters of ingest are where they were. (There were 17 reasons, with room for 17; names and TLS made 27.)
+fn test_every_reason_counts_in_a_cell_of_its_own() -> [] int {
+    region a {
+        let o = alloc_slice[a](ops.size(), 0);
+        fresh(o);
+        let before_probe = ops.probe_round(o);
+        ops.accepted(o);
+        ops.attempt_ended(o, 5, reason.gone());
+        var r = 1;
+        while r < reason.count() {
+            ops.attempt_ended(o, 0, r);
+            r = r + 1;
+        }
+        r = 1;
+        while r < reason.count() {
+            let own = 1;
+            var want = own;
+            if r == reason.gone() {
+                want = 2;
+            }
+            test.assert_eq(ops.failures_for(o, r), want);
+            r = r + 1;
+        }
+        test.assert_eq(ops.last_reason(o, 0), reason.count() - 1);
+        test.assert_eq(ops.last_reason(o, 5), reason.gone());
+        test.assert_eq(ops.last_reason(o, 1), 0);
+        test.assert_eq(ops.probe_round(o), before_probe);
+        test.assert_eq(ops.accepted_count(o), 1);
+        // a reason that does not exist is not counted, and is not a cell of anything else
+        ops.attempt_ended(o, 0, reason.count());
+        ops.attempt_ended(o, 0, 1000);
+        test.assert_eq(ops.size(), 110 + reason.count());
+    }
+    return 0;
+}
+
 // Ready means: not stopping, no log broken, the directory took the last probe, and a database that was named has a connection. The first that fails is the one told.
 fn test_readiness_is_each_check_in_its_order() -> [] int {
     region a {

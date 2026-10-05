@@ -58,7 +58,7 @@ epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
 if [ "$build" = 1 ]; then
   : "${LEX_SYS:?set LEX_SYS to the lex-sys compiler binary (the commit lex-sys.toml pins)}"
   rm -rf "$here/build/hooks" "$here/build/deps"
-  (cd "$here" && "$LEX_SYS" build) >&2 || die 4 "lex-sys build failed"
+  (cd "$here" && CC="$here/scripts/cc-ssl.sh" "$LEX_SYS" build) >&2 || die 4 "lex-sys build failed (OpenSSL's development files are needed to link: libssl-dev)"
 fi
 [ -x "$here/build/hooks" ] || die 3 "build/hooks does not exist: build first, or drop --no-build"
 if [ "$build" = 0 ]; then echo "release: --no-build: packaging whatever build/hooks is (the SBOM records its hash, not how it was made)" >&2; fi
@@ -166,7 +166,7 @@ sbom = {
         "from": "ldd on the build host; the target host supplies its own copies, which must be this glibc or newer",
         "entries": libc,
     },
-    "statically_linked_native_code": "none known: the program's only foreign call is one libc function, statx (src/perm.ls); the compiler's authority report lists it and docs/authority.json pins the report (scripts/check-authority.sh); not verified by this script",
+    "statically_linked_native_code": "none known beyond the foreign symbols the compiler's authority report lists, pinned in docs/authority.json (scripts/check-authority.sh): libc (statx, src/perm.ls), and libssl and libcrypto for the TLS client of an https endpoint (src/tls.ls), which are the dynamic libraries above; not verified by this script",
     "not_listed": [
         "the Rust toolchain that built the compiler (named by the compiler repository's rust-toolchain.toml at the pinned commit)",
         "the crates the compiler was built from (its Cargo.lock at the pinned commit)",

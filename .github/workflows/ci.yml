@@ -51,13 +51,19 @@ jobs:
         working-directory: hooks
         run: ../lex-sys/target/release/lex-sys fmt --check src
 
+      # The service is linked against OpenSSL (src/tls.ls; scripts/cc-ssl.sh adds -lssl -lcrypto) and its tests of https use the `openssl` command to make certificates.
+      - name: OpenSSL (the development files to link against, and the command the tests make certificates with)
+        run: |
+          dpkg -s libssl-dev >/dev/null 2>&1 || (sudo apt-get update -q && sudo apt-get install -y -q libssl-dev openssl)
+          openssl version
+
       - name: Install the libraries, build the service and the fsync shim
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
 
       # What the service can do, as `lex-sys authority` reports it, is pinned in docs/authority.json. A new foreign call or capability changes the report,
       # and the step is red until a person reads the diff and commits the new file (`scripts/check-authority.sh --update`): that commit is the approval.
-      - name: The authority report is the committed one (docs/authority.json)
+      - name: The authority report is the committed one (every foreign symbol the service can call, by library)
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh
 
@@ -134,9 +140,25 @@ jobs:
         working-directory: hooks
         run: python3 tests/saturation_test.py build/hooks
 
-      - name: Where a delivery may go (no private, loopback or reserved addresses, no names)
+      - name: Where a delivery may go (no private, loopback or reserved addresses; a name is a name, judged at every attempt)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/ssrf_test.py build/hooks
+
+      - name: Names, and the SSRF rule at every attempt (a name that resolves to a private address, rebinding, a name server that fails or is slow, the loop not held)
+        working-directory: hooks
+        run: python3 tests/names_test.py build/hooks
+
+      - name: Delivery over TLS (every certificate failure has its own reason, the handshake, the deadline, kill -9 in a handshake, 64 held handshakes)
+        working-directory: hooks
+        run: python3 tests/https_test.py build/hooks
+
+      - name: The scheme of an endpoint over the API, the file, the table, a backup and a restore
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/https_api_test.py build/hooks
+
+      - name: TLS sessions (resumption seen from the receiver, dropped when the endpoint changes, no leaks)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/sessions_test.py build/hooks
 
       - name: Replay an event to one endpoint or all
         working-directory: hooks

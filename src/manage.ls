@@ -4,6 +4,7 @@ module manage;
 
 import destination;
 import std.buffer;
+import std.bytes;
 import std.http;
 import std.json;
 import pg;
@@ -17,9 +18,10 @@ import pg;
 //     [0] state: 0 nothing waits, 1 asked (the loop has not sent it yet), 2 sent and waiting for the database
 //     [1] the pool's tag for it   [2] the ticket of the held connection   [3] keep the connection alive   [4] when to give up (ms)
 //     [5] port   [6] host length   [7] secret length   [8] 1 if the service has to make the secret
-//     [9 .. 265) the host   [265 .. 361) the secret, `whsec_` and base64
+//     [9 .. 265) the host, as stored (`destination.ls`: with `https://` in front of it for an endpoint delivered to over TLS)   [265 .. 361) the secret, `whsec_` and base64
 //     [361] what it is: 0 a new endpoint, 1 a change (`PATCH`, section 25.3)   [362] the id of the endpoint a change is for
-//     [363] the members a change names: 1 host, 2 port, 4 secret, 8 rotate (a secret made by the service), 16 one of the members of `epx.ls`
+//     [363] the members a change names: 1 host, 2 port, 4 secret, 8 rotate (a secret made by the service), 16 one of the members of `epx.ls`, 32 the scheme
+//     [364] the scheme a change names: 1 https, 0 http
 
 pub fn token_size() -> [] int {
     return 256;
@@ -75,6 +77,10 @@ pub fn mg_target() -> [] int {
 
 pub fn mg_fields() -> [] int {
     return 363;
+}
+
+pub fn mg_scheme() -> [] int {
+    return 364;
 }
 
 pub fn mg_host() -> [] int {
@@ -155,7 +161,7 @@ pub fn why(code: int) -> [] &static [byte] {
         return "the body must be a JSON object";
     }
     if code == 2 {
-        return "the endpoint needs a string \"host\" of 1 to 253 printable characters with no space";
+        return "the endpoint needs a string \"host\" (or a \"url\") of 1 to 253 printable characters with no space";
     }
     if code == 3 {
         return "the endpoint needs an integer \"port\" from 1 to 65535";
@@ -167,13 +173,19 @@ pub fn why(code: int) -> [] &static [byte] {
         return "a new endpoint starts from now: \"from\" may only be \"now\"";
     }
     if code == 7 {
-        return "a change needs at least one of \"host\", \"port\", \"secret\", \"rotate\", \"types\", \"headers\", \"keep_old_ms\", \"keep_old\", \"concurrency\" and \"rate\"";
+        return "a change needs at least one of \"url\", \"host\", \"port\", \"scheme\", \"secret\", \"rotate\", \"types\", \"headers\", \"keep_old_ms\", \"keep_old\", \"concurrency\" and \"rate\"";
     }
     if code == 8 {
         return "\"rotate\" must be true, and cannot be given with a \"secret\"";
     }
     if code == 6 {
-        return "the host must be a public IPv4 address (four numbers, no name; loopback, private, link-local and reserved ranges are refused: SSRF)";
+        return "the host must be a host name or a public IPv4 address (four numbers; loopback, private, link-local and reserved ranges are refused: SSRF; a name that resolves to one is refused when it is used); an https endpoint needs a host name";
+    }
+    if code == 9 {
+        return "\"url\" must be http:// or https:// then a host name or IPv4 address and optionally :port, and cannot be given with \"host\", \"port\" or \"scheme\"";
+    }
+    if code == 10 {
+        return "\"scheme\" must be \"http\" or \"https\"";
     }
     return "the request is not valid";
 }
@@ -190,41 +202,162 @@ fn printable[&t](text: &t [byte]) -> [] bool {
     return true;
 }
 
-// Read `{"host": "...", "port": N, "secret": "whsec_..." (optional), "from": "now" (optional)}` and keep it in `mg` (from [5] up).
-// Answers `(code, port, host length, secret length)`: code 0 if the request is good, else what `why` says. Other members are ignored.
-// `scratch` is at least 400 bytes. The secret is judged by the rule that judges a line of `endpoints.conf`: it must decode as base64
-// (`sign.secret_key` is the caller's check; here only its length and characters are).
+// The `host` and `port` of a `"url"`: `http://host`, `https://host:8443` and an optional final `/`, nothing else (no user, path or query). The host is written to
+// `host_out` (at least 253 bytes) and judged by the caller. Answers `(code, host length, port, scheme)`: code 0 or 9, the port (the scheme's own, 80 or 443, when the
+// url has none) and the scheme (1 for `https`, 0 for `http`).
+pub fn split_url[&u, &o](url: &u [byte], host_out: &!o [byte]) -> [] (int, int, int, int) {
+    var i = 0;
+    var scheme = 0;
+    if destination.is_https(url) {
+        i = 8;
+        scheme = 1;
+    } else if len(url) > 7 && bytes.starts_with(url, "http://") {
+        i = 7;
+    } else {
+        return (9, 0, 0, 0);
+    }
+    var e = len(url);
+    if e > i && int_of(url[e - 1]) == '/' {
+        e = e - 1;
+    }
+    var h = i;
+    while h < e && int_of(url[h]) != ':' {
+        h = h + 1;
+    }
+    let hl = h - i;
+    if hl < 1 || hl > 253 {
+        return (9, 0, 0, 0);
+    }
+    var k = 0;
+    while k < hl {
+        host_out[k] = url[i + k];
+        k = k + 1;
+    }
+    var port = 80;
+    if scheme == 1 {
+        port = 443;
+    }
+    if h < e {
+        port = 0;
+        var d = h + 1;
+        if d == e || e - d > 5 {
+            return (9, 0, 0, 0);
+        }
+        while d < e {
+            let c = int_of(url[d]);
+            if c < '0' || c > '9' {
+                return (9, 0, 0, 0);
+            }
+            port = port * 10 + (c - '0');
+            d = d + 1;
+        }
+        if port < 1 || port > 65535 {
+            return (9, 0, 0, 0);
+        }
+    }
+    return (0, hl, port, scheme);
+}
+
+// The host of an endpoint as it is stored: `https://` in front of the name for an `https` endpoint, otherwise as given. Written to `out`; answers the length, or -1
+// if the result is not an acceptable host (`destination.host_ok`, `open` allowing private addresses) or does not fit the 256 bytes there are for it.
+pub fn stored_host[&h, &o](host: &h [byte], https: bool, open: bool, out: &!o [byte]) -> [] int {
+    if destination.is_https(host) {
+        // The scheme is a member of its own (or a `url`), never a prefix of the host as given.
+        return 0 - 1;
+    }
+    var at = 0;
+    if https {
+        let prefix = "https://";
+        while at < len(prefix) {
+            out[at] = byte_of(int_of(prefix[at]));
+            at = at + 1;
+        }
+    }
+    if at + len(host) > 256 {
+        return 0 - 1;
+    }
+    var k = 0;
+    while k < len(host) {
+        out[at + k] = host[k];
+        k = k + 1;
+    }
+    if !destination.host_ok(out[0..at + len(host)], open) {
+        return 0 - 1;
+    }
+    return at + len(host);
+}
+
+// Read `{"host": "...", "port": N, "scheme": "https" (optional), "secret": "whsec_..." (optional), "from": "now" (optional)}`, or `{"url": "https://host:port", ...}` in
+// place of the first three, and keep it in `mg` (from [5] up; the host as it is stored). Answers `(code, port, host length, secret length)`: code 0 if the request is
+// good, else what `why` says. Other members are ignored. `scratch` is at least 1,000 bytes. The secret is judged by the rule that judges a line of `endpoints.conf`:
+// it must decode as base64 (`sign.secret_key` is the caller's check; here only its length and characters are).
 pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], mg: &!m [int], open: bool) -> [heap] (int, int, int, int) {
     var code = 0;
     var port = 0;
     var host_len = 0;
     var secret_len = 0;
+    var https = false;
     let tape = box_slice(heap, json.tape_len(body), 0);
     borrow mut tape as &!tw in {
         let t = contents(tw);
         if json.parse(body, t) < 0 || !json.is_object(t, 0) {
             code = 1;
         } else {
-            let host = json.get(body, t, 0, "host");
-            if host < 0 || !json.is_string(t, host) {
-                code = 2;
+            let url = json.get(body, t, 0, "url");
+            if url >= 0 {
+                if json.get(body, t, 0, "host") >= 0 || json.get(body, t, 0, "port") >= 0 || json.get(body, t, 0, "scheme") >= 0 || !json.is_string(t, url) {
+                    code = 9;
+                } else {
+                    let n = json.string_into(body, t, url, scratch[640..920]);
+                    if n < 1 {
+                        code = 9;
+                    } else {
+                        let parts = split_url(scratch[640..640 + n], scratch[0..253]);
+                        code = parts.0;
+                        host_len = parts.1;
+                        port = parts.2;
+                        https = parts.3 == 1;
+                    }
+                }
             } else {
-                host_len = json.string_into(body, t, host, scratch[0..253]);
-                if host_len < 1 || !printable(scratch[0..host_len]) {
+                let host = json.get(body, t, 0, "host");
+                if host < 0 || !json.is_string(t, host) {
                     code = 2;
-                } else if !open && !destination.allowed(scratch[0..host_len]) {
-                    code = 6;
+                } else {
+                    host_len = json.string_into(body, t, host, scratch[0..253]);
+                    if host_len < 1 || !printable(scratch[0..host_len]) {
+                        code = 2;
+                    }
+                }
+                if code == 0 {
+                    let p = json.get(body, t, 0, "port");
+                    if p < 0 || !json.is_int(t, p) || !json.fits_int(body, t, p) {
+                        code = 3;
+                    } else {
+                        port = json.to_int(body, t, p);
+                        if port < 1 || port > 65535 {
+                            code = 3;
+                        }
+                    }
+                }
+                if code == 0 {
+                    let sc = json.get(body, t, 0, "scheme");
+                    if sc >= 0 {
+                        if json.is_string(t, sc) && json.string_equals(body, t, sc, "https") {
+                            https = true;
+                        } else if !(json.is_string(t, sc) && json.string_equals(body, t, sc, "http")) {
+                            code = 10;
+                        }
+                    }
                 }
             }
             if code == 0 {
-                let p = json.get(body, t, 0, "port");
-                if p < 0 || !json.is_int(t, p) || !json.fits_int(body, t, p) {
-                    code = 3;
+                // What the host has to be is judged on the form it is stored in (`destination.host_ok`).
+                let stored = stored_host(scratch[0..host_len], https, open, scratch[360..624]);
+                if stored < 0 {
+                    code = 6;
                 } else {
-                    port = json.to_int(body, t, p);
-                    if port < 1 || port > 65535 {
-                        code = 3;
-                    }
+                    host_len = stored;
                 }
             }
             if code == 0 {
@@ -254,7 +387,7 @@ pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!
     }
     var i = 0;
     while i < host_len {
-        mg[mg_host() + i] = int_of(scratch[i]);
+        mg[mg_host() + i] = int_of(scratch[360 + i]);
         i = i + 1;
     }
     i = 0;
@@ -275,46 +408,83 @@ pub fn parse_create[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!
     return (0, port, host_len, secret_len);
 }
 
-// What a `PATCH /endpoints/:id` body says, kept in `mg` as `parse_create` does: any of `host`, `port`, `secret` (a secret to use) and
-// `rotate` (`true`: the service makes one). Answers `(code, members)`: 0 and the members it names (1 host, 2 port, 4 secret, 8 rotate),
-// or a refusal code for `why`. What it does not name is not touched (the caller fills in the current host and port when it sends the update).
+// What a `PATCH /endpoints/:id` body says, kept in `mg` as `parse_create` does: any of `url`, `host`, `port`, `scheme`, `secret` (a secret to use) and `rotate`
+// (`true`: the service makes one). Answers `(code, members)`: 0 and the members it names (1 host, 2 port, 4 secret, 8 rotate, 16 an extra, 32 the scheme), or a refusal
+// code for `why`. What it does not name is not touched (the caller fills in the current host, port and scheme when it sends the update: `hooks.ls` `fill_change`, which also
+// judges the host and the scheme together, because a `host` alone is judged against the scheme the endpoint has). The host is kept bare here, without a scheme.
 pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c [byte], mg: &!m [int], open: bool) -> [heap] (int, int) {
     var code = 0;
     var fields = 0;
     var port = 0;
     var host_len = 0;
     var secret_len = 0;
+    var scheme = 0;
     let tape = box_slice(heap, json.tape_len(body), 0);
     borrow mut tape as &!tw in {
         let t = contents(tw);
         if json.parse(body, t) < 0 || !json.is_object(t, 0) {
             code = 1;
         } else {
-            let host = json.get(body, t, 0, "host");
-            if host >= 0 {
-                fields = fields + 1;
-                if !json.is_string(t, host) {
-                    code = 2;
+            let url = json.get(body, t, 0, "url");
+            if url >= 0 {
+                if json.get(body, t, 0, "host") >= 0 || json.get(body, t, 0, "port") >= 0 || json.get(body, t, 0, "scheme") >= 0 || !json.is_string(t, url) {
+                    code = 9;
                 } else {
-                    host_len = json.string_into(body, t, host, scratch[0..253]);
-                    if host_len < 1 || !printable(scratch[0..host_len]) {
+                    let n = json.string_into(body, t, url, scratch[640..920]);
+                    if n < 1 {
+                        code = 9;
+                    } else {
+                        let parts = split_url(scratch[640..640 + n], scratch[0..253]);
+                        code = parts.0;
+                        host_len = parts.1;
+                        port = parts.2;
+                        scheme = parts.3;
+                        fields = 1 + 2 + 32;
+                    }
+                }
+            } else {
+                let host = json.get(body, t, 0, "host");
+                if host >= 0 {
+                    fields = fields + 1;
+                    if !json.is_string(t, host) {
                         code = 2;
-                    } else if !open && !destination.allowed(scratch[0..host_len]) {
-                        code = 6;
+                    } else {
+                        host_len = json.string_into(body, t, host, scratch[0..253]);
+                        if host_len < 1 || !printable(scratch[0..host_len]) {
+                            code = 2;
+                        }
+                    }
+                }
+                if code == 0 {
+                    let p = json.get(body, t, 0, "port");
+                    if p >= 0 {
+                        fields = fields + 2;
+                        if !json.is_int(t, p) || !json.fits_int(body, t, p) {
+                            code = 3;
+                        } else {
+                            port = json.to_int(body, t, p);
+                            if port < 1 || port > 65535 {
+                                code = 3;
+                            }
+                        }
                     }
                 }
             }
+            if code == 0 && fields & 1 != 0 {
+                // A host that cannot be an endpoint's under any scheme is refused here; one that is wrong only under the scheme it ends up with (an address under
+                // `https`) is refused where the scheme is known.
+                if stored_host(scratch[0..host_len], false, open, scratch[360..624]) < 0 {
+                    code = 6;
+                }
+            }
             if code == 0 {
-                let p = json.get(body, t, 0, "port");
-                if p >= 0 {
-                    fields = fields + 2;
-                    if !json.is_int(t, p) || !json.fits_int(body, t, p) {
-                        code = 3;
-                    } else {
-                        port = json.to_int(body, t, p);
-                        if port < 1 || port > 65535 {
-                            code = 3;
-                        }
+                let sc = json.get(body, t, 0, "scheme");
+                if sc >= 0 {
+                    fields = fields + 32;
+                    if json.is_string(t, sc) && json.string_equals(body, t, sc, "https") {
+                        scheme = 1;
+                    } else if !(json.is_string(t, sc) && json.string_equals(body, t, sc, "http")) {
+                        code = 10;
                     }
                 }
             }
@@ -336,7 +506,7 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
                 let r = json.get(body, t, 0, "rotate");
                 if r >= 0 {
                     fields = fields + 8;
-                    if !json.is_bool(t, r) || !json.to_bool(t, r) || fields >= 12 {
+                    if !json.is_bool(t, r) || !json.to_bool(t, r) || fields & 12 == 12 {
                         code = 8;
                     }
                 }
@@ -371,6 +541,7 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
     mg[mg_secret_len()] = secret_len;
     mg[mg_kind()] = 1;
     mg[mg_fields()] = fields;
+    mg[mg_scheme()] = scheme;
     if fields & 8 != 0 {
         mg[mg_make()] = 1;
     } else {

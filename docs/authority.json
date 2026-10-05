@@ -1,7 +1,39 @@
 {
   "bounded": false,
   "unbounded_by": [
-    "libc:statx"
+    "libc:statx",
+    "libcrypto:BIO_new",
+    "libcrypto:BIO_read",
+    "libcrypto:BIO_s_mem",
+    "libcrypto:BIO_write",
+    "libcrypto:ERR_clear_error",
+    "libcrypto:ERR_get_error",
+    "libcrypto:X509_VERIFY_PARAM_set1_host",
+    "libcrypto:X509_VERIFY_PARAM_set_hostflags",
+    "libssl:SSL_CTX_ctrl",
+    "libssl:SSL_CTX_free",
+    "libssl:SSL_CTX_load_verify_file",
+    "libssl:SSL_CTX_new",
+    "libssl:SSL_CTX_set_default_verify_paths",
+    "libssl:SSL_CTX_set_verify",
+    "libssl:SSL_SESSION_free",
+    "libssl:SSL_SESSION_is_resumable",
+    "libssl:SSL_ctrl",
+    "libssl:SSL_do_handshake",
+    "libssl:SSL_free",
+    "libssl:SSL_get0_param",
+    "libssl:SSL_get1_session",
+    "libssl:SSL_get_error",
+    "libssl:SSL_get_verify_result",
+    "libssl:SSL_new",
+    "libssl:SSL_read",
+    "libssl:SSL_session_reused",
+    "libssl:SSL_set_bio",
+    "libssl:SSL_set_connect_state",
+    "libssl:SSL_set_session",
+    "libssl:SSL_shutdown",
+    "libssl:SSL_write",
+    "libssl:TLS_client_method"
   ],
   "effects": [
     "args",
@@ -59,6 +91,16 @@
       "bounded": false
     },
     {
+      "name": "ffi",
+      "argument": "libcrypto",
+      "bounded": false
+    },
+    {
+      "name": "ffi",
+      "argument": "libssl",
+      "bounded": false
+    },
+    {
       "name": "file_read",
       "argument": null,
       "bounded": true
@@ -110,6 +152,38 @@
     }
   ],
   "foreign_symbols": [
+    "BIO_new",
+    "BIO_read",
+    "BIO_s_mem",
+    "BIO_write",
+    "ERR_clear_error",
+    "ERR_get_error",
+    "SSL_CTX_ctrl",
+    "SSL_CTX_free",
+    "SSL_CTX_load_verify_file",
+    "SSL_CTX_new",
+    "SSL_CTX_set_default_verify_paths",
+    "SSL_CTX_set_verify",
+    "SSL_SESSION_free",
+    "SSL_SESSION_is_resumable",
+    "SSL_ctrl",
+    "SSL_do_handshake",
+    "SSL_free",
+    "SSL_get0_param",
+    "SSL_get1_session",
+    "SSL_get_error",
+    "SSL_get_verify_result",
+    "SSL_new",
+    "SSL_read",
+    "SSL_session_reused",
+    "SSL_set_bio",
+    "SSL_set_connect_state",
+    "SSL_set_session",
+    "SSL_shutdown",
+    "SSL_write",
+    "TLS_client_method",
+    "X509_VERIFY_PARAM_set1_host",
+    "X509_VERIFY_PARAM_set_hostflags",
     "statx"
   ]
 }
