@@ -33,7 +33,7 @@ from collections import Counter
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import common  # noqa: E402,F401  (puts tests/ on the path)
-from common import ACK, CLASSES, ROOT, plan_endpoints, share  # noqa: E402
+from common import ACK, CLASSES, EP_MAX, ROOT, plan_endpoints, share  # noqa: E402
 import faults  # noqa: E402
 import monitor  # noqa: E402
 import series  # noqa: E402
@@ -867,7 +867,8 @@ def parse(argv):
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--rate", type=float, default=40.0, help="events a second in the steady phases (what the service sustains between restarts is in docs/capacity.md; what it sustains across them, docs/soak.md section 8)")
     p.add_argument("--burst-rate", type=float, default=120.0, help="events a second in a burst (about the capacity of the mix: see --calibrate)")
-    p.add_argument("--endpoints", type=int, default=12, help="long-lived endpoints (1 to 59), the classes of docs/soak.md in order")
+    p.add_argument("--endpoints", type=int, default=12, help="long-lived endpoints, the classes of docs/soak.md in order (this and --churn together at most --endpoint-limit)")
+    p.add_argument("--endpoint-limit", type=int, default=EP_MAX, help="the most endpoints the service takes (62 in the build the soak was designed on; give the limit of yours)")
     p.add_argument("--churn", type=int, default=3, help="threads that create, change and delete endpoints")
     p.add_argument("--schedules", type=int, default=2, choices=[0, 1, 2], help="cron schedules to make (every second; every fifth second)")
     p.add_argument("--workers", type=int, default=6, help="threads of the poster")
@@ -925,8 +926,8 @@ def finalize_args(a, p):
         a.resume = a.resume
     if not a.pg:
         p.error("--pg or HOOKS_PG=host:port:user:database is required")
-    if not 1 <= a.endpoints <= 59:
-        p.error("--endpoints is 1 to 59")
+    if a.endpoints < 1 or a.endpoints + a.churn > a.endpoint_limit:
+        p.error(f"--endpoints ({a.endpoints}) plus --churn ({a.churn}) must be at least 1 and at most --endpoint-limit ({a.endpoint_limit})")
     a.binary = os.path.abspath(a.binary)
     dur = a.duration_s or a.hours * 3600.0
     if a.chaos_scale <= 0:
