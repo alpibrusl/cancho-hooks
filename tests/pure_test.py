@@ -10,7 +10,10 @@
   2. the environment is not read: with `SSL_CERT_FILE` naming the authority of the receiver's certificate and no `tls-ca-file`, the certificate is untrusted (the
      OpenSSL build honours the variable, and `https_test.py`'s group 6 expects that of it)
   3. the connection ends with `close_notify`: the receiver reads a clean end of the stream and not a truncation
-  4. there is no resumption: two deliveries to one endpoint are two full handshakes, and the receiver saw no resumed session
+  4. resumption (lex-sys `docs/tls-resumption.md`): the second delivery to an endpoint resumes the first's session, the receiver sees it resumed and /metrics
+     counts it; and a ticket is used once, so the third delivery resumes from the ticket the second got
+  5. the ClientHello says the service can resume (psk_key_exchange_modes, psk_dhe_ke only): without it Go's and rustls's servers send no ticket (RFC 8446 §4.2.9), and
+     Python's `ssl`, the receiver of 4, sends one anyway, so 4 cannot see it; a receiver that reads the raw ClientHello can
 """
 import os
 import shutil
@@ -99,6 +102,42 @@ class CloseServer:
         self.sock.close()
 
 
+def first_client_hello(port_holder, got):
+    """Accept one connection on the socket in `port_holder` and keep the first record (the ClientHello) in `got`."""
+    sock = port_holder
+    try:
+        c, _ = sock.accept()
+        c.settimeout(5)
+        data = b""
+        while len(data) < 5 or len(data) < 5 + int.from_bytes(data[3:5], "big"):
+            chunk = c.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        got.append(data)
+        c.close()
+    except OSError:
+        pass
+
+
+def psk_modes(record):
+    """The psk_key_exchange_modes of the ClientHello in `record`, or None."""
+    b = record[5 + 4:]
+    at = 2 + 32
+    at += 1 + b[at]
+    at += 2 + int.from_bytes(b[at:at + 2], "big")
+    at += 1 + b[at]
+    end = at + 2 + int.from_bytes(b[at:at + 2], "big")
+    at += 2
+    while at < end:
+        kind, n = int.from_bytes(b[at:at + 2], "big"), int.from_bytes(b[at + 2:at + 4], "big")
+        if kind == 45:
+            body = b[at + 4:at + 4 + n]
+            return list(body[1:1 + body[0]])
+        at += 4 + n
+    return None
+
+
 def main():
     pki = K.Pki()
     good = pki.leaf("hooks.test")
@@ -146,21 +185,38 @@ def main():
     cs.close()
     shutil.rmtree(d, ignore_errors=True)
 
-    # 4. no resumption
+    # 4. resumption
     s = K.TlsServer(*good)
     svc, d, dns = service(s.port, pki)
     check("4. the service starts (tls-resume is on, as it is by default)", svc.start(), svc.stderr())
-    svc.post_event(1)
-    L.wait_for(lambda: svc.stats()["delivered"] >= 1, 15)
-    svc.post_event(2)
-    L.wait_for(lambda: svc.stats()["delivered"] >= 2, 15)
-    check("4. two deliveries to one endpoint are two full handshakes, and the receiver saw no resumed session", s.handshakes == 2 and s.resumed == 0, f"{s.handshakes} {s.resumed}")
+    for n in (1, 2, 3):
+        svc.post_event(n)
+        L.wait_for(lambda: svc.stats()["delivered"] >= n, 15)
+    check("4. three deliveries to one endpoint: the first a full handshake, the other two resumed, as the receiver saw them", s.handshakes == 3 and s.resumed == 2, f"{s.handshakes} {s.resumed}")
     m = svc.metrics()
     series = {dict(k)["result"]: int(v) for k, v in m.series("hooks_tls_handshakes_total").items()}
-    check("4. /metrics counts both as full", series.get("full") == 2 and not series.get("resumed"), str(series))
+    check("4. /metrics counts one full and two resumed", series.get("full") == 1 and series.get("resumed") == 2, str(series))
     svc.stop()
     dns.close()
     s.close()
+    shutil.rmtree(d, ignore_errors=True)
+
+    # 5. the ClientHello advertises resumption
+    raw = socket.socket()
+    raw.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    raw.bind(("127.0.0.1", 0))
+    raw.listen(1)
+    got = []
+    threading.Thread(target=first_client_hello, args=(raw, got), daemon=True).start()
+    svc, d, dns = service(raw.getsockname()[1], pki)
+    check("5. the service starts", svc.start(), svc.stderr())
+    svc.post_event(1)
+    L.wait_for(lambda: len(got) == 1, 10)
+    modes = psk_modes(got[0]) if got and len(got[0]) > 9 and got[0][0] == 22 else None
+    check("5. the ClientHello advertises psk_dhe_ke (psk_key_exchange_modes), so a server may send it tickets", modes == [1], f"{modes} {got[:1]!r:.80}")
+    svc.stop()
+    dns.close()
+    raw.close()
     shutil.rmtree(d, ignore_errors=True)
     return check.finish("pure")
 
