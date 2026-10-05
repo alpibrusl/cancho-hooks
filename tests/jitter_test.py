@@ -208,8 +208,14 @@ def main():
     g1 = [sink.seen(n)[1] - sink.seen(n)[0] for n in ev4]
     g2 = [sink.seen(n)[2] - sink.seen(n)[1] for n in ev4]
     g3 = [sink.seen(n)[3] - sink.seen(n)[2] for n in ev4]
-    check("4. the first retry is 150 to 450 ms after the first attempt, the second 300 to 900, the third 600 to 1,800 (50 percent of each step)",
-          ok and all(150 - 5 <= x <= 450 + 120 for x in g1) and all(300 - 5 <= x <= 900 + 120 for x in g2) and all(600 - 5 <= x <= 1800 + 120 for x in g3), str((min(g1), max(g1), min(g2), max(g2), min(g3), max(g3))))
+    # What the service decides is the recorded time of the next attempt (stage 1 checks the same way): 50 percent either side of each step (less 30 ms for the receiver's
+    # clock; plus up to 120 for the time the service takes to read an answer on a busy machine, as before). At the receiver a retry may come later than it was due (a busy machine, a turn of 50 ms) but never earlier.
+    r1, r2, r3 = (list(delays(sink, d, ev4, attempt=k).values()) for k in (1, 2, 3))
+    check("4. the recorded delay after the first attempt is 150 to 450 ms, after the second 300 to 900, after the third 600 to 1,800 (50 percent of each step)",
+          ok and len(r1) == len(r2) == len(r3) == len(ev4) and all(150 - 30 <= x <= 450 + 120 for x in r1) and all(300 - 30 <= x <= 900 + 120 for x in r2)
+          and all(600 - 30 <= x <= 1800 + 120 for x in r3), str((len(r1), len(r2), len(r3), min(r1 or [0]), max(r1 or [0]), min(r2 or [0]), max(r2 or [0]), min(r3 or [0]), max(r3 or [0]))))
+    check("4. and no retry reached the receiver earlier than its step allows (150, 300 and 600 ms)",
+          all(x >= 150 - 5 for x in g1) and all(x >= 300 - 5 for x in g2) and all(x >= 600 - 5 for x in g3), str((min(g1), min(g2), min(g3))))
     check("4. each step is spread: a range of over 150, 300 and 600 ms", max(g1) - min(g1) > 150 and max(g2) - min(g2) > 300 and max(g3) - min(g3) > 600, str((max(g1) - min(g1), max(g2) - min(g2), max(g3) - min(g3))))
     stats = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{svc.port}/stats").read())
     check("4. every event was tried 4 times and is a dead letter, as without jitter", stats["attempts"] == 4 * len(ev4) and stats["dead"] == len(ev4) and all(len(sink.seen(n)) == 4 for n in ev4), str(stats))
