@@ -80,6 +80,10 @@ SCENARIOS={
     "ten": lambda: run(10, 5000, 64, "10 endpoints"),
     # design section 35: ten endpoints with a list. "wanted" lists the event's type (every delivery as in "ten", plus the check of the list);
     # "unwanted" lists another (50,000 passes-over and no delivery: the time and CPU are per (endpoint, event) pair, not per delivery).
+    # design section 41: many endpoints, the same sink. "sixtytwo" is the most main could have; "many" is the new limit (events x endpoints deliveries each).
+    "sixtytwo": lambda: run(62, 1000, 64, "62 endpoints"),
+    "many": lambda: run(1024, 100, 64, "1,024 endpoints"),
+    "many_idle": lambda: run(1024, 20000, 64, "1,024 endpoints that want nothing (filtered by type)", types="other.*"),
     "ten_pg": lambda: run(10, 5000, 64, "10 endpoints from the table, every attempt a row of the history", pg=True),
     "ingest64_pg": lambda: run(0, 50000, 64, "ingest only, 64 conns, a database named (the pool idle)", pg=True),
     "ten_wanted": lambda: run(10, 5000, 64, "10 endpoints, each with a list that wants the type", types="bench"),
