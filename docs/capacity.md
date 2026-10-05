@@ -72,7 +72,7 @@ These are cited, not repeated as measured here.
 
 ## 4. Measured here
 
-Machine: Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, kernel 6.18.44-fc-v70, a shared virtual machine: other work ran on it during every measurement below (the load average is given). Build of `origin/main` at `45faec0`, binary SHA-256 `48c3cc3779e3c6c8...`. The service on core 3, the C load generator and receiver on cores 0 to 2, 20,000 events of 200 bytes a run (645 events for 62 endpoints, so that the deliveries are about 40,000), five runs of each row. Measured 5 October 2026.
+Machine: Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, kernel 6.18.44-fc-v70, a shared virtual machine: other work ran on it during every measurement below (the load average is given). Build of `origin/main` at `45faec0`, binary SHA-256 `48c3cc3779e3c6c8...` (the sources of the service are the same at `d503801`, which only changed the documents; the compiler's output is not byte for byte reproducible, two builds of the same tree have different hashes, so the hash names the binary that was measured). The service on core 3, the C load generator and receiver on cores 0 to 2, 20,000 events of 200 bytes a run (645 events for 62 endpoints, so that the deliveries are about 40,000), five runs of each row. Measured 5 October 2026.
 
 **Ingest and delivery** (`capacity.py --only ingest,deliver --reps 5`; load average 2.4 at the start and 1.9 at the end). "events/s (ingest)" of the delivery rows is the rate of the sender while the deliveries were going on; the cost per delivery is the figure to read, and 1,000,000 divided by it is the deliveries a second a core can make:
 

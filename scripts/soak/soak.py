@@ -710,9 +710,16 @@ class Run:
         v = self.verifier
         self.log("finish", step="stop the workload")
         self.stop.set()
+        t_f = time.time()
         self.poster.stop(timeout=120)
+        self.log("finish", step="poster stopped", seconds=round(time.time() - t_f, 1))
         for t in self.threads:
+            if t.name == "enabler":
+                continue        # it goes on through the drain (a `gone` endpoint is enabled again after each 410) and ends with `stop_all`
+            t_j = time.time()
             t.join(timeout=100)
+            if time.time() - t_j > 2.0:
+                self.log("finish", step="slow join", thread=t.name, seconds=round(time.time() - t_j, 1), alive=t.is_alive())
         self.proxy.restore()
         if self.fatal:
             # the service cannot be started on its own data directory: there is nothing to drain; what the directory holds is still checked against what was acknowledged
@@ -1108,7 +1115,10 @@ def selftest(a):
     os.makedirs(base)
     secs = a.duration_s or 180.0
     common_args = ["--binary", a.binary, "--pg", a.pg, "--duration-s", str(secs), "--seed", str(a.seed or 11), "--rate", str(min(a.rate, 40.0)), "--burst-rate", str(min(a.burst_rate, 120.0)), "--restart-scale", "0.25",
-                   "--endpoints", str(a.endpoints), "--lenient-validity", "--sample-s", "5", "--progress-s", "30", "--drain-s", "180", "--after-stop-s", "8", "--min-incarnation-s", "600"] + ([] if a.selftest_strict else ["--waive", "B_restart_repeat,J_repeat"]) + \
+                   "--endpoints", str(a.endpoints), "--lenient-validity", "--sample-s", "5", "--progress-s", "30", "--drain-s", "180", "--after-stop-s", "8", "--min-incarnation-s", "600",
+                   # the criteria that need a long incarnation (the growth of memory, descriptors, the 99.9th percentile of the loop) are not judged in three minutes: the quiet tail is a few samples and the p99.9 is
+                   # its two or three worst, in a run in which a fault is on a third of the time. They are tested on synthetic series by --selftest-ledger and judged on the real run.
+                   "--min-tail-s", "100000", "--p999-ms", "1000"] + ([] if a.selftest_strict else ["--waive", "B_restart_repeat,J_repeat"]) + \
                   (["--no-pin"] if a.no_pin else []) + (["--shim", a.shim] if a.shim else [])
     plan = [("clean", [], None)]
     names = ["lose", "dup", "liar"] if a.selftest_mutants == "all" else [x for x in a.selftest_mutants.split(",") if x]
