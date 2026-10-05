@@ -156,6 +156,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/erase_test.py build/hooks
 
+      - name: "Bodies encrypted at rest (no body in the files, delivery and GET the same, a start without the key refused, rotation, a log that began in the clear)"
+        working-directory: hooks
+        run: python3 tests/encrypt_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks

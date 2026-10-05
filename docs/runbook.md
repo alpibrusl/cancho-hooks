@@ -106,6 +106,8 @@ The service never ends by itself once it listens, bar status 4, and bar statuses
 | 34 | `production = 1`: two of `admin-token`, `ingest-token` and `read-token` are the same | no |
 | 35 | `production = 1`: the mode of the data directory cannot be read (it is not there, or the call failed) | no |
 | 36 | `production = 1`: `audit-log` is 0 | no |
+| 46 | `encryption-key-file` or `encryption-key-file-old` cannot be read or holds no key (32 bytes, or 64 hexadecimal digits), or an old key is given without a key | no |
+| 47 | the events log holds bodies sealed by a key this start was not given (the newest event's): start it with that key (`encryption-key-file`, or `encryption-key-file-old` while rotating) | no |
 | 40 | a segment of the events log is in a format this version does not understand (a header that says 3 or more, or one that is not this program's header at all) | no |
 | 41 | `delivery.seg` is in a format this version does not understand | no |
 | 42 | the events log has a hole or a break in its chain of segments (`events.first` names a missing file, a number is missing, a base does not follow the one before) | no |
