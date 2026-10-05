@@ -4,7 +4,7 @@
 
 A webhook delivery service, written in [lex-sys](https://github.com/alpibrusl/lex-sys) and built as one binary. You `POST` it an event; it stores the event durably and delivers it, signed with [Standard Webhooks](https://www.standardwebhooks.com) signatures, to every subscribed endpoint, **at least once**, over HTTP or `https`. Failures are retried on a schedule, what cannot be delivered is kept as a dead letter you can list and replay, and every outcome survives a crash. PostgreSQL is optional: it holds the endpoints and a history of attempts.
 
-**Status: not for production yet.** What is left: a 24-hour soak test under chaos, a capacity page, and lex-sys's own TLS in place of OpenSSL. See [docs/status.md](docs/status.md).
+**Status: not for production yet.** What is left: a 24-hour soak test under chaos (the harness is built), the capacity figures it gives, and lex-sys's own TLS in place of OpenSSL. See [docs/status.md](docs/status.md).
 
 ## What you get
 
@@ -182,7 +182,7 @@ Settings come from a file (`--config hooks.conf`, `key = value` a line), from fl
 
 ## Status and limits
 
-* **Not for production.** No 24-hour soak test has been run and there is no capacity page; the figures in [docs/status.md](docs/status.md) come from short runs on shared machines.
+* **Not for production.** No 24-hour soak test has been run: the harness and its criteria are built ([docs/soak.md](docs/soak.md)), and so is the method of capacity ([docs/capacity.md](docs/capacity.md)), but the long run that fills both is not made; the figures in [docs/status.md](docs/status.md) come from short runs on shared machines.
 * **One process, one thread, one core**, at most 1,024 endpoints (a constant of the build; [status.md](docs/status.md)), 64 attempts in flight.
 * **`https` uses OpenSSL in the process** until lex-sys has its own TLS; no revocation checks, client certificates or IPv6, and each delivery costs a handshake.
 * **No TLS on the service's own port** (put a reverse proxy in front), no audit log; signing secrets are stored in the clear in the database, which is the trust boundary.
