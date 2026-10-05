@@ -277,6 +277,11 @@ class Run:
                   "next_idx": self.next_idx, "port": self.port, "ctl_port": self.ctl_port, "cron": self.cron_ids, "dns": self.dns,
                   "eps": {k: v.state() for k, v in self.eps.items()}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
                   "settled": {k: self.verifier.by_label[k].settled for k in self.eps if k in self.verifier.by_label}, "kills": self.verifier.kills[-50:]}
+            st["excused"] = list(self.excused)
+            st["unexpected_exits"] = list(self.unexpected_exits)
+            st["unexpected"] = list(self.svc.unexpected[-200:]) if self.svc else []
+            with self.vlock:
+                st["notes"] = self.verifier.export_notes()
             tmp = self.path("state.json.tmp")
             with open(tmp, "w") as f:
                 json.dump(st, f)
@@ -518,6 +523,22 @@ class Run:
         self.cron_ids = st["cron"]
         self.dns = st.get("dns")
         self.counts.update(st.get("counts", {}))
+        self.excused = [tuple(x) for x in st.get("excused", [])]
+        self.unexpected_exits = list(st.get("unexpected_exits", []))
+        # what the run had found before it was interrupted is part of its verdict
+        try:
+            for line in open(self.path("violations.jsonl")):
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                tag = d.pop("tag", "?")
+                d.pop("t", None)
+                self.violations.count[tag] += 1
+                if len(self.violations.examples[tag]) < self.violations.keep:
+                    self.violations.examples[tag].append(d)
+        except OSError:
+            pass
         self.saved_fault_counts = st.get("faults_count", {})
         for pid_key, needle in (("service_pid", os.path.basename(a.binary)), ("receivers_pid", "receivers.py"), ("probe_pid", "probe.py")):
             pid = st.get(pid_key)
@@ -544,6 +565,7 @@ class Run:
         self.proxy = PgProxy(self.pg["host"], self.pg["port"])
         self.make_svc()
         self.svc.inc = st["inc"]
+        self.svc.unexpected = [tuple(x) for x in st.get("unexpected", [])]
         # the old service, if it was running, was killed just now: the files are as a power cut leaves them
         t_dead = st["t"]
         power_cut(self.datadir, random.Random(self.seed + 5)) if self.shim else None
@@ -554,6 +576,8 @@ class Run:
                 self.verifier.retire(label, t_dead)
         for k, p in self.cron_ids.items():
             self.verifier.cron_period[int(k)] = p
+        self.verifier.import_notes(st.get("notes", {}))
+        self.notes_since_heartbeat(st["t"])
         # rebuild the open window from the ledgers' tail, without counting again what was judged before
         self.checker = monitor.Checker(self)
         self.checker.seek_end_minus(self.verifier.keep_s + 60)
@@ -577,6 +601,28 @@ class Run:
         # the numbers (and so the idempotency keys) of events posted since the last heartbeat are in the poster's ledger, not in state.json: go past them
         recs, _ = common.read_records(self.path("acked.bin"), max(0, os.path.getsize(self.path("acked.bin")) - 200000 * ACK.size), ACK) if os.path.exists(self.path("acked.bin")) else ([], 0)
         self.poster_start_n = max([st["n_next"]] + [r[2] + 1 for r in recs]) + 100
+
+    def notes_since_heartbeat(self, t_state):
+        """What the harness did between the last write of `state.json` and the end of the previous harness is in `chaos.jsonl`: the replays it asked for (their deliveries are not repeats) and the
+        windows in which it made an endpoint fail."""
+        try:
+            lines = open(self.path("chaos.jsonl")).read().splitlines()[-4000:]
+        except OSError:
+            return
+        for l in lines:
+            try:
+                r = json.loads(l)
+            except ValueError:
+                continue
+            if r.get("t", 0) < t_state - 1.0:
+                continue
+            if r.get("kind") == "replay" and r.get("status") in (202, 0, 504):
+                m = re.match(r"/events/(\d+)/replay", r.get("path", ""))
+                for lb in r.get("labels", []):
+                    if m and lb in self.verifier.by_label:
+                        self.verifier.note_replay(lb, int(m.group(1)))
+            elif r.get("kind") == "sick" and r.get("label") in self.verifier.by_label:
+                self.verifier.note_window(r["label"], r["t"], float(r["until"]))
 
     # ---- the run
     def start_workload(self):
