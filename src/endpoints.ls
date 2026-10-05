@@ -246,10 +246,13 @@ pub fn parse_x[&t, &n, &b, &x](text: &t [byte], table: &!n [int], blob: &!b [byt
 
 // `parse_x` for a caller that has nowhere to keep the optional words (a check that a file is good, a test): they are judged and dropped.
 pub fn parse[&t, &n, &b](text: &t [byte], table: &!n [int], blob: &!b [byte], open: bool) -> [] int {
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252).
+    var rc = 0;
     region a {
         let none = alloc_slice[a](1, 0);
-        return parse_x(text, table, blob, open, none);
+        rc = parse_x(text, table, blob, open, none);
     }
+    return rc;
 }
 
 // The `i`th endpoint's slot, id, port, host and key.

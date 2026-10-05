@@ -371,10 +371,13 @@ fn walk[&s, &o](spec: &s [byte], out: &!o [int], write: bool) -> [] (int, int, i
 
 // 0 if `spec` is a good spec (the empty one is: no headers), else the code of the first refusal.
 pub fn check_spec[&s](spec: &s [byte]) -> [] int {
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252).
+    var rc = 0;
     region a {
         let none = alloc_slice[a](1, 0);
-        return walk(spec, none, false).0;
+        rc = walk(spec, none, false).0;
     }
+    return rc;
 }
 
 // The wire form of the good spec `spec` into `out` as one byte to an integer, from 0: `Name: value\r\n` for each header. Answers the number of bytes,
@@ -392,8 +395,11 @@ pub fn decode[&s, &o](spec: &s [byte], out: &!o [int]) -> [] int {
 
 // How many headers a good spec has.
 pub fn count_of[&s](spec: &s [byte]) -> [] int {
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252).
+    var n = 0;
     region a {
         let none = alloc_slice[a](1, 0);
-        return walk(spec, none, false).2;
+        n = walk(spec, none, false).2;
     }
+    return n;
 }

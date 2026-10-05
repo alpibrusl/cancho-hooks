@@ -1415,94 +1415,102 @@ fn dead_replay[&h, &q, &p, &b, &l, &w, &g, &s](heap: &!h Heap, path: &q [byte], 
         return server.failure(heap, out, 404, "no such endpoint", keep);
     }
     let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], wi);
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every bulk replay.
+    var answer = out;
     region a {
         let list = alloc_slice[a](filter.max_list() + 8, 0);
-        let parsed = bulk.parse_body(heap, body, list);
-        if parsed.0 != 0 {
-            return server.failure(heap, out, 400, bulk.why(parsed.0), keep);
-        }
-        dead_complete(done, window, stats, e);
-        dead.expire(dead_of_mut(stats), e, evlog.first_id(lg));
-        var room = rp_free(stats);
-        if parsed.1 > 0 && parsed.1 < room {
-            room = parsed.1;
-        }
-        let n = dead.count(dead_of(stats), e);
-        if parsed.3 > 0 {
-            // a subscription is read from the events themselves
-            resolve_offsets(lg, window, stats, e);
-        }
-        // oldest first, past `after`: the ones that are not already replaying and are of the types asked for. The first `room` are taken; the rest are counted.
         let picked = alloc_slice[a](2 * rp_cap() + 2, 0);
-        var taken = 0;
-        var remaining = 0;
-        var k = dead.upto(dead_of(stats), e, parsed.2);
-        while k < n {
-            let id = dead.id_at(dead_of(stats), e, k);
-            var wanted = rp_find(stats, e, id) < 0;
-            if wanted && parsed.3 > 0 {
-                wanted = false;
-                if load_dead(lg, window, stats, e, k) == 1 {
-                    let t = filter.type_in(window);
-                    wanted = filter.accepts(list, parsed.3, window[t.0..t.0 + t.1]);
-                }
+        answer = dead_replay_in(heap, body, lg, window, done, stats, keep, answer, want, e, list, picked);
+    }
+    return answer;
+}
+
+// The body of `dead_replay`, with the room it works in given to it (so that `dead_replay` can leave its region by falling out of it).
+fn dead_replay_in[&h, &b, &l, &w, &g, &s, &t, &k](heap: &!h Heap, body: &b [byte], lg: &!l evlog.Ev, window: &!w [byte], done: &!g log.Log, stats: &!s [int], keep: bool, out: buffer.Buffer, want: int, e: int, list: &!t [int], picked: &!k [int]) -> [heap, fs_read(""), file_read, file_write] buffer.Buffer {
+    let parsed = bulk.parse_body(heap, body, list);
+    if parsed.0 != 0 {
+        return server.failure(heap, out, 400, bulk.why(parsed.0), keep);
+    }
+    dead_complete(done, window, stats, e);
+    dead.expire(dead_of_mut(stats), e, evlog.first_id(lg));
+    var room = rp_free(stats);
+    if parsed.1 > 0 && parsed.1 < room {
+        room = parsed.1;
+    }
+    let n = dead.count(dead_of(stats), e);
+    if parsed.3 > 0 {
+        // a subscription is read from the events themselves
+        resolve_offsets(lg, window, stats, e);
+    }
+    // oldest first, past `after`: the ones that are not already replaying and are of the types asked for. The first `room` are taken; the rest are counted.
+    var taken = 0;
+    var remaining = 0;
+    var k = dead.upto(dead_of(stats), e, parsed.2);
+    while k < n {
+        let id = dead.id_at(dead_of(stats), e, k);
+        var wanted = rp_find(stats, e, id) < 0;
+        if wanted && parsed.3 > 0 {
+            wanted = false;
+            if load_dead(lg, window, stats, e, k) == 1 {
+                let t = filter.type_in(window);
+                wanted = filter.accepts(list, parsed.3, window[t.0..t.0 + t.1]);
             }
-            if wanted {
-                if taken < room && taken < rp_cap() {
-                    picked[2 * taken] = id;
-                    picked[2 * taken + 1] = dead.offset_at(dead_of(stats), e, k);
-                    taken = taken + 1;
-                } else {
-                    remaining = remaining + 1;
-                }
-            }
-            k = k + 1;
         }
-        // The records first, then one flush, and only then the table: a replay that was not stored is not started (as `POST /events/:id/replay`).
-        var i = 0;
-        while i < taken {
-            if note_outcome(done, stats, state.replay(), e, picked[2 * i], 0, 0) == 0 {
-                return server.failure(heap, out, 503, "the replays could not be stored", keep);
+        if wanted {
+            if taken < room && taken < rp_cap() {
+                picked[2 * taken] = id;
+                picked[2 * taken + 1] = dead.offset_at(dead_of(stats), e, k);
+                taken = taken + 1;
+            } else {
+                remaining = remaining + 1;
             }
-            i = i + 1;
         }
-        if taken > 0 && log.flush(done) != 0 {
+        k = k + 1;
+    }
+    // The records first, then one flush, and only then the table: a replay that was not stored is not started (as `POST /events/:id/replay`).
+    var i = 0;
+    while i < taken {
+        if note_outcome(done, stats, state.replay(), e, picked[2 * i], 0, 0) == 0 {
             return server.failure(heap, out, 503, "the replays could not be stored", keep);
         }
-        i = 0;
-        while i < taken {
-            rp_put(stats, e, picked[2 * i], picked[2 * i + 1]);
-            i = i + 1;
-        }
-        var wr = json.writer(heap, 160);
-        wr = json.begin_object(heap, wr);
-        wr = json.put_key(heap, wr, "endpoint");
-        wr = json.put_int(heap, wr, want);
-        wr = json.put_key(heap, wr, "taken");
-        wr = json.put_int(heap, wr, taken);
-        wr = json.put_key(heap, wr, "remaining");
-        wr = json.put_int(heap, wr, remaining);
-        wr = json.put_key(heap, wr, "waiting");
-        wr = json.put_int(heap, wr, rp_cap() - rp_free(stats));
-        wr = json.put_key(heap, wr, "next");
-        if taken > 0 {
-            wr = json.put_int(heap, wr, picked[2 * (taken - 1)]);
-        } else {
-            wr = json.put_null(heap, wr);
-        }
-        wr = json.end_object(heap, wr);
-        let payload = json.finish(wr);
-        var status = 200;
-        if taken > 0 {
-            status = 202;
-        }
-        var answer = out;
-        borrow payload as &sb in {
-            answer = server.reply(heap, answer, status, buffer.bytes(sb), keep);
-        }
-        buffer.drop(heap, payload);
-        return answer;
+        i = i + 1;
     }
+    if taken > 0 && log.flush(done) != 0 {
+        return server.failure(heap, out, 503, "the replays could not be stored", keep);
+    }
+    i = 0;
+    while i < taken {
+        rp_put(stats, e, picked[2 * i], picked[2 * i + 1]);
+        i = i + 1;
+    }
+    var wr = json.writer(heap, 160);
+    wr = json.begin_object(heap, wr);
+    wr = json.put_key(heap, wr, "endpoint");
+    wr = json.put_int(heap, wr, want);
+    wr = json.put_key(heap, wr, "taken");
+    wr = json.put_int(heap, wr, taken);
+    wr = json.put_key(heap, wr, "remaining");
+    wr = json.put_int(heap, wr, remaining);
+    wr = json.put_key(heap, wr, "waiting");
+    wr = json.put_int(heap, wr, rp_cap() - rp_free(stats));
+    wr = json.put_key(heap, wr, "next");
+    if taken > 0 {
+        wr = json.put_int(heap, wr, picked[2 * (taken - 1)]);
+    } else {
+        wr = json.put_null(heap, wr);
+    }
+    wr = json.end_object(heap, wr);
+    let payload = json.finish(wr);
+    var status = 200;
+    if taken > 0 {
+        status = 202;
+    }
+    var answer = out;
+    borrow payload as &sb in {
+        answer = server.reply(heap, answer, status, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, payload);
+    return answer;
 }
 
 // Cancel the waiting replays of endpoint slot `e`: of the event `only` (0: of all). A replay with an attempt on the wire is left (its outcome is recorded when
@@ -3104,51 +3112,55 @@ fn delivery_turn[&f, &h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](ffi: &f
 fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte]) -> [heap] int {
     let id = queries.schedules_due_id(rep, row);
     var outcome = 2;
+    // The region is left by falling out of it, on every path: one left by a `return` is not given back (lex-sys #252), and this runs for every fire.
     region a {
         let key_buf = alloc_slice[a](64, byte_of(0));
         let key = key_buf[0..sched.key_into(key_buf, id, second)];
         // The keys of schedules have an index of their own (`docs/retention.md` section 7).
         let cix = ix[idem.second_at(ix)..len(ix)];
         let carena = arena[idem.second_arena_at(ix)..len(arena)];
+        var go = true;
         if idem.find(cix, carena, key) >= 0 {
-            return 0;
-        }
-        if !idem.room(cix, len(key)) {
+            outcome = 0;
+            go = false;
+        } else if !idem.room(cix, len(key)) {
             idem.evict(cix, now, 4096);
             if !idem.room(cix, len(key)) {
-                return 2;
+                go = false;
             }
         }
-        let (ta, tb) = queries.schedules_due_event_type(rep, row);
-        let (ba, bb) = queries.schedules_due_body(rep, row);
-        var w = json.writer(heap, 256);
-        w = json.begin_object(heap, w);
-        w = json.put_key(heap, w, "type");
-        w = json.put_string(heap, w, rep[ta..tb]);
-        w = json.put_key(heap, w, "schedule");
-        w = json.put_int(heap, w, id);
-        w = json.put_key(heap, w, "scheduled_at");
-        w = json.put_int(heap, w, second);
-        w = json.put_key(heap, w, "body");
-        w = json.put_fragment(heap, w, rep[ba..bb]);
-        w = json.end_object(heap, w);
-        let event = json.finish(w);
-        borrow event as &er in {
-            let text = buffer.bytes(er);
-            let tbuf = alloc_slice[a](filter.max_type() + 8, 0);
-            let (why, tlen) = invalid_event(heap, text, tbuf);
-            if len(why) > 0 {
-                outcome = 1;
-            } else {
-                let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, cix, carena, now);
-                if stored.0 == 0 {
-                    outcome = 0;
-                } else if stored.0 == log.too_long() {
+        if go {
+            let (ta, tb) = queries.schedules_due_event_type(rep, row);
+            let (ba, bb) = queries.schedules_due_body(rep, row);
+            var w = json.writer(heap, 256);
+            w = json.begin_object(heap, w);
+            w = json.put_key(heap, w, "type");
+            w = json.put_string(heap, w, rep[ta..tb]);
+            w = json.put_key(heap, w, "schedule");
+            w = json.put_int(heap, w, id);
+            w = json.put_key(heap, w, "scheduled_at");
+            w = json.put_int(heap, w, second);
+            w = json.put_key(heap, w, "body");
+            w = json.put_fragment(heap, w, rep[ba..bb]);
+            w = json.end_object(heap, w);
+            let event = json.finish(w);
+            borrow event as &er in {
+                let text = buffer.bytes(er);
+                let tbuf = alloc_slice[a](filter.max_type() + 8, 0);
+                let (why, tlen) = invalid_event(heap, text, tbuf);
+                if len(why) > 0 {
                     outcome = 1;
+                } else {
+                    let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, cix, carena, now);
+                    if stored.0 == 0 {
+                        outcome = 0;
+                    } else if stored.0 == log.too_long() {
+                        outcome = 1;
+                    }
                 }
             }
+            buffer.drop(heap, event);
         }
-        buffer.drop(heap, event);
     }
     return outcome;
 }
@@ -4313,6 +4325,8 @@ fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
     if f & 32 != 0 {
         https = dv[off_mg() + manage.mg_scheme()] == 1;
     }
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every `PATCH`.
+    var refused = false;
     region r {
         let named = alloc_slice[r](264, byte_of(0));
         let stored = alloc_slice[r](264, byte_of(0));
@@ -4329,14 +4343,18 @@ fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
         }
         let m = manage.stored_host(named[0..n], https, dv[c_private()] == 1, stored);
         if m < 0 {
-            return 2;
+            refused = true;
+        } else {
+            var k = 0;
+            while k < m {
+                dv[off_mg() + manage.mg_host() + k] = int_of(stored[k]);
+                k = k + 1;
+            }
+            dv[off_mg() + manage.mg_host_len()] = m;
         }
-        var k = 0;
-        while k < m {
-            dv[off_mg() + manage.mg_host() + k] = int_of(stored[k]);
-            k = k + 1;
-        }
-        dv[off_mg() + manage.mg_host_len()] = m;
+    }
+    if refused {
+        return 2;
     }
     if f & 2 == 0 {
         dv[off_mg() + manage.mg_port()] = endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i);
@@ -4349,21 +4367,26 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return queries.delete_endpoint_start(heap, dv[off_mg() + manage.mg_target()]);
     }
+    if dv[off_mg() + manage.mg_kind()] == 1 && dv[off_mg() + manage.mg_fields()] & ~35 == 0 {
+        return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
+    }
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every `POST` and `PATCH`.
     let xg = dv[off_xg()..off_xg() + epx.xg_size()];
+    var q = buffer.empty(heap, 0);
     region a {
         let types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
         let spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
         let tn = epx.pending_types_into(xg, types);
         let sn = epx.pending_spec_into(xg, spec);
+        buffer.drop(heap, q);
         if dv[off_mg() + manage.mg_kind()] != 1 {
-            return queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
-        }
-        if dv[off_mg() + manage.mg_fields()] & ~35 != 0 {
+            q = queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
+        } else {
             let mask = epx.pending_mask(xg);
-            return queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
+            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
     }
-    return queries.patch_address_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()]);
+    return q;
 }
 
 // The answer to a change that was sent to the database on a connection that was then lost (`pool.lost`): the outcome is **unknown**, which is not the same as
@@ -4534,6 +4557,8 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
     let fields = dv[mg + manage.mg_fields()];
     let scratch = box_slice(heap, endpoints.text_limit(), byte_of(0));
     var failed = false;
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every `PATCH`.
+    var answer = out;
     region a {
         let host = alloc_slice[a](264, byte_of(0));
         let secret = alloc_slice[a](96, byte_of(0));
@@ -4625,17 +4650,17 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
             }
             wr = json.end_object(heap, wr);
             let body = json.finish(wr);
-            unbox_slice(heap, scratch);
-            var answer = out;
             borrow body as &sb in {
                 answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
             }
             buffer.drop(heap, body);
-            return answer;
         }
     }
     unbox_slice(heap, scratch);
-    return server.failure(heap, out, 507, "the change was stored in the database but the service has no room for it (restart it)", keep);
+    if failed {
+        return server.failure(heap, answer, 507, "the change was stored in the database but the service has no room for it (restart it)", keep);
+    }
+    return answer;
 }
 
 fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
@@ -4655,81 +4680,90 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
     let hl = dv[mg + manage.mg_host_len()];
     let sl = dv[mg + manage.mg_secret_len()];
     let port = dv[mg + manage.mg_port()];
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every `POST /endpoints`.
+    var answer = out;
     region a {
         let host = alloc_slice[a](264, byte_of(0));
         let secret = alloc_slice[a](96, byte_of(0));
         let key = alloc_slice[a](96, byte_of(0));
-        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
-        manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_secret(), sl, secret);
-        let klen = sign.secret_key(secret[0..sl], key);
-        if klen < 0 {
-            return server.failure(heap, out, 503, "the secret cannot be used", keep);
-        }
         let ex_types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
         let ex_spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
-        // An endpoint of this id that the log remembers is a different endpoint (an id is never given twice): its slot is freed.
-        var k = 0;
-        while k < state.max_endpoints() {
-            if dv[off_slotid() + k] == ident {
-                if note_removed(done, dv, k) == 0 {
-                    return server.failure(heap, out, 503, "the change could not be stored", keep);
-                }
-                dv[off_slotid() + k] = slot_free();
-            }
-            k = k + 1;
-        }
-        let slot = take_slot(done, dv, ident);
-        var start = evlog.last_id(lg);
-        if start < 0 {
-            start = 0;
-        }
-        if slot < 0 || note_created(done, dv, slot, ident, start) == 0 || log.flush(done) != 0 {
-            return server.failure(heap, out, 503, "the change could not be stored", keep);
-        }
-        reset_window(dv, slot, start);
-        clear_slot(dv, slot);
-        // It starts from now: it has looked at everything up to the last event, and the next record is at the end of the log.
-        dv[scan_id(slot)] = start;
-        dv[scan_off(slot)] = evlog.tail(lg);
-        dv[off_flying() + slot] = 0;
-        dv[off_slotid() + slot] = ident;
-        let count = dv[c_endpoints()];
-        let grown = endpoints.append(dv[off_table()..off_table() + endpoints.table_size()], blob, count, slot, ident, port, host[0..hl], key[0..klen]);
-        if grown < 0 {
-            return server.failure(heap, out, 503, "the endpoint could not be added", keep);
-        }
-        // Its subscription and headers (`epx.ls`), in the row of the entry just added.
-        epx.clear_row(dv[off_xt()..off_xt() + epx.xt_size()], count);
-        epx.set_types(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_types[0..epx.pending_types_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_types)]);
-        epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
-        epx.set_conc(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_conc(dv[off_xg()..off_xg() + epx.xg_size()]));
-        epx.set_rate(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_rate(dv[off_xg()..off_xg() + epx.xg_size()]));
-        dv[c_endpoints()] = grown;
-        var wr = json.writer(heap, 256);
-        wr = json.begin_object(heap, wr);
-        wr = json.put_key(heap, wr, "id");
-        wr = json.put_int(heap, wr, ident);
-        wr = json.put_key(heap, wr, "host");
-        wr = json.put_string(heap, wr, destination.bare(host[0..hl]));
-        wr = json.put_key(heap, wr, "scheme");
-        wr = json.put_string(heap, wr, scheme_name(endpoints.scheme_of(dv[off_table()..off_table() + endpoints.table_size()], count)));
-        wr = json.put_key(heap, wr, "port");
-        wr = json.put_int(heap, wr, port);
-        wr = json.put_key(heap, wr, "secret");
-        wr = json.put_string(heap, wr, secret[0..sl]);
-        wr = json.put_key(heap, wr, "from");
-        wr = json.put_string(heap, wr, "now");
-        wr = json.put_key(heap, wr, "cursor");
-        wr = json.put_int(heap, wr, start);
-        wr = json.end_object(heap, wr);
-        let body = json.finish(wr);
-        var answer = out;
-        borrow body as &sb in {
-            answer = server.reply(heap, answer, 201, buffer.bytes(sb), keep);
-        }
-        buffer.drop(heap, body);
-        return answer;
+        answer = add_created(heap, dv, blob, lg, done, ident, hl, sl, port, host, secret, key, ex_types, ex_spec, answer, keep);
     }
+    return answer;
+}
+
+// The body of `finish_create`, with the room it works in given to it (so that `finish_create` can leave its region by falling out of it).
+fn add_created[&h, &b, &l, &g, &d, &o, &s, &k, &t, &x](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, ident: int, hl: int, sl: int, port: int, host: &!o [byte], secret: &!s [byte], key: &!k [byte], ex_types: &!t [byte], ex_spec: &!x [byte], out: buffer.Buffer, keep: bool) -> [heap, file_write] buffer.Buffer {
+    let mg = off_mg();
+    manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_host(), hl, host);
+    manage.bytes_of(dv[mg..mg + manage.mg_size()], manage.mg_secret(), sl, secret);
+    let klen = sign.secret_key(secret[0..sl], key);
+    if klen < 0 {
+        return server.failure(heap, out, 503, "the secret cannot be used", keep);
+    }
+    // An endpoint of this id that the log remembers is a different endpoint (an id is never given twice): its slot is freed.
+    var k = 0;
+    while k < state.max_endpoints() {
+        if dv[off_slotid() + k] == ident {
+            if note_removed(done, dv, k) == 0 {
+                return server.failure(heap, out, 503, "the change could not be stored", keep);
+            }
+            dv[off_slotid() + k] = slot_free();
+        }
+        k = k + 1;
+    }
+    let slot = take_slot(done, dv, ident);
+    var start = evlog.last_id(lg);
+    if start < 0 {
+        start = 0;
+    }
+    if slot < 0 || note_created(done, dv, slot, ident, start) == 0 || log.flush(done) != 0 {
+        return server.failure(heap, out, 503, "the change could not be stored", keep);
+    }
+    reset_window(dv, slot, start);
+    clear_slot(dv, slot);
+    // It starts from now: it has looked at everything up to the last event, and the next record is at the end of the log.
+    dv[scan_id(slot)] = start;
+    dv[scan_off(slot)] = evlog.tail(lg);
+    dv[off_flying() + slot] = 0;
+    dv[off_slotid() + slot] = ident;
+    let count = dv[c_endpoints()];
+    let grown = endpoints.append(dv[off_table()..off_table() + endpoints.table_size()], blob, count, slot, ident, port, host[0..hl], key[0..klen]);
+    if grown < 0 {
+        return server.failure(heap, out, 503, "the endpoint could not be added", keep);
+    }
+    // Its subscription and headers (`epx.ls`), in the row of the entry just added.
+    epx.clear_row(dv[off_xt()..off_xt() + epx.xt_size()], count);
+    epx.set_types(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_types[0..epx.pending_types_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_types)]);
+    epx.set_spec(dv[off_xt()..off_xt() + epx.xt_size()], count, ex_spec[0..epx.pending_spec_into(dv[off_xg()..off_xg() + epx.xg_size()], ex_spec)]);
+    epx.set_conc(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_conc(dv[off_xg()..off_xg() + epx.xg_size()]));
+    epx.set_rate(dv[off_xt()..off_xt() + epx.xt_size()], count, epx.pending_rate(dv[off_xg()..off_xg() + epx.xg_size()]));
+    dv[c_endpoints()] = grown;
+    var wr = json.writer(heap, 256);
+    wr = json.begin_object(heap, wr);
+    wr = json.put_key(heap, wr, "id");
+    wr = json.put_int(heap, wr, ident);
+    wr = json.put_key(heap, wr, "host");
+    wr = json.put_string(heap, wr, destination.bare(host[0..hl]));
+    wr = json.put_key(heap, wr, "scheme");
+    wr = json.put_string(heap, wr, scheme_name(endpoints.scheme_of(dv[off_table()..off_table() + endpoints.table_size()], count)));
+    wr = json.put_key(heap, wr, "port");
+    wr = json.put_int(heap, wr, port);
+    wr = json.put_key(heap, wr, "secret");
+    wr = json.put_string(heap, wr, secret[0..sl]);
+    wr = json.put_key(heap, wr, "from");
+    wr = json.put_string(heap, wr, "now");
+    wr = json.put_key(heap, wr, "cursor");
+    wr = json.put_int(heap, wr, start);
+    wr = json.end_object(heap, wr);
+    let body = json.finish(wr);
+    var answer = out;
+    borrow body as &sb in {
+        answer = server.reply(heap, answer, 201, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, body);
+    return answer;
 }
 
 // A bearer token into the delivery state, at `at` (`off_token()`, plus `authz.ingest_at()` or `authz.read_at()` for the others): its

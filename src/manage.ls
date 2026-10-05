@@ -553,31 +553,33 @@ pub fn parse_patch[&h, &b, &c, &m](heap: &!h Heap, body: &b [byte], scratch: &!c
 // Make a secret for the endpoint in `mg`: `whsec_` and the base64 of 24 bytes from the kernel. Answers 0, or -1 if the kernel did not
 // give them (and then the request is refused: a secret that is not unpredictable is worse than none).
 pub fn make_secret[&h, &f, &m](heap: &!h Heap, fs: &f Fs(""), mg: &!m [int]) -> [heap, fs_read("")] int {
+    // The region is left by falling out of it: one left by a `return` is not given back (lex-sys #252), and this runs for every endpoint made without a secret.
+    var rc = 0 - 1;
     region a {
         let raw = alloc_slice[a](24, byte_of(0));
         let got = fs_read(fs, "/dev/urandom", raw);
-        if got != 24 {
-            return 0 - 1;
-        }
-        let text = pg.base64_encode(heap, raw);
-        var n = 0;
-        let prefix = "whsec_";
-        while n < len(prefix) {
-            mg[mg_secret() + n] = int_of(prefix[n]);
-            n = n + 1;
-        }
-        borrow text as &tr in {
-            let b = buffer.bytes(tr);
-            var i = 0;
-            while i < len(b) {
-                mg[mg_secret() + n + i] = int_of(b[i]);
-                i = i + 1;
+        if got == 24 {
+            let text = pg.base64_encode(heap, raw);
+            var n = 0;
+            let prefix = "whsec_";
+            while n < len(prefix) {
+                mg[mg_secret() + n] = int_of(prefix[n]);
+                n = n + 1;
             }
-            mg[mg_secret_len()] = n + len(b);
+            borrow text as &tr in {
+                let b = buffer.bytes(tr);
+                var i = 0;
+                while i < len(b) {
+                    mg[mg_secret() + n + i] = int_of(b[i]);
+                    i = i + 1;
+                }
+                mg[mg_secret_len()] = n + len(b);
+            }
+            buffer.drop(heap, text);
+            rc = 0;
         }
-        buffer.drop(heap, text);
-        return 0;
     }
+    return rc;
 }
 
 // The bytes of `len` integers of `mg` from `at`, written into `out`.
