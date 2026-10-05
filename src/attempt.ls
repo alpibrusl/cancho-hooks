@@ -5,6 +5,7 @@ module attempt;
 import std.conns;
 import dns;
 import destination;
+import state;
 import tls;
 
 // `attempt` -- delivery attempts that do not hold the loop (`docs/design.md` sections 16 and 40).
@@ -77,12 +78,14 @@ fn env_at() -> [] int {
     return 1536;
 }
 
+// The environment: 16 integers, then a saved session and the key it was saved for, for each endpoint slot there can be (`most_sessions()`: it was 64, and an endpoint
+// in a slot above it was never resumed, without a word; `docs/design.md` section 41.4).
 pub fn env_size() -> [] int {
-    return 144;
+    return 16 + 2 * most_sessions();
 }
 
 pub fn at_size() -> [] int {
-    return 1536 + 144;
+    return 1536 + env_size();
 }
 
 pub fn req_size() -> [] int {
@@ -295,7 +298,7 @@ fn f_tls() -> [] int {
 }
 
 // The environment: [TLS context, name server (packed, 0 none), its port, private hosts allowed, query counter, sessions on, handshakes, resumed, ...
-// 8 more spare, then a saved session for each of 64 endpoint slots, then the key (name and port) it was saved for].
+// 8 more spare, then a saved session for each endpoint slot, then the key (name and port) it was saved for].
 fn e_ctx() -> [] int {
     return 0;
 }
@@ -333,11 +336,11 @@ fn e_sessions() -> [] int {
 }
 
 fn e_keys() -> [] int {
-    return 80;
+    return 16 + most_sessions();
 }
 
 fn most_sessions() -> [] int {
-    return 64;
+    return state.max_endpoints();
 }
 
 // Set what the attempts share: the TLS context (`tls.context`, 0 if there is none), the name server's address (packed, 0: names cannot be resolved) and port,

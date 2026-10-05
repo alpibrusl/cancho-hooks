@@ -51,6 +51,15 @@ pub fn why(code: int) -> [] &static [byte] {
     if code == 8 {
         return "after must be an event id: an integer, 0 or more";
     }
+    if code == 9 {
+        return "limit must be an integer from 1 to 256";
+    }
+    if code == 10 {
+        return "offset must be an integer, 0 or more";
+    }
+    if code == 11 {
+        return "page must be an integer, 0 or more";
+    }
     if code > 100 && code < 200 {
         return filter.why(code - 100);
     }
@@ -106,6 +115,49 @@ pub fn parse_page[&q](query: &q [byte]) -> [] (int, int, bool, int) {
         }
     }
     return (0, limit, newest, after);
+}
+
+// The page of `GET /endpoints` (`docs/design.md` section 41.4: an answer cannot be longer than the server's 64 KiB queue, and 1,024 endpoints are 250 KB): `limit` (1 to
+// `max_listing()`, default `default_listing()`) endpoints from `offset` (default 0) in the table's order. Answers `(code, limit, offset)`.
+pub fn max_listing() -> [] int {
+    return 256;
+}
+
+pub fn default_listing() -> [] int {
+    return 64;
+}
+
+pub fn parse_listing[&q](query: &q [byte]) -> [] (int, int, int) {
+    var limit = default_listing();
+    var offset = 0;
+    let l = http.query_value(query, "limit");
+    if l.0 >= 0 {
+        limit = number(query, l.0, l.1);
+        if limit < 1 || limit > max_listing() {
+            return (9, 0, 0);
+        }
+    }
+    let o = http.query_value(query, "offset");
+    if o.0 >= 0 {
+        offset = number(query, o.0, o.1);
+        if offset < 0 {
+            return (10, 0, 0);
+        }
+    }
+    return (0, limit, offset);
+}
+
+// The page of `GET /metrics`: `page` (default 0). Answers `(code, page)`.
+pub fn parse_metrics_page[&q](query: &q [byte]) -> [] (int, int) {
+    let p = http.query_value(query, "page");
+    if p.0 < 0 {
+        return (0, 0);
+    }
+    let n = number(query, p.0, p.1);
+    if n < 0 {
+        return (11, 0);
+    }
+    return (0, n);
 }
 
 // The body of `POST /endpoints/:id/replay-dead`: empty, or an object with `limit` (how many to take at most; default: as many as the table of waiting

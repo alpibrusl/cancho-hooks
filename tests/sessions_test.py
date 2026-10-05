@@ -7,7 +7,7 @@ A delivery to an `https` endpoint costs a handshake, because the service closes 
 delivery makes that handshake abbreviated (half the CPU, `scripts/bench/https_cost.py`). The service keeps one session per endpoint, in memory, and offers it only to the same
 name and port. What is checked here is seen from the receiver's side, which counts the handshakes that resumed one:
 
-  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2); `tls-resume 0` never resumes
+  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2, and in slot 1000); `tls-resume 0` never resumes
   2. a session is the endpoint's own: a second endpoint, behind the same receiver, starts with a full handshake of its own, and resumes its own after that
   3. the session is dropped when the endpoint changes: `PATCH` of the host, of the port, of the secret, and a `DELETE` followed by a new endpoint (which may have the old one's
      slot) each make the next delivery a full handshake, verified against the trust store again
@@ -92,6 +92,19 @@ def main():
         r.event(n)
         r.delivered(n)
     check("1. tls-resume 0: six full handshakes, none resumed", srv.handshakes == 6 and srv.resumed == 0, f"{srv.handshakes} {srv.resumed}")
+    r.close()
+    srv.close()
+
+    # 1b. an endpoint in a slot past the 64 there were sessions for before design section 41 (the id 1000 is its own slot) resumes as well
+    fresh_db()
+    srv = K.TlsServer(*cert)
+    r = Rig(pki, dns)
+    r.add(1000, "https://hooks.test", srv.port)
+    r.start()
+    for n in range(1, 7):
+        r.event(n)
+        r.delivered(n)
+    check("1. an endpoint in slot 1000: six deliveries, six handshakes, the first full and the five after it resumed", srv.handshakes == 6 and srv.resumed == 5, f"{srv.handshakes} {srv.resumed}")
     r.close()
     srv.close()
 
@@ -183,7 +196,9 @@ def main():
     def grow(kind, bad, first, more):
         fresh_db()
         sink = srv_good = srv_bad = None
-        r = Rig(pki, dns, ["--deadline-ms", "3000"])
+        # a retry an hour away: every event is one attempt to each endpoint during the test, so when the count of attempts is reached nothing is in flight (and the endpoints
+        # that fail hold every event in their windows: stage one stays under the 1,024 of a window)
+        r = Rig(pki, dns, ["--deadline-ms", "3000", "--schedule", "3600000"])
         if kind == "tls":
             srv_good = K.TlsServer(*cert)
             r.add(1, "https://hooks.test", srv_good.port)
@@ -202,34 +217,50 @@ def main():
             base = r.svc.stats()["attempts"]
             for k in range(count):
                 r.event(1000 + k)
-            L.wait_for(lambda: r.svc.stats()["attempts"] >= base + count * (1 + bad), 240)
+            assert L.wait_for(lambda: r.svc.stats()["attempts"] >= base + count * (1 + bad), 240), f"a burst of {count} was not attempted: {r.svc.stats()}"
             time.sleep(0.3)
 
+        # Three points, two equal steps after the first: a leak costs something in every step, a buffer that becomes resident once (a page of a lazily zeroed block, the heap
+        # growing by its top pad) costs in one. The step that counts is the smaller of the two; what grew in each is kept, by mapping, for the message.
         burst(first)
-        a1 = K.rss_kb(r.svc.proc.pid)
+        pid = r.svc.proc.pid
+        a1, m1 = K.rss_kb(pid), K.mappings_kb(pid)
         burst(more)
-        a2 = K.rss_kb(r.svc.proc.pid)
+        a2, m2 = K.rss_kb(pid), K.mappings_kb(pid)
+        burst(more)
+        a3, m3 = K.rss_kb(pid), K.mappings_kb(pid)
         st = r.svc.stats()
         handshakes = (srv_good.handshakes, srv_good.resumed) if srv_good else None
         r.close()
         for x in (sink, srv_good, srv_bad):
             if x:
                 x.close()
-        return a1, a2, st, handshakes
+        return (a1, a2, a3), st, handshakes, f"step 1: {K.grown(m1, m2)}; step 2: {K.grown(m2, m3)}"
 
-    tls_first, tls_last, tls_st, _ = grow("tls", 3, 300, 500)
-    ctl_first, ctl_last, ctl_st, _ = grow("control", 3, 300, 500)
-    check(f"5. TLS side: {tls_st['attempts']} attempts, a quarter delivered and the rest failed in the handshake; control: {ctl_st['attempts']}", tls_st["delivered"] >= 700 and tls_st["failed"] >= 2100
-          and ctl_st["delivered"] >= 700, f"{tls_st} {ctl_st}")
-    check(f"5. no descriptor is left over: {tls_first[1]} and {tls_last[1]} after 300 and 800 events (the control: {ctl_last[1]})", tls_last[1] == tls_first[1] == ctl_last[1], f"{tls_first} {tls_last} {ctl_last}")
-    d_tls, d_ctl = tls_last[0] - tls_first[0], ctl_last[0] - ctl_first[0]
-    check(f"5. memory grows no faster with TLS than without it: 500 more events cost {d_tls} KiB against the control's {d_ctl} KiB (within 1.5 MiB)", d_tls <= d_ctl + 1536, f"{d_tls} {d_ctl}")
-    tls_first, tls_last, tls_st, hs = grow("tls", 0, 200, 3000)
-    ctl_first, ctl_last, ctl_st, _ = grow("control", 0, 200, 3000)
-    d_tls, d_ctl = tls_last[0] - tls_first[0], ctl_last[0] - ctl_first[0]
+    def step(points):
+        (k1, _), (k2, _), (k3, _) = points
+        return min(k2 - k1, k3 - k2), (k2 - k1, k3 - k2)
+
+    tls_pts, tls_st, _, tls_where = grow("tls", 3, 200, 400)
+    ctl_pts, ctl_st, _, ctl_where = grow("control", 3, 200, 400)
+    check(f"5. TLS side: {tls_st['attempts']} attempts, a quarter delivered and the rest failed in the handshake; control: {ctl_st['attempts']}", tls_st["delivered"] == 1000 and tls_st["failed"] == 3000
+          and ctl_st["delivered"] == 1000 and ctl_st["failed"] == 3000, f"{tls_st} {ctl_st}")
+    check(f"5. no descriptor is left over: {tls_pts[0][1]}, {tls_pts[1][1]} and {tls_pts[2][1]} after 200, 600 and 1,000 events (the control: {ctl_pts[2][1]})",
+          tls_pts[0][1] == tls_pts[1][1] == tls_pts[2][1] == ctl_pts[2][1], f"{tls_pts} {ctl_pts}")
+    (d_tls, both_tls), (d_ctl, both_ctl) = step(tls_pts), step(ctl_pts)
+    check(f"5. memory grows no faster with TLS than without it: 400 more events cost {d_tls} KiB against the control's {d_ctl} KiB (within 1.5 MiB; the smaller of two steps, {both_tls[0]} and {both_tls[1]} KiB, the control's {both_ctl[0]} and {both_ctl[1]})",
+          d_tls <= d_ctl + 1536, f"TLS {tls_where} | control {ctl_where}")
+    if max(both_tls) > d_ctl + 1536:
+        print(f"     a step of the TLS side was over the bound and the other was not (resident once, not per event): {tls_where}", flush=True)
+    tls_pts, tls_st, hs, tls_where = grow("tls", 0, 200, 1500)
+    ctl_pts, ctl_st, _, ctl_where = grow("control", 0, 200, 1500)
+    (d_tls, both_tls), (d_ctl, both_ctl) = step(tls_pts), step(ctl_pts)
     check(f"5. {tls_st['delivered']} deliveries over TLS, {hs[0]} handshakes of which {hs[1]} resumed; the control {ctl_st['delivered']}", tls_st["delivered"] == 3200 and ctl_st["delivered"] == 3200 and hs[1] >= 3100, f"{tls_st} {hs}")
-    check(f"5. no descriptor is left over: {tls_first[1]} and {tls_last[1]}", tls_last[1] == tls_first[1] == ctl_last[1], f"{tls_first} {tls_last} {ctl_last}")
-    check(f"5. memory grows no faster with TLS than without it: 3,000 more deliveries cost {d_tls} KiB against the control's {d_ctl} KiB (within 1.5 MiB)", d_tls <= d_ctl + 1536, f"{d_tls} {d_ctl}")
+    check(f"5. no descriptor is left over: {tls_pts[0][1]}, {tls_pts[1][1]} and {tls_pts[2][1]}", tls_pts[0][1] == tls_pts[1][1] == tls_pts[2][1] == ctl_pts[2][1], f"{tls_pts} {ctl_pts}")
+    check(f"5. memory grows no faster with TLS than without it: 1,500 more deliveries cost {d_tls} KiB against the control's {d_ctl} KiB (within 1.5 MiB; the smaller of two steps, {both_tls[0]} and {both_tls[1]} KiB, the control's {both_ctl[0]} and {both_ctl[1]})",
+          d_tls <= d_ctl + 1536, f"TLS {tls_where} | control {ctl_where}")
+    if max(both_tls) > d_ctl + 1536:
+        print(f"     a step of the TLS side was over the bound and the other was not (resident once, not per event): {tls_where}", flush=True)
 
     return check.finish("sessions")
 

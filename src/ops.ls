@@ -5,6 +5,7 @@ module ops;
 import std.io;
 import std.signals as sg;
 import reason;
+import state;
 
 // `ops` -- what an operator needs to watch the service and to stop it (`docs/design.md` section 34).
 //
@@ -103,23 +104,24 @@ fn o_tls() -> [] int {
     return 24;
 }
 
-// A failed attempt for each reason (`reason.ls`): `reason.count()` integers, after everything else, so that a new reason grows the end of the array and moves nothing
-// (the first 17 were at 24, and there was no room for more: 41 is the probe round and 48 the last reasons). 24 to 40 are free.
+// A failed attempt for each reason (`reason.ls`): `reason.count()` integers, after everything else, so that a new reason grows the end of the array and moves
+// nothing (the first 17 were at 24, and there was no room for more: 41 is the probe round and 48 the last reasons). 24 to 40 are free. They follow the
+// last reasons of the slots, which are one for each slot there can be (`state.max_endpoints()`; they were 62, ending at 110).
 fn o_reasons() -> [] int {
-    return 110;
+    return o_last() + slots();
 }
 
-// The reason of the last failed attempt of the endpoint in each slot, 0 if its last attempt delivered or none has failed: 62 integers.
+// The reason of the last failed attempt of the endpoint in each slot, 0 if its last attempt delivered or none has failed: `slots()` integers.
 fn o_last() -> [] int {
     return 48;
 }
 
 fn slots() -> [] int {
-    return 62;
+    return state.max_endpoints();
 }
 
 pub fn size() -> [] int {
-    return 110 + reason.count();
+    return o_reasons() + reason.count();
 }
 
 pub fn init[&o](o: &!o [int]) -> [] int {

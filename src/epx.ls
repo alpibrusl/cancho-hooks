@@ -4,21 +4,27 @@ module epx;
 
 import std.json;
 import filter;
+import state;
 import hdrs;
 
 // `epx` -- what an endpoint has besides an address and a secret (`docs/design.md` section 35): the event types it subscribes to, the custom
-// headers every attempt carries, and the previous secret while a rotation overlaps. These are kept in the delivery state, one **row** per
-// endpoint in the table's order (the same index as `endpoints.ls`'s table, shifted down by a delete the same way), of `stride()` integers, a
-// byte to an integer like the admin token:
+// headers every attempt carries, and the previous secret while a rotation overlaps, and its two limits. These are kept in the delivery state, one **row** per
+// endpoint in the table's order (the same index as `endpoints.ls`'s table, shifted down by a delete the same way), `stride()` integers a row, a byte to an
+// integer like the admin token. Since section 41 a row is in two places: the eight integers that every turn of the loop may read are **dense**, in a block at
+// the head of the array (so that reading them for 1,024 endpoints is 64 KB and not a cache miss each, and so that nothing is resident for an endpoint that
+// has none of the rest), and the bytes follow in rows of `body_size()`:
 //
-//     [0] types length   [1] header wire length   [2] old key length   [3] old key valid until (Unix ms; 0: none)
-//     [4 .. 516)     the subscription, comma separated (`filter.ls`)
-//     [516 .. 2564)  the headers as they go on the wire, `Name: value\r\n` each (`hdrs.ls`)
-//     [2564 .. 2660) the previous secret's key, as `sign.secret_key` decodes it
-//     [2660] the endpoint's own concurrency limit (1 to 8; 0: follow the service's `endpoint-concurrency`)
-//     [2661] the endpoint's own rate limit, attempts a second (1 to 100,000; 0: follow the service's `endpoint-rate`)  (`lim.ls`, section 39.4)
+//     head, `hdr_size()` integers for row i at `i * hdr_size()`:
+//         [0] types length   [1] header wire length   [2] old key length   [3] old key valid until (Unix ms; 0: none)
+//         [4] the endpoint's own concurrency limit (1 to 8; 0: follow the service's `endpoint-concurrency`)
+//         [5] the endpoint's own rate limit, attempts a second (1 to 100,000; 0: follow the service's `endpoint-rate`)  (`lim.ls`, section 39.4)
+//     body, `body_size()` integers for row i at `rows * hdr_size() + i * body_size()`, `rows` being the length of the array over `stride()`:
+//         [0 .. 512)      the subscription, comma separated (`filter.ls`)
+//         [512 .. 2560)   the headers as they go on the wire, `Name: value\r\n` each (`hdrs.ls`)
+//         [2560 .. 2656)  the previous secret's key, as `sign.secret_key` decodes it
 //
-// Fixed room for each, so nothing here ever needs to be compacted or can run out: a row is replaced in place.
+// **A row is all zero past its lengths** (every setter clears what it shortens, `drop_row` moves what a row holds), so clearing or moving a row costs what it holds
+// and not 21 KiB, and a row nobody wrote is not resident. The room is fixed, so nothing here ever needs to be compacted or can run out: a row is replaced in place.
 //
 // The change a `POST` or `PATCH` asks for waits for the database in the `xg` block (like `manage.ls`'s `mg`): which members it names, the
 // subscription, the headers as a spec (`hdrs.ls`: the form the database holds), and the time the previous secret stays valid until.
@@ -27,43 +33,55 @@ import hdrs;
 //     [4] concurrency   [5] rate
 //     [8 .. 520)     the subscription        [520 .. 4616)  the spec
 
+pub fn hdr_size() -> [] int {
+    return 8;
+}
+
+pub fn body_size() -> [] int {
+    return 2656;
+}
+
 pub fn stride() -> [] int {
     return 2664;
 }
 
 pub fn rows() -> [] int {
-    return 62;
+    return state.max_endpoints();
 }
 
 pub fn xt_size() -> [] int {
-    return 62 * 2664;
+    return state.max_endpoints() * 2664;
 }
 
 pub fn xg_size() -> [] int {
     return 4616;
 }
 
+// Inside a row's body.
 pub fn types_at() -> [] int {
-    return 4;
+    return 0;
 }
 
 pub fn wire_at() -> [] int {
-    return 516;
+    return 512;
 }
 
 pub fn old_at() -> [] int {
-    return 2564;
+    return 2560;
 }
 
-pub fn conc_at() -> [] int {
-    return 2660;
+pub fn types_max() -> [] int {
+    return 512;
 }
 
-pub fn rate_at() -> [] int {
-    return 2661;
+pub fn wire_max() -> [] int {
+    return 2048;
 }
 
-// The most attempts an endpoint can have in flight, and the largest rate limit one can be given (attempts a second: far above what one core delivers).
+pub fn old_max() -> [] int {
+    return 96;
+}
+
 pub fn max_concurrency() -> [] int {
     return 8;
 }
@@ -141,73 +159,122 @@ pub fn why(code: int) -> [] &static [byte] {
 // The rows
 // ---------------------------------------------------------------------
 
-fn base(i: int) -> [] int {
-    return i * stride();
+// The rows an array holds (the whole block is `rows() * stride()`; a test may make a smaller one), and where row `i`'s body starts.
+fn rows_in[&x](xt: &x [int]) -> [] int {
+    return len(xt) / stride();
+}
+
+fn bodyat[&x](xt: &x [int], i: int) -> [] int {
+    return rows_in(xt) * hdr_size() + i * body_size();
 }
 
 pub fn types_len[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i)];
+    return xt[i * hdr_size()];
 }
 
 pub fn wire_len[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i) + 1];
+    return xt[i * hdr_size() + 1];
 }
 
 pub fn old_len[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i) + 2];
+    return xt[i * hdr_size() + 2];
 }
 
 pub fn old_until[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i) + 3];
+    return xt[i * hdr_size() + 3];
 }
 
 // The endpoint's own concurrency and rate limits; 0 is "follow the service's setting" (`lim.ls`).
 pub fn conc[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i) + conc_at()];
+    return xt[i * hdr_size() + 4];
 }
 
 pub fn rate[&x](xt: &x [int], i: int) -> [] int {
-    return xt[base(i) + rate_at()];
+    return xt[i * hdr_size() + 5];
 }
 
 pub fn set_conc[&x](xt: &!x [int], i: int, n: int) -> [] int {
-    xt[base(i) + conc_at()] = n;
+    xt[i * hdr_size() + 4] = n;
     return 0;
 }
 
 pub fn set_rate[&x](xt: &!x [int], i: int, n: int) -> [] int {
-    xt[base(i) + rate_at()] = n;
+    xt[i * hdr_size() + 5] = n;
     return 0;
 }
 
 // The wire form's byte `k` of the headers of row `i`.
 pub fn wire_byte[&x](xt: &x [int], i: int, k: int) -> [] int {
-    return xt[base(i) + wire_at() + k];
+    return xt[bodyat(xt, i) + wire_at() + k];
 }
 
 pub fn old_byte[&x](xt: &x [int], i: int, k: int) -> [] int {
-    return xt[base(i) + old_at() + k];
+    return xt[bodyat(xt, i) + old_at() + k];
 }
 
 // Is the previous secret of row `i` still to be signed with at `now` (Unix ms)?
 pub fn old_active[&x](xt: &x [int], i: int, now: int) -> [] bool {
-    return xt[base(i) + 2] > 0 && now < xt[base(i) + 3];
+    return xt[i * hdr_size() + 2] > 0 && now < xt[i * hdr_size() + 3];
 }
 
 // Does the subscription of row `i` want an event of type `typ` (the bytes of the record's `typ` pair; empty for an event with none)?
 pub fn accepts[&x, &t](xt: &x [int], i: int, typ: &t [byte]) -> [] bool {
-    let n = xt[base(i)];
+    let n = xt[i * hdr_size()];
     if n == 0 {
         return true;
     }
-    return filter.accepts(xt[base(i) + types_at()..base(i) + types_at() + n], n, typ);
+    return filter.accepts(xt[bodyat(xt, i) + types_at()..bodyat(xt, i) + types_at() + n], n, typ);
 }
 
-// Row `i` empty: no subscription, no headers, no previous secret.
+// Zero `from..to` of the integers of region `at` of row `i`'s body: what a value that got shorter leaves behind (a header's value is a credential).
+fn zero_tail[&x](xt: &!x [int], i: int, at: int, from: int, to: int) -> [] int {
+    var k = from;
+    while k < to {
+        xt[bodyat(xt, i) + at + k] = 0;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Row `i` empty: no subscription, no headers, no previous secret, no limits. What it held is zeroed and nothing else is touched (a row is all zero past its lengths).
 pub fn clear_row[&x](xt: &!x [int], i: int) -> [] int {
+    zero_tail(xt, i, types_at(), 0, xt[i * hdr_size()]);
+    zero_tail(xt, i, wire_at(), 0, xt[i * hdr_size() + 1]);
+    zero_tail(xt, i, old_at(), 0, xt[i * hdr_size() + 2]);
     var k = 0;
-    while k < stride() {
-        xt[base(i) + k] = 0;
+    while k < hdr_size() {
+        xt[i * hdr_size() + k] = 0;
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Row `to` becomes a copy of row `from`, which is left as it was: the head, and the bytes up to each length, the bytes `to` held past them cleared.
+fn copy_row[&x](xt: &!x [int], from: int, to: int) -> [] int {
+    let tl = xt[from * hdr_size()];
+    let wl = xt[from * hdr_size() + 1];
+    let ol = xt[from * hdr_size() + 2];
+    var k = 0;
+    while k < tl {
+        xt[bodyat(xt, to) + types_at() + k] = xt[bodyat(xt, from) + types_at() + k];
+        k = k + 1;
+    }
+    zero_tail(xt, to, types_at(), tl, xt[to * hdr_size()]);
+    k = 0;
+    while k < wl {
+        xt[bodyat(xt, to) + wire_at() + k] = xt[bodyat(xt, from) + wire_at() + k];
+        k = k + 1;
+    }
+    zero_tail(xt, to, wire_at(), wl, xt[to * hdr_size() + 1]);
+    k = 0;
+    while k < ol {
+        xt[bodyat(xt, to) + old_at() + k] = xt[bodyat(xt, from) + old_at() + k];
+        k = k + 1;
+    }
+    zero_tail(xt, to, old_at(), ol, xt[to * hdr_size() + 2]);
+    k = 0;
+    while k < hdr_size() {
+        xt[to * hdr_size() + k] = xt[from * hdr_size() + k];
         k = k + 1;
     }
     return 0;
@@ -219,11 +286,7 @@ pub fn drop_row[&x](xt: &!x [int], count: int, i: int) -> [] int {
     clear_row(xt, i);
     var j = i;
     while j < count - 1 {
-        var k = 0;
-        while k < stride() {
-            xt[base(j) + k] = xt[base(j + 1) + k];
-            k = k + 1;
-        }
+        copy_row(xt, j + 1, j);
         j = j + 1;
     }
     if count > 0 {
@@ -232,21 +295,23 @@ pub fn drop_row[&x](xt: &!x [int], count: int, i: int) -> [] int {
     return 0;
 }
 
-// The subscription of row `i` set to `csv` (a good list; the caller has judged it with `filter.check_list`).
+// The subscription of row `i` set to `csv` (a good list; the caller has judged it with `filter.check_list`). What a longer one left past the end is cleared.
 pub fn set_types[&x, &c](xt: &!x [int], i: int, csv: &c [byte]) -> [] int {
     var k = 0;
     while k < len(csv) {
-        xt[base(i) + types_at() + k] = int_of(csv[k]);
+        xt[bodyat(xt, i) + types_at() + k] = int_of(csv[k]);
         k = k + 1;
     }
-    xt[base(i)] = len(csv);
+    zero_tail(xt, i, types_at(), len(csv), xt[i * hdr_size()]);
+    xt[i * hdr_size()] = len(csv);
     return 0;
 }
 
 // The headers of row `i` set from `spec` (a good spec, `hdrs.check_spec`). Answers 0, or -1 if the spec is not good (nothing is changed then).
 pub fn set_spec[&x, &s](xt: &!x [int], i: int, spec: &s [byte]) -> [] int {
     if len(spec) == 0 {
-        xt[base(i) + 1] = 0;
+        zero_tail(xt, i, wire_at(), 0, xt[i * hdr_size() + 1]);
+        xt[i * hdr_size() + 1] = 0;
         return 0;
     }
     region a {
@@ -257,40 +322,38 @@ pub fn set_spec[&x, &s](xt: &!x [int], i: int, spec: &s [byte]) -> [] int {
         }
         var k = 0;
         while k < n {
-            xt[base(i) + wire_at() + k] = wire[k];
+            xt[bodyat(xt, i) + wire_at() + k] = wire[k];
             k = k + 1;
         }
-        xt[base(i) + 1] = n;
+        zero_tail(xt, i, wire_at(), n, xt[i * hdr_size() + 1]);
+        xt[i * hdr_size() + 1] = n;
     }
     return 0;
 }
 
 // The previous secret of row `i` set to `key` (the key bytes) valid until `until` (Unix ms); an empty key or an `until` of 0 ends the overlap.
 pub fn set_old[&x, &k](xt: &!x [int], i: int, key: &k [byte], until: int) -> [] int {
-    if len(key) == 0 || until <= 0 || len(key) > 96 {
-        xt[base(i) + 2] = 0;
-        xt[base(i) + 3] = 0;
-        var z = 0;
-        while z < 96 {
-            xt[base(i) + old_at() + z] = 0;
-            z = z + 1;
-        }
+    if len(key) == 0 || until <= 0 || len(key) > old_max() {
+        zero_tail(xt, i, old_at(), 0, xt[i * hdr_size() + 2]);
+        xt[i * hdr_size() + 2] = 0;
+        xt[i * hdr_size() + 3] = 0;
         return 0;
     }
     var j = 0;
     while j < len(key) {
-        xt[base(i) + old_at() + j] = int_of(key[j]);
+        xt[bodyat(xt, i) + old_at() + j] = int_of(key[j]);
         j = j + 1;
     }
-    xt[base(i) + 2] = len(key);
-    xt[base(i) + 3] = until;
+    zero_tail(xt, i, old_at(), len(key), xt[i * hdr_size() + 2]);
+    xt[i * hdr_size() + 2] = len(key);
+    xt[i * hdr_size() + 3] = until;
     return 0;
 }
 
 // The previous secret of row `i`, which it has, is valid until `until` instead (Unix ms).
 pub fn set_old_until[&x](xt: &!x [int], i: int, until: int) -> [] int {
-    if xt[base(i) + 2] > 0 {
-        xt[base(i) + 3] = until;
+    if xt[i * hdr_size() + 2] > 0 {
+        xt[i * hdr_size() + 3] = until;
     }
     return 0;
 }
@@ -301,7 +364,7 @@ pub fn text_used[&x](xt: &x [int], count: int) -> [] int {
     var total = 0;
     var i = 0;
     while i < count {
-        total = total + xt[base(i)] + 2 * xt[base(i) + 1] + 2 * xt[base(i) + 2] + 40;
+        total = total + xt[i * hdr_size()] + 2 * xt[i * hdr_size() + 1] + 2 * xt[i * hdr_size() + 2] + 40;
         i = i + 1;
     }
     return total;
@@ -313,18 +376,19 @@ pub fn text_used[&x](xt: &x [int], count: int) -> [] int {
 pub fn put_members[&h, &x](heap: &!h Heap, w: json.Writer, xt: &x [int], i: int, now: int) -> [heap] json.Writer {
     var out = json.put_key(heap, w, "types");
     out = json.begin_array(heap, out);
-    let n = xt[base(i)];
+    let n = xt[i * hdr_size()];
+    let tb = bodyat(xt, i) + types_at();
     region a {
         let item = alloc_slice[a](filter.max_pattern() + 1, byte_of(0));
         var at = 0;
         while at < n {
             var end = at;
-            while end < n && xt[base(i) + types_at() + end] != ',' {
+            while end < n && xt[tb + end] != ',' {
                 end = end + 1;
             }
             var k = 0;
             while k < end - at {
-                item[k] = byte_of(xt[base(i) + types_at() + at + k]);
+                item[k] = byte_of(xt[tb + at + k]);
                 k = k + 1;
             }
             out = json.put_string(heap, out, item[0..end - at]);
@@ -334,24 +398,25 @@ pub fn put_members[&h, &x](heap: &!h Heap, w: json.Writer, xt: &x [int], i: int,
     out = json.end_array(heap, out);
     out = json.put_key(heap, out, "headers");
     out = json.begin_array(heap, out);
-    let wn = xt[base(i) + 1];
+    let wn = xt[i * hdr_size() + 1];
+    let wb = bodyat(xt, i) + wire_at();
     region b {
         let name = alloc_slice[b](hdrs.max_name() + 1, byte_of(0));
         var p = 0;
         while p < wn {
             var colon = p;
-            while colon < wn && xt[base(i) + wire_at() + colon] != ':' {
+            while colon < wn && xt[wb + colon] != ':' {
                 colon = colon + 1;
             }
             var k = 0;
             while k < colon - p && k < hdrs.max_name() {
-                name[k] = byte_of(xt[base(i) + wire_at() + p + k]);
+                name[k] = byte_of(xt[wb + p + k]);
                 k = k + 1;
             }
             out = json.put_string(heap, out, name[0..k]);
             // to the end of this line
             var eol = colon;
-            while eol + 1 < wn && !(xt[base(i) + wire_at() + eol] == '\r' && xt[base(i) + wire_at() + eol + 1] == '\n') {
+            while eol + 1 < wn && !(xt[wb + eol] == '\r' && xt[wb + eol + 1] == '\n') {
                 eol = eol + 1;
             }
             p = eol + 2;
@@ -360,7 +425,7 @@ pub fn put_members[&h, &x](heap: &!h Heap, w: json.Writer, xt: &x [int], i: int,
     out = json.end_array(heap, out);
     out = json.put_key(heap, out, "secret_old_until");
     if old_active(xt, i, now) {
-        out = json.put_int(heap, out, xt[base(i) + 3]);
+        out = json.put_int(heap, out, xt[i * hdr_size() + 3]);
     } else {
         out = json.put_int(heap, out, 0);
     }

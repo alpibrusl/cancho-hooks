@@ -53,14 +53,16 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def main():
+def main(ident=0):
+    seen.clear()
+    failed.clear()
     http.server.HTTPServer.request_queue_size = 256
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     d = tempfile.mkdtemp(prefix="hooks-layout-")
     secret = "whsec_" + base64.b64encode(os.urandom(24)).decode()
     with open(os.path.join(d, "endpoints.conf"), "w") as f:
-        f.write(f"0 127.0.0.1 {srv.server_address[1]} {secret}\n")
+        f.write(f"{ident} 127.0.0.1 {srv.server_address[1]} {secret}\n")
     port = chaos.free_port()
     p = subprocess.Popen([BIN, "--port", str(port), "--dir", d, "--allow-private-hosts", "1", "--schedule", "300,300,300", "--deadline-ms", "800"],
                          stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
@@ -72,17 +74,23 @@ def main():
     while time.time() < end and not all(n in seen for n in range(1, total + 1)):
         time.sleep(0.1)
     missing = [n for n in range(1, total + 1) if n not in seen]
-    check("every one of 2,300 events is delivered, though 1,011 and 2,035 failed once", not missing, f"missing {missing[:10]}")
-    check("the events that failed once are delivered with their own bodies",
+    check(f"endpoint {ident}: every one of 2,300 events is delivered, though 1,011 and 2,035 failed once", not missing, f"missing {missing[:10]}")
+    check(f"endpoint {ident}: the events that failed once are delivered with their own bodies",
           all(n in seen and all(json.loads(b)["n"] == n for b in seen[n]) for n in FAIL_ONCE), str({n: seen.get(n) for n in FAIL_ONCE}))
-    check("both did fail first", failed == FAIL_ONCE, str(failed))
+    check(f"endpoint {ident}: both did fail first", failed == FAIL_ONCE, str(failed))
     p.terminate()
     p.wait()
     shutil.rmtree(d, ignore_errors=True)
+
+
+def finish():
     if FAILS:
         print("FAILED: " + "; ".join(FAILS))
         sys.exit(1)
     print("all layout checks passed")
 
 
-main()
+# the first slot, the slot where the limit was (61) and the last of the 1,024: the regions of each slot's window do not overlap its neighbour's
+for slot in (0, 61, 1023):
+    main(slot)
+finish()

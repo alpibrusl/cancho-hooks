@@ -39,7 +39,7 @@ import struct
 import sys
 
 MAX_RECORD = 65536          # a record's `len` is at most the service's max_len + 4 (65,536 bounds a torn tail)
-OUTCOME_KINDS = range(1, 18)         # 12 and 13 (a failure streak began, the circuit breaker paused an endpoint) are about an endpoint: `event` is not an event id; 15 is the header
+OUTCOME_KINDS = range(1, 19)         # 18 says the log uses a slot of 62 or above (docs/design.md 41.5); 12 and 13 (a failure streak began, the circuit breaker paused an endpoint) are about an endpoint: `event` is not an event id; 15 is the header
 FORMAT = 15                           # the outcomes log's header: `event` is the format number
 EVENT_FORMAT = 2                      # the format of the events log this version writes (1 has no header)
 EVENT_KINDS = (1, 2, 3, 6, 7, 8, 9, 14, 16, 17)   # delivered, failed, dead, replay, replay failed / delivered / dead, why an attempt failed (14), a replay cancelled (16), a dead letter of a snapshot (17): `event` is an event id

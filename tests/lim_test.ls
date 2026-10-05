@@ -6,9 +6,14 @@ import epx;
 
 // What limits the pace of an endpoint's attempts (`src/lim.ls`, `docs/design.md` section 39.4): the limits in force, and the token bucket.
 
+// Room for eight slots: a test that holds a row of extras beside the limits has to fit the 64 KiB of a region (`lim.size()` is 41 KB for the 1,024 slots there are).
+fn small() -> [] int {
+    return lim.head() + 8 * lim.stride();
+}
+
 fn test_an_endpoint_follows_the_service_unless_it_has_limits_of_its_own() -> [] int {
     region a {
-        let l = alloc_slice[a](lim.size(), 0);
+        let l = alloc_slice[a](small(), 0);
         let xt = alloc_slice[a](2 * epx.stride(), 0);
         lim.init(l, 10, 6, 40);
         test.assert_eq(lim.conc_of(l, xt, 0), 6);
@@ -32,7 +37,7 @@ fn test_an_endpoint_follows_the_service_unless_it_has_limits_of_its_own() -> [] 
 
 fn test_the_concurrency_never_exceeds_the_ceiling_or_falls_below_one() -> [] int {
     region a {
-        let l = alloc_slice[a](lim.size(), 0);
+        let l = alloc_slice[a](small(), 0);
         let xt = alloc_slice[a](epx.stride(), 0);
         lim.init(l, 0, 0, 0);
         test.assert_eq(lim.conc_of(l, xt, 0), 1);

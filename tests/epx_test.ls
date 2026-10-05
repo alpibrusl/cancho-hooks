@@ -201,3 +201,133 @@ fn test_the_request_names_the_limits_or_refuses_them[&h](heap: &!h Heap) -> [hea
     unbox_slice(heap, xgb);
     return 0;
 }
+
+// A row is all zero past its lengths (section 41.4): what a shorter value leaves behind is cleared (a header's value is a credential), so that clearing and
+// moving a row cost what it holds and a row nobody wrote is not resident.
+fn test_a_shorter_value_leaves_nothing_behind() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_spec(xt, 0, "Authorization:secret-value-1,X-B:other");
+        let long = epx.wire_len(xt, 0);
+        epx.set_spec(xt, 0, "A:b");
+        test.assert_eq(epx.wire_len(xt, 0), 6);
+        var k = 6;
+        var clean = true;
+        while k < long {
+            if epx.wire_byte(xt, 0, k) != 0 {
+                clean = false;
+            }
+            k = k + 1;
+        }
+        test.assert(clean);
+        epx.set_old(xt, 0, "0123456789abcdef", 99);
+        epx.set_old(xt, 0, "xy", 99);
+        test.assert_eq(epx.old_len(xt, 0), 2);
+        test.assert_eq(epx.old_byte(xt, 0, 1), int_of(byte_of('y')));
+        test.assert_eq(epx.old_byte(xt, 0, 2), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 15), 0);
+        epx.set_old(xt, 0, "", 0);
+        test.assert_eq(epx.old_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 1), 0);
+        test.assert_eq(epx.old_len(xt, 0), 0);
+        epx.clear_row(xt, 0);
+        test.assert_eq(epx.wire_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.wire_len(xt, 0), 0);
+    }
+    return 0;
+}
+
+// A delete moves the rows after it down by what they hold: the head and the bytes up to each length, and what the row it lands on held past them is cleared.
+fn test_a_delete_moves_what_rows_hold_and_leaves_no_stale_bytes[&h](heap: &!h Heap) -> [heap] int {
+    let xb = box_slice(heap, 3 * epx.stride(), 0);
+    borrow mut xb as &!xw in {
+        let xt = contents(xw);
+        epx.set_types(xt, 0, "a");
+        epx.set_spec(xt, 0, "Xlong-header-name:value-one");
+        epx.set_old(xt, 0, "key-zero-is-long", 5);
+        epx.set_conc(xt, 0, 7);
+        epx.set_types(xt, 1, "bb,cc");
+        epx.set_spec(xt, 1, "Y:22");
+        epx.set_conc(xt, 1, 2);
+        epx.set_rate(xt, 1, 40);
+        epx.set_types(xt, 2, "d");
+        epx.drop_row(xt, 3, 0);
+        test.assert(epx.accepts(xt, 0, "bb"));
+        test.assert(epx.accepts(xt, 0, "cc"));
+        test.assert(!epx.accepts(xt, 0, "a"));
+        test.assert_eq(epx.wire_len(xt, 0), 7);
+        test.assert_eq(epx.wire_byte(xt, 0, 0), int_of(byte_of('Y')));
+        // the longer header of the row that was there is not left after the shorter one
+        var k = 7;
+        var clean = true;
+        while k < 40 {
+            if epx.wire_byte(xt, 0, k) != 0 {
+                clean = false;
+            }
+            k = k + 1;
+        }
+        test.assert(clean);
+        // the previous key of the row that was there is gone, with its length and its time
+        test.assert_eq(epx.old_len(xt, 0), 0);
+        test.assert_eq(epx.old_until(xt, 0), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.conc(xt, 0), 2);
+        test.assert_eq(epx.rate(xt, 0), 40);
+        test.assert(epx.accepts(xt, 1, "d"));
+        test.assert(!epx.accepts(xt, 1, "bb"));
+        test.assert_eq(epx.wire_len(xt, 1), 0);
+        test.assert_eq(epx.conc(xt, 1), 0);
+        // and the row that moved up over a row with headers of its own has none of them left in its bytes either
+        var k1 = 0;
+        var clean1 = true;
+        while k1 < 40 {
+            if epx.wire_byte(xt, 1, k1) != 0 {
+                clean1 = false;
+            }
+            k1 = k1 + 1;
+        }
+        test.assert(clean1);
+        // the last of the three is empty
+        test.assert_eq(epx.types_len(xt, 2), 0);
+        test.assert(epx.accepts(xt, 2, "anything"));
+    }
+    unbox_slice(heap, xb);
+    return 0;
+}
+
+// The real block holds 1,024 rows (the limit): the last row is a row of its own, in neither the first's place nor the one before's, and a delete at the front moves it.
+fn test_the_last_row_of_the_whole_block_is_its_own[&h](heap: &!h Heap) -> [heap] int {
+    test.assert_eq(epx.xt_size(), 1024 * epx.stride());
+    test.assert_eq(epx.rows(), 1024);
+    let xb = box_slice(heap, epx.xt_size(), 0);
+    borrow mut xb as &!xw in {
+        let xt = contents(xw);
+        epx.set_types(xt, 1023, "last.*");
+        epx.set_spec(xt, 1023, "Z:9");
+        epx.set_old(xt, 1023, "kk", 8);
+        epx.set_conc(xt, 1023, 5);
+        epx.set_rate(xt, 1023, 77);
+        test.assert(epx.accepts(xt, 1023, "last.x"));
+        test.assert(!epx.accepts(xt, 1022, "last.x") || epx.types_len(xt, 1022) == 0);
+        test.assert_eq(epx.types_len(xt, 1022), 0);
+        test.assert_eq(epx.types_len(xt, 0), 0);
+        test.assert_eq(epx.wire_len(xt, 1022), 0);
+        test.assert_eq(epx.old_len(xt, 1022), 0);
+        test.assert_eq(epx.conc(xt, 1022), 0);
+        test.assert_eq(epx.conc(xt, 1023), 5);
+        test.assert_eq(epx.rate(xt, 1023), 77);
+        test.assert_eq(epx.old_byte(xt, 1023, 1), int_of(byte_of('k')));
+        epx.drop_row(xt, 1024, 0);
+        test.assert(epx.accepts(xt, 1022, "last.x"));
+        test.assert(!epx.accepts(xt, 1022, "other"));
+        test.assert_eq(epx.conc(xt, 1022), 5);
+        test.assert_eq(epx.rate(xt, 1022), 77);
+        test.assert_eq(epx.old_len(xt, 1022), 2);
+        test.assert_eq(epx.wire_len(xt, 1022), 6);
+        test.assert_eq(epx.types_len(xt, 1023), 0);
+        test.assert_eq(epx.conc(xt, 1023), 0);
+        test.assert_eq(epx.old_len(xt, 1023), 0);
+    }
+    unbox_slice(heap, xb);
+    return 0;
+}

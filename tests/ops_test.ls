@@ -5,6 +5,7 @@ import std.bytes;
 import std.test;
 import metrics;
 import ops;
+import state;
 import reason;
 
 // What an operator watches (`src/ops.ls`, `src/metrics.ls`; `docs/design.md` sections 34.1 to 34.4): the counters, when the service is ready, how it learns it is to stop,
@@ -101,14 +102,14 @@ fn test_failures_are_counted_by_reason_and_remembered_per_endpoint() -> [] int {
         test.assert_eq(ops.last_reason(o, 3), 0);
         test.assert_eq(ops.failures_for(o, reason.connect_refused()), 2);
         // recovery sets it; a slot out of range is ignored, not written beyond the array
-        ops.set_last_reason(o, 61, reason.gone());
-        test.assert_eq(ops.last_reason(o, 61), reason.gone());
-        ops.set_last_reason(o, 62, reason.gone());
+        ops.set_last_reason(o, state.max_endpoints() - 1, reason.gone());
+        test.assert_eq(ops.last_reason(o, state.max_endpoints() - 1), reason.gone());
+        ops.set_last_reason(o, state.max_endpoints(), reason.gone());
         ops.set_last_reason(o, 0 - 1, reason.gone());
         ops.attempt_ended(o, 99, reason.reset());
         test.assert_eq(ops.failures_for(o, reason.reset()), 1);
         // the last reason cell of the last slot is the last cell of the array but one at most
-        test.assert(ops.size() >= 110);
+        test.assert(ops.size() >= 48 + state.max_endpoints());
     }
     return 0;
 }
@@ -145,7 +146,7 @@ fn test_every_reason_counts_in_a_cell_of_its_own() -> [] int {
         // a reason that does not exist is not counted, and is not a cell of anything else
         ops.attempt_ended(o, 0, reason.count());
         ops.attempt_ended(o, 0, 1000);
-        test.assert_eq(ops.size(), 110 + reason.count());
+        test.assert_eq(ops.size(), 48 + state.max_endpoints() + reason.count());
     }
     return 0;
 }
@@ -405,6 +406,61 @@ fn test_sixty_two_endpoints_fit_one_answer[&h](heap: &!h Heap) -> [heap] int {
             test.assert_eq(count_of(t, "{endpoint="), 62 * 10);
         }
         buffer.drop(heap, text);
+    }
+    return 0;
+}
+
+// A page of `/metrics` is 64 endpoints (section 41.4): the longest it can be (six-digit ids, twelve-digit values, every series with a value) is under the 64 KiB the server
+// can queue for an answer, and a page after the first has none of the service's series; the service's own says how many pages there are.
+fn test_a_page_of_sixty_four_endpoints_fits_the_servers_queue[&h](heap: &!h Heap) -> [heap] int {
+    test.assert_eq(metrics.page_size(), 64);
+    test.assert_eq(metrics.pages_for(0), 1);
+    test.assert_eq(metrics.pages_for(1), 1);
+    test.assert_eq(metrics.pages_for(64), 1);
+    test.assert_eq(metrics.pages_for(65), 2);
+    test.assert_eq(metrics.pages_for(1024), 16);
+    region a {
+        let g = alloc_slice[a](metrics.g_size(), 0);
+        let ep = alloc_slice[a](64 * metrics.row(), 0);
+        let rs = alloc_slice[a](reason.count(), 0);
+        g[metrics.g_pages()] = 16;
+        var i = 0;
+        while i < 64 {
+            ep[i * metrics.row() + metrics.e_id()] = 999936 + i;
+            ep[i * metrics.row() + metrics.e_cursor()] = 123456789012;
+            ep[i * metrics.row() + metrics.e_lag()] = 123456789012;
+            ep[i * metrics.row() + metrics.e_retries()] = 1024;
+            ep[i * metrics.row() + metrics.e_in_flight()] = 8;
+            ep[i * metrics.row() + metrics.e_throttled()] = 123456789012;
+            ep[i * metrics.row() + metrics.e_dead_letters()] = 2048;
+            ep[i * metrics.row() + metrics.e_failing_since()] = 1767225600000;
+            ep[i * metrics.row() + metrics.e_last_reason()] = reason.status_5xx();
+            ep[i * metrics.row() + metrics.e_disabled()] = 1;
+            ep[i * metrics.row() + metrics.e_paused()] = 1;
+            i = i + 1;
+        }
+        let first = metrics.render_page(heap, g, ep, 64, rs, true);
+        borrow first as &tb in {
+            let t = buffer.bytes(tb);
+            test.assert(len(t) < 58000);
+            test.assert_eq(count_of(t, "{endpoint="), 64 * 10);
+            test.assert(has(t, "hooks_metrics_pages 16\n"));
+            test.assert(has(t, "hooks_uptime_seconds"));
+        }
+        buffer.drop(heap, first);
+        let later = metrics.render_page(heap, g, ep, 64, rs, false);
+        borrow later as &tb in {
+            let t = buffer.bytes(tb);
+            test.assert(len(t) < 52000);
+            test.assert_eq(count_of(t, "{endpoint="), 64 * 10);
+            test.assert(!has(t, "hooks_uptime_seconds"));
+            test.assert(!has(t, "hooks_metrics_pages"));
+            test.assert(!has(t, "hooks_ingest_events_total"));
+            // every family is still declared before its samples
+            test.assert_eq(count_of(t, "# HELP "), count_of(t, "# TYPE "));
+            test.assert(has(t, "# TYPE hooks_endpoint_cursor gauge\n"));
+        }
+        buffer.drop(heap, later);
     }
     return 0;
 }

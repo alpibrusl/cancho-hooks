@@ -2,6 +2,7 @@ edition 5;
 
 import std.test;
 import bulk;
+import std.bytes;
 
 // What the requests about dead letters ask for (`src/bulk.ls`, docs/design.md section 39.1): the query of the list and the body of the bulk replay.
 
@@ -107,5 +108,44 @@ fn test_every_bad_body_has_its_code[&h](heap: &!h Heap) -> [heap] int {
         test.assert_eq(bad.2, 0);
         test.assert_eq(bad.3, 0);
     }
+    return 0;
+}
+
+// The page of `GET /endpoints` (section 41.4): 64 by default, 256 at most, from an offset; and the page of `GET /metrics`.
+fn test_the_page_of_the_endpoints_has_defaults_and_edges() -> [] int {
+    let p = bulk.parse_listing("");
+    test.assert_eq(p.0, 0);
+    test.assert_eq(p.1, 64);
+    test.assert_eq(p.2, 0);
+    let q = bulk.parse_listing("offset=128&limit=256");
+    test.assert_eq(q.0, 0);
+    test.assert_eq(q.1, 256);
+    test.assert_eq(q.2, 128);
+    test.assert_eq(bulk.parse_listing("limit=1").1, 1);
+    test.assert_eq(bulk.parse_listing("x=1&offset=5").2, 5);
+    test.assert_eq(bulk.parse_listing("offset=0").0, 0);
+    // every bad one has its code, and the code a message
+    test.assert_eq(bulk.parse_listing("limit=0").0, 9);
+    test.assert_eq(bulk.parse_listing("limit=257").0, 9);
+    test.assert_eq(bulk.parse_listing("limit=x").0, 9);
+    test.assert_eq(bulk.parse_listing("limit=").0, 9);
+    test.assert_eq(bulk.parse_listing("offset=-1").0, 10);
+    test.assert_eq(bulk.parse_listing("offset=x").0, 10);
+    test.assert_eq(bulk.parse_listing("offset=1234567890123").0, 10);
+    test.assert(bytes.starts_with(bulk.why(9), "limit must"));
+    test.assert(bytes.starts_with(bulk.why(10), "offset must"));
+    test.assert(bytes.starts_with(bulk.why(11), "page must"));
+    return 0;
+}
+
+fn test_the_page_of_the_metrics_defaults_to_the_first() -> [] int {
+    test.assert_eq(bulk.parse_metrics_page("").1, 0);
+    test.assert_eq(bulk.parse_metrics_page("").0, 0);
+    test.assert_eq(bulk.parse_metrics_page("page=0").1, 0);
+    test.assert_eq(bulk.parse_metrics_page("page=15").1, 15);
+    test.assert_eq(bulk.parse_metrics_page("a=b&page=3").1, 3);
+    test.assert_eq(bulk.parse_metrics_page("page=x").0, 11);
+    test.assert_eq(bulk.parse_metrics_page("page=").0, 11);
+    test.assert_eq(bulk.parse_metrics_page("page=-1").0, 11);
     return 0;
 }

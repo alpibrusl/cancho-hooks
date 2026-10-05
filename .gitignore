@@ -3,3 +3,4 @@ __pycache__/
 scripts/bench/loadgen
 scripts/bench/sink
 dist/
+scripts/bench/mklog

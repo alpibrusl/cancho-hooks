@@ -41,7 +41,7 @@ Nothing is dropped that a receiver is still owed. What retention takes away is t
 | `segment-bytes` | `67108864` (64 MiB) | an events segment is sealed at this size (256 KiB or more) |
 | `delivery-log-bytes` | `33554432` (32 MiB) | `delivery.seg` is replaced by a snapshot at this size, or at four times the size of the last snapshot if that is more (64 KiB or more) |
 | `idem-keys` | `262144` | how many idempotency keys the index holds (16 to 4,194,304); a schedule index of a quarter of this (at least 16) holds cron's. About 150 bytes a key, resident only as used (section 7) |
-| `compact-now` | `0` | `1`: seal the active segment, drop everything droppable, replace the outcomes log by a snapshot, print what was done and **exit 0** (an operator's one-off; it takes the same lock as the loop) |
+| `compact-now` | `0` | `1`: seal the active segment, drop everything droppable, replace the outcomes log by a snapshot, print what was done and **exit 0** (an operator's one-off; it takes the same lock as the loop). With a database named it first reads the `endpoints` table, as the service does and waiting at most `pg-start-wait-ms`, because the cursors say which events are final: if it cannot, it exits `20` and changes nothing |
 | `retention-ms` | `0` | **test knob.** If not 0, the retention in milliseconds, instead of `retention-days`. Real deployments do not set it |
 | `compact-kill-at` | `0` | **test knob.** The service stops dead (it writes `killpoint` in the data directory and then waits to be killed) at the n-th compaction step it reaches, so a test can `kill -9` at a named step without relying on timing. Section 10 lists the steps. Real deployments do not set it |
 

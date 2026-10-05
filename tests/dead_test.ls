@@ -223,6 +223,32 @@ fn test_clear_forgets_one_slot_only[&h](heap: &!h Heap) -> [heap] int {
     return 0;
 }
 
+// `clear` leaves not one word of what the entries held (the invariant the dense layout depends on: everything past a count is zero), the last word of an entry included.
+fn test_clear_leaves_no_word_of_an_entry_behind[&h](heap: &!h Heap) -> [heap] int {
+    let tb = box_slice(heap, 2 * dead.block(), 0);
+    borrow mut tb as &!tw in {
+        let d = contents(tw);
+        dead.put(d, 0, 10, 3, 5, 77, 0);
+        dead.put(d, 0, 20, 4, 6, 88, 0);
+        dead.set_offset(d, 0, 0, 123);
+        dead.set_offset(d, 0, 1, 456);
+        dead.clear(d, 0);
+        test.assert_eq(dead.count(d, 0), 0);
+        // the entries of slot 0 start after the two dense headers of four words
+        var k = 8;
+        var clean = true;
+        while k < 8 + 2 * 4 {
+            if d[k] != 0 {
+                clean = false;
+            }
+            k = k + 1;
+        }
+        test.assert(clean);
+    }
+    unbox_slice(heap, tb);
+    return 0;
+}
+
 // Every put into a full table, wherever the new id falls, leaves it sorted, with each id once, holding the largest `cap()` ids seen.
 fn check_full_table_against_a_model[&d](d: &!d [int]) -> [] int {
     // ids 10, 20, ... 20480 fill it; then ids that fall everywhere in between and beyond, each checked
@@ -352,6 +378,35 @@ fn test_expire_drops_what_retention_dropped_and_the_floor_with_it[&h](heap: &!h 
     let tb = box_slice(heap, 2 * dead.block(), 0);
     borrow mut tb as &!tw in {
         check_expire_and_the_floor(contents(tw));
+    }
+    unbox_slice(heap, tb);
+    return 0;
+}
+
+// The real array holds a block for each of the 1,024 slots (section 41.4): the last slot's table is its own, in no other's place, and `clear` leaves nothing of it.
+fn test_the_last_slot_of_the_real_array_has_a_table_of_its_own[&h](heap: &!h Heap) -> [heap] int {
+    test.assert_eq(dead.size(), 1024 * dead.block());
+    let tb = box_slice(heap, dead.size(), 0);
+    borrow mut tb as &!tw in {
+        let d = contents(tw);
+        test.assert_eq(dead.put(d, 1023, 7, 3, 12, 1000, 55), dead.put_added());
+        test.assert_eq(dead.put(d, 1023, 5, 4, 11, 2000, 0 - 1), dead.put_added());
+        test.assert_eq(dead.count(d, 1023), 2);
+        test.assert_eq(dead.count(d, 1022), 0);
+        test.assert_eq(dead.count(d, 0), 0);
+        test.assert_eq(dead.id_at(d, 1023, 0), 5);
+        test.assert_eq(dead.id_at(d, 1023, 1), 7);
+        test.assert_eq(dead.offset_at(d, 1023, 1), 55);
+        test.assert_eq(dead.find(d, 1022, 7), 0 - 1);
+        test.assert_eq(dead.put(d, 0, 9, 1, 1, 1, 1), dead.put_added());
+        test.assert_eq(dead.count(d, 0), 1);
+        test.assert_eq(dead.count(d, 1023), 2);
+        dead.clear(d, 1023);
+        test.assert_eq(dead.count(d, 1023), 0);
+        test.assert_eq(dead.id_at(d, 1023, 0), 0);
+        test.assert_eq(dead.id_at(d, 1023, 1), 0);
+        test.assert_eq(dead.floor(d, 1023), 0);
+        test.assert_eq(dead.count(d, 0), 1);
     }
     unbox_slice(heap, tb);
     return 0;

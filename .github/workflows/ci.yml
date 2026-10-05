@@ -116,6 +116,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/slots_test.py build/hooks
 
+      - name: More than 62 endpoints (1,024 through the API and a 1,025th refused, kill -9 over 1,024 endpoints that fail, disabled and paused in every slot, replays and dead letters in a wide slot, the loop not looking at what has nothing to do, retention pins, a database that is away at the start, the logs an older build refuses)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/many_test.py build/hooks
+
       - name: Change an endpoint without a restart (PATCH)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/patch_test.py build/hooks

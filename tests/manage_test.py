@@ -16,7 +16,7 @@
   8. one change at a time: a second request while one waits for the database is a 409
   9. a database that is slow past five seconds: 504, and the row, which commits later, is an endpoint at the next start (starting from the
      beginning of the log, as every row the service did not create does)
- 10. 62 endpoints and no more (409); no database named (503); the secret and the token are in no read
+ 10. 1,024 endpoints and no more (409; it was 62 before design section 41); no database named (503); the secret and the token are in no read
 """
 import base64
 import hashlib
@@ -325,7 +325,7 @@ def main():
     check("6. after a row inserted by hand with id 50 the next is 51", r == 201 and b["id"] == 51, str((r, b)))
     psql("select setval('endpoint_ids', 100, false)")
     r, b = create(svc, good)
-    check("6. an id of 100 has a slot below 62, and is read by its id (cursor 1, the last event; port as given)",
+    check("6. an id of 100 has a slot (its own number), and is read by its id (cursor 1, the last event; port as given)",
           r == 201 and b["id"] == 100 and get(svc, "/endpoints/100")[1] == {"id": 100, "port": 9, "scheme": "http", "cursor": 1, "disabled": False, "paused": False, "failing_since": 0, "types": [], "headers": [], "secret_old_until": 0, "concurrency": 8, "rate": 0}, str((r, b, get(svc, "/endpoints"))))
     check("6. GET /endpoints says ids, not slots", [e["id"] for e in get(svc, "/endpoints")[1]][-1] == 100, str(get(svc, "/endpoints")))
     stop(svc)
@@ -427,11 +427,11 @@ def main():
     # 10. the limits, and no database
     d = fresh_dir()
     sec = "whsec_" + base64.b64encode(b"y" * 16).decode()
-    psql(f"insert into endpoints select g, 'h', 9, '{sec}' from generate_series(0, 61) g")
+    psql(f"insert into endpoints select g, 'h', 9, '{sec}' from generate_series(0, 1023) g")
     svc = start(d)
-    check("10. 62 endpoints in the table: all are loaded", get(svc, "/stats")[1]["endpoints"] == 62)
+    check("10. 1,024 endpoints in the table: all are loaded", get(svc, "/stats")[1]["endpoints"] == 1024)
     r, b = create(svc, good)
-    check("10. a 63rd is a 409", r == 409, str((r, b)))
+    check("10. a 1,025th is a 409", r == 409 and "1024" in b["error"], str((r, b)))
     stop(svc)
     psql("truncate endpoints")
     shutil.rmtree(d)

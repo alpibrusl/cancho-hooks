@@ -47,9 +47,10 @@ pub fn table_size() -> [] int {
     return 8 * state.max_endpoints();
 }
 
-// The most bytes of text (a file, or the database's table written as one) that `parse` is given.
+// The most bytes of text (a file, or the database's table written as one) that `parse` is given, and the size of the blob of hosts and keys: 528 bytes an
+// endpoint on average, which is what 62 endpoints had in 32 KiB (`docs/design.md` section 41.4). It is 540,672 bytes: not for an arena (64 KiB) but for a box on the heap.
 pub fn text_limit() -> [] int {
-    return 32768;
+    return state.max_endpoints() * 528;
 }
 
 fn is_space(c: int) -> [] bool {
@@ -107,7 +108,7 @@ pub fn number_ms[&t](text: &t [byte], from: int, to: int) -> [] int {
 // Parse the file. Answers the number of endpoints, or `0 - line` (the 1-based line number, negated) of the first line that is
 // wrong: not four fields, an id that is not a number of at most six digits or is repeated, a port outside 1 to 65535, a host that is neither a host name nor a
 // public IPv4 address (an address in the private, loopback, link-local and reserved ranges only if `open`; an `https://` host is a name: `destination.host_ok`),
-// a secret that is not base64, a word after the secret that is not one of the three above or is one twice or is not good, or more than `state.max_endpoints()` endpoints.
+// a secret that is not base64, a word after the secret that is not one of the three above or is one twice or is not good, or more than `state.max_endpoints()` endpoints (1,024).
 //
 // `xt` is where the optional words go (`epx.ls`: a row of `epx.stride()` integers an endpoint, in the table's order): they are judged whatever its
 // length, and kept in it only if it holds a row for the endpoint. `parse` is this without somewhere to keep them.

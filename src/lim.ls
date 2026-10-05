@@ -3,6 +3,7 @@ edition 5;
 module lim;
 
 import epx;
+import state;
 import std.json;
 
 // `lim` -- what limits how fast a delivery is attempted, and how the retry delays are spread (`docs/design.md` sections 36.3 and 36.4).
@@ -43,7 +44,7 @@ pub fn head() -> [] int {
 }
 
 pub fn size() -> [] int {
-    return head() + 62 * stride();
+    return head() + state.max_endpoints() * stride();
 }
 
 pub fn max_jitter() -> [] int {
@@ -65,7 +66,7 @@ pub fn idle_wait_ms() -> [] int {
 
 pub fn init[&l](l: &!l [int], jitter: int, conc: int, rate: int) -> [] int {
     var i = 0;
-    while i < size() {
+    while i < len(l) {
         l[i] = 0;
         i = i + 1;
     }

@@ -405,7 +405,7 @@ fn readyz_reply[&h, &d, &l, &g](heap: &!h Heap, dv: &d [int], lg: &l evlog.Ev, d
 
 // The numbers `/metrics` shows, into the arrays `metrics.render` formats: the whole service in `g`, a row for each endpoint in `ep`, a count for each
 // reason in `rs`. Reads only; the one loop that is not constant (the events of each endpoint's window that wait for a retry) is 1,024 cells an endpoint.
-fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [int], dv: &d [int], lg: &l evlog.Ev, done: &m log.Log, ix: &x [int], sg: &j [int], now: int, ready: bool) -> [] int {
+fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [int], dv: &d [int], lg: &l evlog.Ev, done: &m log.Log, ix: &x [int], sg: &j [int], now: int, ready: bool, first: int, rows: int, totals: bool) -> [] int {
     let o = ops_of(dv);
     let hq = dv[off_hq()..off_hq() + history.size()];
     let last = evlog.last_id(lg);
@@ -465,39 +465,55 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
         rs[r] = ops.failures_for(o, r);
         r = r + 1;
     }
+    g[metrics.g_pages()] = metrics.pages_for(dv[c_endpoints()]);
     var flying = 0;
     var retries = 0;
-    var i = 0;
-    while i < dv[c_endpoints()] {
+    // The endpoints `first` to `first + rows - 1` get a row; the totals over all of them are only the first page's (the others read nothing but their own).
+    var i = first;
+    var stop = first + rows;
+    if totals {
+        i = 0;
+        stop = dv[c_endpoints()];
+    }
+    while i < stop && i < dv[c_endpoints()] {
         let e = endpoints.slot_of(dv[off_table()..off_table() + endpoints.table_size()], i);
-        let at = i * metrics.row();
+        let at = (i - first) * metrics.row();
         let cursor = dv[off_cur() + e];
-        ep[at + metrics.e_id()] = endpoints.ident_of(dv[off_table()..off_table() + endpoints.table_size()], i);
-        ep[at + metrics.e_cursor()] = cursor;
-        if last > cursor {
-            ep[at + metrics.e_lag()] = last - cursor;
+        if i >= first && i < first + rows {
+            ep[at + metrics.e_id()] = endpoints.ident_of(dv[off_table()..off_table() + endpoints.table_size()], i);
+            ep[at + metrics.e_cursor()] = cursor;
+            if last > cursor {
+                ep[at + metrics.e_lag()] = last - cursor;
+            }
+            if is_disabled(dv, e) {
+                ep[at + metrics.e_disabled()] = 1;
+            }
+            if is_paused(dv, e) {
+                ep[at + metrics.e_paused()] = 1;
+            }
+            ep[at + metrics.e_failing_since()] = dv[off_streak() + e];
+            ep[at + metrics.e_last_reason()] = ops.last_reason(o, e);
+            ep[at + metrics.e_in_flight()] = dv[off_flying() + e];
+            ep[at + metrics.e_throttled()] = lim.held_back(lim_of(dv), e);
+            ep[at + metrics.e_dead_letters()] = dead.count(dead_of(dv), e);
         }
-        if is_disabled(dv, e) {
-            ep[at + metrics.e_disabled()] = 1;
-        }
-        if is_paused(dv, e) {
-            ep[at + metrics.e_paused()] = 1;
-        }
-        ep[at + metrics.e_failing_since()] = dv[off_streak() + e];
-        ep[at + metrics.e_last_reason()] = ops.last_reason(o, e);
-        ep[at + metrics.e_in_flight()] = dv[off_flying() + e];
-        ep[at + metrics.e_throttled()] = lim.held_back(lim_of(dv), e);
-        ep[at + metrics.e_dead_letters()] = dead.count(dead_of(dv), e);
         flying = flying + dv[off_flying() + e];
         var waiting = 0;
         var id = cursor + 1;
-        while id <= cursor + state.span() {
+        // (an event that is not in the log has no cell: an endpoint that is caught up reads none, and its window is not made resident by a scrape)
+        var to = cursor + state.span();
+        if last < to {
+            to = last;
+        }
+        while id <= to {
             if state.attempts(dv[off_cells()..off_flight()], e, id) > 0 && !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) {
                 waiting = waiting + 1;
             }
             id = id + 1;
         }
-        ep[at + metrics.e_retries()] = waiting;
+        if i >= first && i < first + rows {
+            ep[at + metrics.e_retries()] = waiting;
+        }
         retries = retries + waiting;
         i = i + 1;
     }
@@ -507,15 +523,28 @@ fn gather[&a, &b, &c, &d, &l, &m, &x, &j](g: &!a [int], ep: &!b [int], rs: &!c [
 }
 
 // `GET /metrics`: the Prometheus text format. The route's scope is in `authz.scope_of` (read); it was open until the scoped tokens of production item 0.3 name a read scope.
-fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l evlog.Ev, done: &g log.Log, ix: &x [int], sg: &j [int], now: int, keep: bool, out: buffer.Buffer) -> [heap] buffer.Buffer {
+fn metrics_reply[&h, &d, &l, &g, &x, &j, &q, &t](heap: &!h Heap, dv: &d [int], lg: &l evlog.Ev, done: &g log.Log, ix: &x [int], sg: &j [int], now: int, keep: bool, out: buffer.Buffer, request: &q [byte], table: &t [int]) -> [heap] buffer.Buffer {
     let n = dv[c_endpoints()];
+    // The page (`docs/design.md` section 41.4): 64 endpoints, and the service's own series on the first only.
+    let want = bulk.parse_metrics_page(http.query(request, table));
+    if want.0 != 0 {
+        return server.failure(heap, out, 400, bulk.why(want.0), keep);
+    }
+    if want.1 >= metrics.pages_for(n) {
+        return server.failure(heap, out, 404, "no such page of /metrics", keep);
+    }
+    let first = want.1 * metrics.page_size();
+    var rows = n - first;
+    if rows > metrics.page_size() {
+        rows = metrics.page_size();
+    }
     let gv = box_slice(heap, metrics.g_size(), 0);
-    let ev = box_slice(heap, (n + 1) * metrics.row(), 0);
+    let ev = box_slice(heap, (rows + 1) * metrics.row(), 0);
     let rv = box_slice(heap, reason.count(), 0);
     borrow mut gv as &!gw in {
         borrow mut ev as &!ew in {
             borrow mut rv as &!rw in {
-                gather(contents(gw), contents(ew), contents(rw), dv, lg, done, ix, sg, now, readiness(dv, lg, done) == 0);
+                gather(contents(gw), contents(ew), contents(rw), dv, lg, done, ix, sg, now, readiness(dv, lg, done) == 0, first, rows, want.1 == 0);
             }
         }
     }
@@ -524,7 +553,7 @@ fn metrics_reply[&h, &d, &l, &g, &x, &j](heap: &!h Heap, dv: &d [int], lg: &l ev
         borrow ev as &er in {
             borrow rv as &rr in {
                 buffer.drop(heap, text);
-                text = metrics.render(heap, contents(gr), contents(er), n, contents(rr));
+                text = metrics.render_page(heap, contents(gr), contents(er), rows, contents(rr), want.1 == 0);
             }
         }
     }
@@ -567,7 +596,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     }
     if id == 41 {
         // GET /metrics (section 34.2). Scope: read (`authz.scope_of`).
-        return metrics_reply(heap, stats, lg, done, ix, sg, now, keep, out);
+        return metrics_reply(heap, stats, lg, done, ix, sg, now, keep, out, request, table);
     }
     if id >= 15 && id <= 19 {
         // /schedules (`docs/design.md` section 32): judged here, sent to the database by the loop (`note[0]` is -4), the answer held.
@@ -717,6 +746,14 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, sched.skipped(sg));
         w = json.put_key(heap, w, "filtered");
         w = json.put_int(heap, w, stats[off_ex() + ex_filtered()]);
+        w = json.put_key(heap, w, "max_endpoints");
+        w = json.put_int(heap, w, state.max_endpoints());
+        w = json.put_key(heap, w, "turns");
+        w = json.put_int(heap, w, stats[off_ex() + ex_turns()]);
+        w = json.put_key(heap, w, "endpoints_looked_at");
+        w = json.put_int(heap, w, stats[off_ex() + ex_looked()]);
+        w = json.put_key(heap, w, "waits_skipped");
+        w = json.put_int(heap, w, stats[off_ex() + ex_hurried()]);
         w = json.put_key(heap, w, "cron_keys");
         w = json.put_int(heap, w, idem.count(ix[idem.second_at(ix)..len(ix)]));
         w = json.put_key(heap, w, "events_first_id");
@@ -845,11 +882,18 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     if id == 7 {
         // GET /endpoints: each endpoint's id, port, scheme, cursor (every event up to it is final), whether it is disabled, whether the circuit
         // breaker is what disabled it, and when its current run of failed attempts began (Unix ms, 0 if it has none). Not the host and
-        // not the secret.
+        // not the secret. A page of `limit` (64 unless the query says; 256 at most) from `offset`, in the table's order: the server's queue for an answer is 64 KiB, so
+        // an answer cannot be all of 1,024 endpoints (`docs/design.md` section 41.4). The page also ends where its text passes 40 KiB (endpoints with the longest
+        // lists of types and headers are 1.5 KB each). `X-Total-Count` says how many there are, and `X-Next-Offset` where to go on, if there is more.
+        let page = bulk.parse_listing(http.query(request, table));
+        if page.0 != 0 {
+            return server.failure(heap, out, 400, bulk.why(page.0), keep);
+        }
         var w = json.writer(heap, 160);
         w = json.begin_array(heap, w);
-        var i = 0;
-        while i < stats[c_endpoints()] {
+        var i = page.2;
+        var more = true;
+        while i < stats[c_endpoints()] && i < page.2 + page.1 && more {
             let e = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], i);
             w = json.begin_object(heap, w);
             w = json.put_key(heap, w, "id");
@@ -870,14 +914,32 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             w = lim.put_members(heap, w, lim_of(stats), stats[off_xt()..off_xt() + epx.xt_size()], i);
             w = json.end_object(heap, w);
             i = i + 1;
+            var written = 0;
+            borrow w as &wr in {
+                written = len(json.bytes(wr));
+            }
+            if written >= 40960 {
+                more = false;
+            }
         }
         w = json.end_array(heap, w);
         let body = json.finish(w);
+        var extra = buffer.append(heap, buffer.empty(heap, 64), "X-Total-Count: ");
+        extra = buffer.push_nat(heap, extra, stats[c_endpoints()]);
+        extra = buffer.append(heap, extra, "\r\n");
+        if i < stats[c_endpoints()] {
+            extra = buffer.append(heap, extra, "X-Next-Offset: ");
+            extra = buffer.push_nat(heap, extra, i);
+            extra = buffer.append(heap, extra, "\r\n");
+        }
         var answer = out;
         borrow body as &sb in {
-            answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+            borrow extra as &eb in {
+                answer = server.reply_with(heap, answer, 200, buffer.bytes(sb), keep, buffer.bytes(eb));
+            }
         }
         buffer.drop(heap, body);
+        buffer.drop(heap, extra);
         return answer;
     }
     if id == 11 {
@@ -897,7 +959,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             return server.failure(heap, out, 409, "another change is waiting for the database", keep);
         }
         if stats[c_endpoints()] >= state.max_endpoints() {
-            return server.failure(heap, out, 409, "the service has as many endpoints as it can (62)", keep);
+            return server.failure(heap, out, 409, "the service has as many endpoints as it can (1024)", keep);
         }
         if stats[c_endpoints()] + draining_count(stats) >= state.max_endpoints() {
             return server.failure(heap, out, 409, "every slot is taken: a deleted endpoint is still finishing an attempt, try again in a moment", keep);
@@ -1570,25 +1632,30 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
 // by hand.
 //
 //     ctl      16    counters and settings (the `c_*` indices below)
-//     table    434   the endpoints, seven integers each (`endpoints.ls`); the first is the *slot*, the last the *id*
-//     cur      62    per slot: every event up to this one is final
+//     table    8 x N the endpoints, eight integers each (`endpoints.ls`); the first is the *slot*, the last the *id*   (N is `state.max_endpoints()`, 1,024)
+//     cur      N     per slot: every event up to this one is final
 //     sched    17    the retry schedule: the number of delays, then the delays in ms
-//     flying   62    per slot: how many attempts are in flight
-//     slotid   62    per slot: the id of the endpoint that has it, or free, or never seen
-//     scan     124   per slot: the last event of the events log that endpoint has looked at, and where the next record starts
-//     streak   62    per slot: when the endpoint's current run of failed attempts began (Unix ms), 0 if it has none
+//     flying   N     per slot: how many attempts are in flight
+//     slotid   N     per slot: the id of the endpoint that has it, or free, or never seen
+//     scan     2 N   per slot: the last event of the events log that endpoint has looked at, and where the next record starts
+//     streak   N     per slot: when the endpoint's current run of failed attempts began (Unix ms), 0 if it has none
+//     flags    N     per slot: disabled, paused, draining, tripped (`f_*`)
+//     wake     N     per slot: when the loop next has anything to do for the endpoint (`off_wake`)
 //     token    768   the admin, ingest and read tokens (`authz.ls`), 256 each: the length, then the bytes
 //     mg       368   the change that waits for the database (`manage.ls`)
-//     offs     63488 per slot, 1024 each: where in the events log each event of that endpoint's window starts, by `id % window`
-//     cells    ...   `state.cells(62)`: final / attempts / next attempt, per slot and `id % window`
+//     offs     N x 1024  per slot: where in the events log each event of that endpoint's window starts, by `id % window`
+//     cells    ...   `state.cells(N)`: final / attempts / next attempt, per slot and `id % window`
 //     ...      the flight flags, the replays, the history ring, the counters of `ops.ls` (`ops`), and last:
 //     xt       164920  per table entry: its subscription, custom headers and previous secret (`epx.ls`)
 //     xg       4616  the subscription and headers a change waits to apply (`epx.ls`)
 //     ex       136   counters and a setting of the extras, and the type of the event being accepted (`ex_*` below)
 
-// A bit per slot: set while the endpoint that has the slot was paused by the circuit breaker (`docs/design.md` section 31). The slot's
-// `c_disabled` bit is set as well, so everything that skips a disabled endpoint skips this one; this bit says why.
-fn c_paused() -> [] int {
+// Cell 10 of the control block was the disabled set, a bit a slot, and cell 0 the paused set (one integer each, which is where 62 came from). The flags are a
+// word a slot now (`off_flags()`, `docs/design.md` section 41.4); cell 10 is free.
+
+// 1 once `delivery.seg` is known to hold the marker that it uses a slot of 62 or above (`state.wide()`, `docs/design.md` section 41.5): read at the start, or written when
+// the first such slot was given. A snapshot writes the marker again if a slot of 62 or above has an owner.
+fn c_wide() -> [] int {
     return 0;
 }
 
@@ -1630,24 +1697,19 @@ fn c_deadline() -> [] int {
     return 9;
 }
 
-// A bit per slot (0 to 61): set while the endpoint that has the slot is disabled and gets no new attempts (`docs/design.md` section 22).
-fn c_disabled() -> [] int {
-    return 10;
-}
-
 // 1 if endpoints may be names and non-public addresses (`allow-private-hosts`, section 26), else 0.
 fn c_private() -> [] int {
     return 11;
 }
 
-// A bit per slot: set while the endpoint that had the slot has been deleted (its row is gone and it is not in the table) but an attempt it began is
-// still on the wire. The slot is not free and not dormant, and cannot be given to anyone, until `flying` is 0 and the `removed` record is written
+// How many slots have the *draining* flag: the endpoint that had the slot has been deleted (its row is gone and it is not in the table) but an attempt it
+// began is still on the wire. The slot is not free and not dormant, and cannot be given to anyone, until `flying` is 0 and the `removed` record is written
 // (`docs/design.md` section 25.5).
 fn c_draining() -> [] int {
     return 12;
 }
 
-// A bit per slot: the breaker has paused the endpoint since the loop last said so on stderr.
+// How many slots have the *tripped* flag: the breaker has paused the endpoint since the loop last said so on stderr.
 fn c_tripped() -> [] int {
     return 13;
 }
@@ -1662,55 +1724,97 @@ fn c_production() -> [] int {
     return 15;
 }
 
+// The flags of a slot (`off_flags()`): a word each, where there were four integers of one bit a slot.
+fn f_disabled() -> [] int {
+    return 1;
+}
+
+// The breaker paused it (`docs/design.md` section 31). `f_disabled` is set as well, so everything that skips a disabled endpoint skips this one; this flag says why.
+fn f_paused() -> [] int {
+    return 2;
+}
+
+fn f_draining() -> [] int {
+    return 4;
+}
+
+fn f_tripped() -> [] int {
+    return 8;
+}
+
+fn has_flag[&d](dv: &d [int], e: int, flag: int) -> [] bool {
+    return dv[off_flags() + e] & flag != 0;
+}
+
+// Set or clear `flag` of slot `e`; answers 1 if that changed it.
+fn put_flag[&d](dv: &!d [int], e: int, flag: int, on: bool) -> [] int {
+    let was = dv[off_flags() + e] & flag != 0;
+    if on && !was {
+        dv[off_flags() + e] = dv[off_flags() + e] | flag;
+        return 1;
+    }
+    if !on && was {
+        dv[off_flags() + e] = dv[off_flags() + e] & ~flag;
+        return 1;
+    }
+    return 0;
+}
+
 fn is_draining[&d](dv: &d [int], e: int) -> [] bool {
-    return dv[c_draining()] >> e & 1 == 1;
+    return has_flag(dv, e, f_draining());
 }
 
 fn set_draining[&d](dv: &!d [int], e: int, on: bool) -> [] int {
-    if on {
-        dv[c_draining()] = dv[c_draining()] | 1 << e;
-    } else {
-        dv[c_draining()] = dv[c_draining()] & ~(1 << e);
+    if put_flag(dv, e, f_draining(), on) == 1 {
+        if on {
+            dv[c_draining()] = dv[c_draining()] + 1;
+        } else {
+            dv[c_draining()] = dv[c_draining()] - 1;
+        }
     }
     return 0;
 }
 
 fn draining_count[&d](dv: &d [int]) -> [] int {
-    var n = 0;
-    var e = 0;
-    while e < state.max_endpoints() {
-        if is_draining(dv, e) {
-            n = n + 1;
-        }
-        e = e + 1;
-    }
-    return n;
+    return dv[c_draining()];
 }
 
 fn is_disabled[&d](dv: &d [int], e: int) -> [] bool {
-    return dv[c_disabled()] >> e & 1 == 1;
+    return has_flag(dv, e, f_disabled());
 }
 
+// An endpoint that is enabled again is looked at at once (`off_wake()`).
 fn set_disabled[&d](dv: &!d [int], e: int, on: bool) -> [] int {
-    if on {
-        dv[c_disabled()] = dv[c_disabled()] | 1 << e;
-    } else {
-        dv[c_disabled()] = dv[c_disabled()] & ~(1 << e);
+    put_flag(dv, e, f_disabled(), on);
+    if !on {
+        dv[off_wake() + e] = 0;
     }
     return 0;
 }
 
 fn is_paused[&d](dv: &d [int], e: int) -> [] bool {
-    return dv[c_paused()] >> e & 1 == 1;
+    return has_flag(dv, e, f_paused());
 }
 
 fn set_paused[&d](dv: &!d [int], e: int, on: bool) -> [] int {
-    if on {
-        dv[c_paused()] = dv[c_paused()] | 1 << e;
-    } else {
-        dv[c_paused()] = dv[c_paused()] & ~(1 << e);
+    put_flag(dv, e, f_paused(), on);
+    return 0;
+}
+
+// The breaker has paused slot `e` and the loop has not said so yet; `take_tripped` says it was said.
+fn set_tripped[&d](dv: &!d [int], e: int) -> [] int {
+    if put_flag(dv, e, f_tripped(), true) == 1 {
+        dv[c_tripped()] = dv[c_tripped()] + 1;
     }
     return 0;
+}
+
+fn take_tripped[&d](dv: &!d [int], e: int) -> [] bool {
+    if put_flag(dv, e, f_tripped(), false) == 1 {
+        dv[c_tripped()] = dv[c_tripped()] - 1;
+        return true;
+    }
+    return false;
 }
 
 // How many endpoints the breaker has paused now.
@@ -1795,10 +1899,31 @@ fn off_streak() -> [] int {
     return off_scan() + 2 * state.max_endpoints();
 }
 
+// Per slot: the flags (`f_disabled()` and the others above), one word each.
+fn off_flags() -> [] int {
+    return off_streak() + state.max_endpoints();
+}
+
+// Per slot: the Unix ms before which the loop has nothing to do for the endpoint (`docs/design.md` section 41.3), or `wake_never()`. 0 is "look now", which is every
+// slot's value until a whole pass over its window has said otherwise, and what anything that gives the endpoint work sets it back to.
+fn off_wake() -> [] int {
+    return off_flags() + state.max_endpoints();
+}
+
+fn wake_never() -> [] int {
+    return 1152921504606846976;
+}
+
+// Per slot: 1 if the cells of its window may hold something (an outcome was applied since the window was last cleared). A window that was never written is not
+// read or written to clear it: the cells are one page in six for each slot, and an idle endpoint must not make them resident (`docs/design.md` section 41.2).
+fn off_wused() -> [] int {
+    return off_wake() + state.max_endpoints();
+}
+
 // The bearer tokens (the admin token first; each is its length, then its bytes: `authz.ls`), and the one change that may wait for the
 // database (`manage.ls`).
 fn off_token() -> [] int {
-    return off_streak() + state.max_endpoints();
+    return off_wused() + state.max_endpoints();
 }
 
 fn off_mg() -> [] int {
@@ -1824,12 +1949,33 @@ fn offs_at(e: int, id: int) -> [] int {
 fn clear_slot[&d](dv: &!d [int], e: int) -> [] int {
     set_disabled(dv, e, false);
     set_paused(dv, e, false);
+    take_tripped(dv, e);
+    dv[off_wake() + e] = 0;
     dv[off_streak() + e] = 0;
     dv[scan_id(e)] = 0;
     dv[scan_off(e)] = 0 - 1;
     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], e, 0);
     lim.clear_slot(lim_of_mut(dv), e);
     dead.clear(dead_of_mut(dv), e);
+    return 0;
+}
+
+// Apply an outcome to the window of slot `e` (`state.apply`), noting that the window has been written.
+fn apply_outcome[&d](dv: &!d [int], e: int, kind: int, id: int, attempts: int, next_at: int) -> [] int {
+    if kind == state.failed() || kind == state.delivered() || kind == state.dead() {
+        dv[off_wused() + e] = 1;
+    }
+    return state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, kind, id, attempts, next_at);
+}
+
+// Forget everything about slot `e`'s window and start its cursor at `start` (`state.reset`), reading the cells only if they may hold something.
+fn reset_window[&d](dv: &!d [int], e: int, start: int) -> [] int {
+    if dv[off_wused() + e] != 0 {
+        state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, start);
+        dv[off_wused() + e] = 0;
+    } else {
+        dv[off_cur() + e] = start;
+    }
     return 0;
 }
 
@@ -1891,6 +2037,27 @@ fn ex_filtered() -> [] int {
 // `rotation-grace-ms`: how long a previous secret is kept when a change asks for the default.
 fn ex_grace() -> [] int {
     return 1;
+}
+
+// How many turns of delivery there have been since the start, and how many times an endpoint was looked at in them (`start_attempts`: the others were skipped as quiet,
+// `docs/design.md` section 41.3). `/stats` says both.
+fn ex_turns() -> [] int {
+    return 2;
+}
+
+fn ex_looked() -> [] int {
+    return 3;
+}
+
+// 1 if the last turn stopped because it had passed over `most_skips()` events that endpoints do not subscribe to, with more to pass: the loop's next wait is 0, not
+// up to 50 ms (without it a backlog of events nobody wants drains at `most_skips()` every 50 ms: 82,000 pairs a second, which at 1,024 endpoints is 80 events a second).
+fn ex_again() -> [] int {
+    return 4;
+}
+
+// How many times that wait was left out (`/stats` says so: a backlog being drained is seen, and not only timed).
+fn ex_hurried() -> [] int {
+    return 5;
 }
 
 // The type of the event being accepted, a byte to an integer: room for `filter.max_type()` after the counters.
@@ -2111,6 +2278,13 @@ fn ident_of_slot[&d](dv: &d [int], e: int) -> [] int {
 // Append the record that endpoint `ident` was given slot `e` with its cursor at `start`, or that the slot was freed, to `done`,
 // not yet flushed. Answers 1 if it was appended, 0 if the log refused it.
 fn note_created[&g, &d](done: &!g log.Log, dv: &!d [int], e: int, ident: int, start: int) -> [file_write] int {
+    if e >= state.first_wide() && dv[c_wide()] == 0 {
+        // A slot that a build from before 1,024 endpoints would ignore: the record that makes it refuse the log goes first (`docs/design.md` section 41.5). The caller flushes.
+        if note_outcome(done, dv, state.wide(), 0, 0, 0, 0) == 0 {
+            return 0;
+        }
+        dv[c_wide()] = 1;
+    }
     return note_outcome(done, dv, state.created(), e, ident, start, 0);
 }
 
@@ -2136,7 +2310,8 @@ fn scan_slots[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) 
             going = false;
         } else {
             let o = state.outcome_at(window, 0);
-            if o.0 != 0 && o.1 >= 0 && o.1 < state.max_endpoints() {
+            // The header and the marker are about the log, not about a slot: the header's endpoint field is 62, which is a slot (`state.format_slot()`).
+            if o.0 != 0 && o.0 != state.format() && o.0 != state.wide() && o.1 >= 0 && o.1 < state.max_endpoints() {
                 if o.0 == state.created() {
                     dv[off_slotid() + o.1] = o.2;
                 } else if o.0 == state.removed() {
@@ -2225,7 +2400,7 @@ fn place_new[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
             if slot < 0 || note_created(done, dv, slot, ident, start) == 0 {
                 return 1;
             }
-            state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], slot, start);
+            reset_window(dv, slot, start);
             clear_slot(dv, slot);
             dv[off_flying() + slot] = 0;
             dv[off_slotid() + slot] = ident;
@@ -2348,6 +2523,11 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
             let o = state.outcome_at(window, 0);
             if o.0 == 0 {
                 odd = odd + 1;
+            } else if o.0 == state.format() || o.0 == state.wide() {
+                // about the log and not a slot (`state.format_slot()` is 62, a slot since 1,024 endpoints): nothing to apply
+                if o.0 == state.wide() {
+                    dv[c_wide()] = 1;
+                }
             } else if o.0 >= state.replay() && o.0 <= state.replay_dead() || o.0 == state.replay_cancelled() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && index_of(dv, o.1) >= 0 {
                     recover_replay(dv, o.0, o.1, o.2, o.3, o.4);
@@ -2364,7 +2544,7 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                     if o.0 == state.created() {
                         start = o.3;
                     }
-                    state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], o.1, start);
+                    reset_window(dv, o.1, start);
                     clear_slot(dv, o.1);
                     var r2 = 0;
                     while r2 < rp_cap() {
@@ -2403,7 +2583,7 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, 0);
                 }
                 dead_note(dv, o.0, o.1, o.2, o.3, o.4);
-                state.apply(dv[off_cells()..dv_size()], dv[off_cur()..off_cur() + state.max_endpoints()], o.1, o.0, o.2, o.3, o.4);
+                apply_outcome(dv, o.1, o.0, o.2, o.3, o.4);
             }
             if record.ms_of(window, 0) >= dv[c_seq()] {
                 dv[c_seq()] = record.ms_of(window, 0) + 1;
@@ -2438,7 +2618,7 @@ fn track_health[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e
         if note_endpoint(done, dv, state.paused(), e) == 1 {
             set_disabled(dv, e, true);
             set_paused(dv, e, true);
-            dv[c_tripped()] = dv[c_tripped()] | 1 << e;
+            set_tripped(dv, e);
             dv[c_trips()] = dv[c_trips()] + 1;
         }
     }
@@ -2450,6 +2630,7 @@ fn track_health[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e
 // under the kinds of a replay. Answers 1 if an outcome record was appended.
 fn finish_replay[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock, e: int, id: int, code: int, latency: int) -> [file_write, clock] int {
     dv[c_attempts()] = dv[c_attempts()] + 1;
+    dv[off_wake() + e] = 0;
     if dv[off_flying() + e] > 0 {
         dv[off_flying() + e] = dv[off_flying() + e] - 1;
     }
@@ -2528,6 +2709,7 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
         return finish_replay(done, dv, clock, e, id - replay_base(), code, latency);
     }
     dv[c_attempts()] = dv[c_attempts()] + 1;
+    dv[off_wake() + e] = 0;
     dv[flight_at(e, id)] = 0;
     if dv[off_flying() + e] > 0 {
         dv[off_flying() + e] = dv[off_flying() + e] - 1;
@@ -2552,7 +2734,7 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
         let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, id, tries, next_at);
         if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
             dv[c_seq()] = dv[c_seq()] + 1;
-            state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, kind, id, tries, next_at);
+            apply_outcome(dv, e, kind, id, tries, next_at);
             if kind == state.delivered() {
                 dv[c_delivered()] = dv[c_delivered()] + 1;
             } else if kind == state.dead() {
@@ -2690,6 +2872,14 @@ fn most_skips() -> [] int {
     return 4096;
 }
 
+// The most cells of windows one turn of `start_attempts` walks, in all (the check is made before an endpoint's pass, so a turn walks at most this and one window more: 66,560).
+// An endpoint that fails everything has a window of 1,024 events that are neither final nor due: its pass reads every cell once to learn when to look again (`off_wake`), and
+// 1,024 such endpoints would be a turn of 1,048,576 cells, about 100 ms in which no request is read (measured, section 41.12). A turn that stops for this reason makes the next
+// wait 0 (`ex_again`), and the endpoints it did not reach are the ones whose `off_wake` is still 0. Up to 62 full windows (63,488 cells) a turn is what it was.
+fn most_walk() -> [] int {
+    return 65536;
+}
+
 // Is the event `id`, which `scan_next` has just left in `window`, one that endpoint `e` (table index `i`) does not subscribe to? An endpoint with no
 // subscription wants everything and the record is not looked at; an event the endpoint has a trace of (final, or an attempt made: a restart finding
 // it under a subscription that has changed since) is not passed over. The type is read from the record's `typ` pair: no JSON is parsed.
@@ -2757,51 +2947,90 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
     var budget = state.starts_allowed(held, attempt.slots(), most_starts());
     var written = 0;
     var skips = 0;
+    var walked = 0;
     var turn = dv[c_turn()];
     dv[c_turn()] = turn + 1;
+    dv[off_ex() + ex_turns()] = dv[off_ex() + ex_turns()] + 1;
     lim.begin_turn(lim_of_mut(dv));
     let mono = clock_ms(clock);
+    // What the loop need not look at (`docs/design.md` section 41.3): an endpoint that is disabled, or that has read every event it may (the newest, or the end of
+    // its window) and has nothing whose time comes before `wake` is skipped by comparing two numbers. The newest event and the time are taken once for the turn.
+    let newest = evlog.last_id(lg);
+    let turn_now = clock_unix_ms(clock);
     var step = 0;
-    while step < count && budget > 0 {
+    while step < count && budget > 0 && walked < most_walk() {
         let i = (turn + step) % count;
         let e = dv[off_table() + i * endpoints.stride()];
-        let now = clock_unix_ms(clock);
-        // The endpoint's own limits, or the service's (`lim.ls`): attempts in flight together, and attempts started a second.
-        let cap = lim.conc_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
-        let rate = lim.rate_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
-        var id = dv[off_cur() + e] + 1;
-        var going = true;
-        while going && budget > 0 && skips < most_skips() && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < cap {
-            var loaded = false;
-            if id > dv[scan_id(e)] {
-                if scan_next(lg, window, dv, e, id) == 1 {
-                    loaded = true;
-                } else {
-                    going = false;
-                }
-            }
-            if going {
-                if loaded && unwanted(window, dv, i, e, id) {
-                    // The endpoint's subscription does not want this event (section 35): it is final here at once, with no attempt and no record;
-                    // the cursor moves over it as over a delivered one, and a restart decides it again from the log.
-                    state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, state.delivered(), id, 0, 0);
-                    dv[off_ex() + ex_filtered()] = dv[off_ex() + ex_filtered()] + 1;
-                    skips = skips + 1;
-                } else if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 && state.next_at(dv[off_cells()..off_flight()], e, id) <= now {
-                    if lim.admit(lim_of_mut(dv), e, mono, rate) {
-                        budget = budget - 1;
-                        let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, loaded, token0);
-                        table = grown;
-                        written = written + w;
+        var reach = dv[off_cur() + e] + state.span();
+        if newest < reach {
+            reach = newest;
+        }
+        var quiet = is_disabled(dv, e);
+        if !quiet && dv[scan_id(e)] >= reach && dv[off_wake() + e] > turn_now {
+            quiet = true;
+        }
+        if !quiet {
+            dv[off_ex() + ex_looked()] = dv[off_ex() + ex_looked()] + 1;
+            let now = clock_unix_ms(clock);
+            // The endpoint's own limits, or the service's (`lim.ls`): attempts in flight together, and attempts started a second.
+            let cap = lim.conc_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
+            let rate = lim.rate_of(lim_of(dv), dv[off_xt()..off_xt() + epx.xt_size()], i);
+            var id = dv[off_cur() + e] + 1;
+            var going = true;
+            // The first time a waiting event of the window is due, among those this pass looked at and did not start; `held` if the endpoint's rate limit stopped it.
+            var wake = wake_never();
+            var held = false;
+            let ended_before = dv[c_attempts()];
+            while going && budget > 0 && skips < most_skips() && !is_disabled(dv, e) && state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[off_flying() + e] < cap {
+                var loaded = false;
+                if id > dv[scan_id(e)] {
+                    if scan_next(lg, window, dv, e, id) == 1 {
+                        loaded = true;
                     } else {
-                        // Held back by the endpoint's rate limit: not a failure. The event waits where it is and is looked at again when a token is due.
                         going = false;
                     }
                 }
-                id = id + 1;
+                if going {
+                    if loaded && unwanted(window, dv, i, e, id) {
+                        // The endpoint's subscription does not want this event (section 35): it is final here at once, with no attempt and no record;
+                        // the cursor moves over it as over a delivered one, and a restart decides it again from the log.
+                        apply_outcome(dv, e, state.delivered(), id, 0, 0);
+                        dv[off_ex() + ex_filtered()] = dv[off_ex() + ex_filtered()] + 1;
+                        skips = skips + 1;
+                    } else if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 {
+                        let due = state.next_at(dv[off_cells()..off_flight()], e, id);
+                        if due <= now {
+                            if lim.admit(lim_of_mut(dv), e, mono, rate) {
+                                budget = budget - 1;
+                                let (grown, w) = start_one(heap, lg, done, window, dv, blob, net, clock, poller, at, req, table, i, id, loaded, token0);
+                                table = grown;
+                                written = written + w;
+                            } else {
+                                // Held back by the endpoint's rate limit: not a failure. The event waits where it is and is looked at again when a token is due.
+                                going = false;
+                                held = true;
+                            }
+                        } else if due < wake {
+                            wake = due;
+                        }
+                    }
+                    id = id + 1;
+                    walked = walked + 1;
+                }
+            }
+            // A pass that went through the whole window (it read every event there was to read, or it reached the end of the window) says when to look again. One that
+            // stopped for the turn's budget, the skip budget, the endpoint's concurrency or its rate limit says nothing: the endpoint is looked at on the next turn.
+            // (An attempt of this endpoint that ended during the pass, because the connection could not even begin, set its own next time after the ones looked at: not said.)
+            if !held && dv[c_attempts()] == ended_before && (!going || !state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, id)) && !is_disabled(dv, e) {
+                dv[off_wake() + e] = wake;
+            } else {
+                dv[off_wake() + e] = 0;
             }
         }
         step = step + 1;
+    }
+    if skips >= most_skips() || walked >= most_walk() && step < count {
+        dv[off_ex() + ex_again()] = 1;
     }
     // Then the replays that are due, with what is left of the budget.
     let now = clock_unix_ms(clock);
@@ -3074,7 +3303,7 @@ fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int 
     if status == 13 {
         say(out, "hooks: the endpoints table: row ");
         ops.say_number(out, detail);
-        say(out, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
+        say(out, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 1024 endpoints)\n");
         return 0;
     }
     if status == 20 {
@@ -3157,6 +3386,11 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                 // The longest the wait may be: 50 ms (less while an endpoint waits for a token of its rate limit: `lim.wait_ms`), or less when the pool has something to do sooner (a backoff that ends, a login with a key to
                 // derive, an attempt or a request that runs out of time). The poller wakes the loop for the rest of what the pool waits for.
                 var nap = lim.wait_ms(lim_of(dv));
+                if dv[off_ex() + ex_again()] == 1 {
+                    nap = 0;
+                    dv[off_ex() + ex_again()] = 0;
+                    dv[off_ex() + ex_hurried()] = dv[off_ex() + ex_hurried()] + 1;
+                }
                 if history.enabled(dv[off_hq()..off_hq() + history.size()]) {
                     borrow pl as &qr in {
                         let due = pool.next_wake(qr, clock_ms(clock));
@@ -3508,7 +3742,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 if tag == dbup.load_tag() {
                                     // the answer to the read of the endpoints table (section 37.2)
                                     if pool.status(qw) == 8 {
-                                        // the answer does not fit the pool's input slab (128 KiB): a table far over the 32 KiB of text the service reads
+                                        // the answer does not fit the pool's input slab (1 MiB): a table far over the 540,672 bytes of text the service reads
                                         say_unreadable(io, 20, 6);
                                         code = 20;
                                         running = false;
@@ -3776,7 +4010,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
     }
 }
 
-// Read `<dir>/endpoints.conf` into `out` (32 KiB). Answers the number of bytes, 0 if there is no such file (the service then only
+// Read `<dir>/endpoints.conf` into `out` (`endpoints.text_limit()`, 540,672 bytes). Answers the number of bytes, 0 if there is no such file (the service then only
 // ingests), or -1000 if the file cannot be read or is too large.
 fn read_endpoints_file[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], out: &!o [byte]) -> [fs_read(""), file_read] int {
     region a {
@@ -4044,8 +4278,7 @@ fn say[&i, &t](out: &!i Io, text: &t [byte]) -> [err_write] int {
 fn report_trips[&i, &d](out: &!i Io, dv: &!d [int]) -> [err_write] int {
     var e = 0;
     while e < state.max_endpoints() {
-        if dv[c_tripped()] >> e & 1 == 1 {
-            dv[c_tripped()] = dv[c_tripped()] & ~(1 << e);
+        if take_tripped(dv, e) {
             region a {
                 let nb = alloc_slice[a](24, byte_of(0));
                 say(out, "hooks: endpoint ");
@@ -4165,7 +4398,7 @@ fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
 // Free slot `e` in memory: its window is empty, its cursor 0, nothing disabled or paused, no run of failures, no place in the events log, no replay waiting for it, and no id, so `take_slot` may give it to
 // anyone. The `removed` record that says so is written by the caller, **before** this (a restart reads the record and does the same).
 fn retire_slot[&d](dv: &!d [int], e: int) -> [] int {
-    state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, 0);
+    reset_window(dv, e, 0);
     clear_slot(dv, e);
     var r = 0;
     while r < rp_cap() {
@@ -4183,6 +4416,9 @@ fn retire_slot[&d](dv: &!d [int], e: int) -> [] int {
 // (`docs/design.md` section 25.5: the record is written when the slot can be reused, not when the endpoint was deleted). Answers how many were freed.
 // A slot whose record the log refuses stays draining and is tried again on the next turn.
 fn finish_drains[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+    if dv[c_draining()] == 0 {
+        return 0;
+    }
     var freed = 0;
     var e = 0;
     while e < state.max_endpoints() {
@@ -4450,7 +4686,7 @@ fn finish_create[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         if slot < 0 || note_created(done, dv, slot, ident, start) == 0 || log.flush(done) != 0 {
             return server.failure(heap, out, 503, "the change could not be stored", keep);
         }
-        state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], slot, start);
+        reset_window(dv, slot, start);
         clear_slot(dv, slot);
         // It starts from now: it has looked at everything up to the last event, and the next record is at the end of the log.
         dv[scan_id(slot)] = start;
@@ -4667,8 +4903,6 @@ fn main(world: World) -> [] int {
         // The endpoints (section 24, C3c): with a database named they are its `endpoints` table, read here, before the logs are
         // opened and before the service listens, and a database that cannot be read is a refusal to start (the file is not a
         // fallback: a stale list delivers to the wrong receivers). `--import-endpoints 1` copies the file into the table and exits.
-        let etext = alloc_slice[a](endpoints.text_limit(), byte_of(0));
-        var etext_n = 0;
         var from_db = false;
         var go = bad == 0 && dir_len > 0;
         // The production profile (`docs/design.md` section 33): refuse to start, with a status for each cause, unless the settings are safe on the
@@ -4714,48 +4948,53 @@ fn main(world: World) -> [] int {
                     say(i, "hooks: --import-endpoints needs --pg-host\n");
                 }
             } else {
+                // The text of the file is 540,672 bytes at most: on the heap, not in this region's 64 KiB arena (`docs/design.md` section 41.4).
                 var text_len = 0;
-                borrow fs as &fs0 in {
-                    text_len = read_endpoints_file(fs0, cblob[0..dir_len], etext);
+                var count = 0;
+                var added = 0 - 1;
+                borrow mut heap as &!h0 in {
+                    let eb = box_slice(h0, endpoints.text_limit(), byte_of(0));
+                    borrow mut eb as &!ew in {
+                        borrow fs as &fs0 in {
+                            text_len = read_endpoints_file(fs0, cblob[0..dir_len], contents(ew));
+                        }
+                        if text_len > 0 {
+                            count = parse_check(h0, contents(ew)[0..text_len], config.allow_private_hosts(cfg));
+                        }
+                        if text_len > 0 && count >= 0 {
+                            borrow net as &nn0 in {
+                                borrow fs as &fs0 in {
+                                    added = roster.copy_in(h0, nn0, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], fs0, contents(ew)[0..text_len]);
+                                }
+                            }
+                        }
+                    }
+                    unbox_slice(h0, eb);
                 }
                 if text_len <= 0 {
                     borrow mut io as &!i in {
                         say(i, "hooks: no endpoints.conf to import in --dir\n");
                     }
-                } else {
-                    var count = 0;
-                    borrow mut heap as &!h0 in {
-                        count = parse_check(h0, etext[0..text_len], config.allow_private_hosts(cfg));
+                } else if count < 0 {
+                    borrow mut io as &!i in {
+                        let nb = alloc_slice[a](12, byte_of(0));
+                        say(i, "hooks: endpoints.conf: line ");
+                        say(i, nb[0..digits_of(0 - count, nb)]);
+                        say(i, " is not valid (see --allow-private-hosts for hosts); nothing was imported\n");
                     }
-                    if count < 0 {
-                        borrow mut io as &!i in {
-                            let nb = alloc_slice[a](12, byte_of(0));
-                            say(i, "hooks: endpoints.conf: line ");
-                            say(i, nb[0..digits_of(0 - count, nb)]);
-                            say(i, " is not valid (see --allow-private-hosts for hosts); nothing was imported\n");
-                        }
-                        status = 13;
-                    } else {
-                        var added = 0 - 1;
-                        borrow mut heap as &!h0 in {
-                            borrow net as &nn0 in {
-                                borrow fs as &fs0 in {
-                                    added = roster.copy_in(h0, nn0, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], fs0, etext[0..text_len]);
-                                }
-                            }
-                        }
-                        borrow mut io as &!i in {
-                            let nb = alloc_slice[a](12, byte_of(0));
-                            if added < 0 {
-                                say(i, "hooks: the database refused the import; nothing was imported\n");
-                            } else {
-                                say(i, "hooks: imported ");
-                                say(i, nb[0..digits_of(added, nb)]);
-                                say(i, " of ");
-                                say(i, nb[0..digits_of(count, nb)]);
-                                say(i, " endpoints; one already there is not changed\n");
-                                status = 0;
-                            }
+                    status = 13;
+                } else {
+                    borrow mut io as &!i in {
+                        let nb = alloc_slice[a](12, byte_of(0));
+                        if added < 0 {
+                            say(i, "hooks: the database refused the import; nothing was imported\n");
+                        } else {
+                            say(i, "hooks: imported ");
+                            say(i, nb[0..digits_of(added, nb)]);
+                            say(i, " of ");
+                            say(i, nb[0..digits_of(count, nb)]);
+                            say(i, " endpoints; one already there is not changed\n");
+                            status = 0;
                         }
                     }
                 }
@@ -4769,14 +5008,20 @@ fn main(world: World) -> [] int {
         // `endpoints.conf` is judged here as well, so that a refusal says which line (`prepare` reads it again and answers only 13).
         if go && !from_db && dir_len > 0 {
             var flen = 0;
-            borrow fs as &fs0 in {
-                flen = read_endpoints_file(fs0, cblob[0..dir_len], etext);
+            var count = 0;
+            borrow mut heap as &!h0 in {
+                let eb = box_slice(h0, endpoints.text_limit(), byte_of(0));
+                borrow mut eb as &!ew in {
+                    borrow fs as &fs0 in {
+                        flen = read_endpoints_file(fs0, cblob[0..dir_len], contents(ew));
+                    }
+                    if flen > 0 {
+                        count = parse_check(h0, contents(ew)[0..flen], config.allow_private_hosts(cfg));
+                    }
+                }
+                unbox_slice(h0, eb);
             }
             if flen > 0 {
-                var count = 0;
-                borrow mut heap as &!h0 in {
-                    count = parse_check(h0, etext[0..flen], config.allow_private_hosts(cfg));
-                }
                 if count < 0 {
                     go = false;
                     status = 13;
@@ -4784,7 +5029,7 @@ fn main(world: World) -> [] int {
                         let nb = alloc_slice[a](12, byte_of(0));
                         say(i, "hooks: endpoints.conf: line ");
                         say(i, nb[0..digits_of(0 - count, nb)]);
-                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 62 endpoints)\n");
+                        say(i, " is not valid (an id of seven digits or more, a repeated id, a port, a host that is not a public IPv4 address unless allow-private-hosts is 1, a secret that is not whsec_ and base64, or more than 1024 endpoints)\n");
                     }
                 }
             }
@@ -4873,7 +5118,7 @@ fn main(world: World) -> [] int {
                                                     ops.init(ops_of_mut(contents(dvw)));
                                                     ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
                                                     borrow mut dl as &!dw in {
-                                                        status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), etext[0..etext_n], from_db, config.allow_private_hosts(cfg), now0);
+                                                        status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), cblob[0..0], from_db, config.allow_private_hosts(cfg), now0);
                                                     }
                                                     if status == 0 && config.production(cfg) {
                                                         // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).
@@ -4914,13 +5159,32 @@ fn main(world: World) -> [] int {
                                                     if status != 0 {
                                                         log.close(dl);
                                                     } else if config.compact_now(cfg) {
+                                                        // With a database the endpoints are read from it first, as the service reads them and for as long as `pg-start-wait-ms` allows
+                                                        // (`compact_read_table`, section 41.8): what is final everywhere is what the cursors of the table's endpoints say.
+                                                        var table_status = 0;
                                                         if config.pg_host_len(cfg) > 0 {
-                                                            // The endpoints of a database are not read in this mode (`compact_once` refuses).
                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);
+                                                            history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
+                                                            let fresh = pool.empty(h, 2, 64, 1048576, 131072);
+                                                            let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
+                                                            borrow mut dl as &!dw1 in {
+                                                                borrow net as &nn1 in {
+                                                                    borrow clock as &ck1 in {
+                                                                        borrow mut io as &!iw1 in {
+                                                                            table_status = compact_read_table(h, lw, dw1, buffer.room(wb), contents(dvw), contents(bw), nn1, ck1, iw1, made, cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
-                                                        rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
-                                                        borrow mut io as &!iw0 in {
-                                                            status = compact_once(h, lw, dl, contents(dvw), contents(ixw), contents(arw), buffer.room(wb), now0, iw0);
+                                                        if table_status != 0 {
+                                                            status = table_status;
+                                                            log.close(dl);
+                                                        } else {
+                                                            rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
+                                                            borrow mut io as &!iw0 in {
+                                                                status = compact_once(h, lw, dl, contents(dvw), contents(ixw), contents(arw), buffer.room(wb), now0, iw0);
+                                                            }
                                                         }
                                                     } else {
                                                         rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
@@ -4952,7 +5216,7 @@ fn main(world: World) -> [] int {
                                                                         history.set_timing(contents(dvw)[off_hq()..off_hq() + history.size()], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg), config.pg_start_wait_ms(cfg));
                                                                         if config.pg_host_len(cfg) > 0 {
                                                                             pool.close(h, hpool);
-                                                                            let fresh = pool.empty(h, 2, 64, 131072, 131072);
+                                                                            let fresh = pool.empty(h, 2, 64, 1048576, 131072);
                                                                             let (made, rc) = history.configure(h, evlog.lend(lw), fresh, cblob[config.pg_user_at()..config.pg_user_at() + config.pg_user_len(cfg)], cblob[config.pg_password_at()..config.pg_password_at() + config.pg_password_len(cfg)], cblob[config.pg_database_at()..config.pg_database_at() + config.pg_database_len(cfg)], config.pg_backoff_min_ms(cfg), config.pg_backoff_max_ms(cfg), config.pg_attempt_ms(cfg), config.pg_request_ms(cfg));
                                                                             hpool = made;
                                                                             history.enable(contents(dvw)[off_hq()..off_hq() + history.size()]);

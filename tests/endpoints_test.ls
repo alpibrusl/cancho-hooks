@@ -10,7 +10,7 @@ import epx;
 
 fn test_a_file_gives_its_endpoints() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         // whsec_ + base64("0123456789abcdef") and base64("secret!!")
         let text = "# endpoints\n\n3 127.0.0.1 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n  7\tlocalhost  9002 c2VjcmV0ISE=  \r\n";
@@ -36,7 +36,7 @@ fn test_a_file_gives_its_endpoints() -> [] int {
 
 fn refused[&t](text: &t [byte]) -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         return endpoints.parse(text, table, blob, true);
     }
@@ -65,7 +65,7 @@ fn test_a_bad_line_is_refused_with_its_number() -> [] int {
 
 fn test_the_id_is_kept_beside_the_slot_and_the_slot_can_change() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         test.assert_eq(endpoints.parse("20 h 80 c2VjcmV0ISE=\n999999 g 81 c2VjcmV0ISE=\n", table, blob, true), 2);
         // `parse` cannot know the slot: it writes the id there, for the caller to replace.
@@ -79,29 +79,46 @@ fn test_the_id_is_kept_beside_the_slot_and_the_slot_can_change() -> [] int {
     return 0;
 }
 
-fn test_at_most_max_endpoints_are_accepted() -> [] int {
-    region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
-        let blob = alloc_slice[a](endpoints.text_limit(), byte_of(0));
-        let text = alloc_slice[a](2048, byte_of(0));
-        // 62 lines "<n> h 80 c2VjcmV0ISE=": the 62nd is the last that is accepted, a 63rd is refused with its own number.
-        var at = 0;
-        var n = 0;
-        while n < 63 {
-            text[at] = byte_of('0' + n / 10);
-            text[at + 1] = byte_of('0' + n % 10);
+// 1,024 lines "<n> h 80 c2VjcmV0ISE=" with n of four digits: the 1,024th is the last that is accepted, a 1,025th is refused with its own number (section 41).
+// The table and the text are on the heap: they are bigger than the arena of a region (64 KiB).
+fn test_at_most_max_endpoints_are_accepted[&h](heap: &!h Heap) -> [heap] int {
+    let most = state.max_endpoints();
+    test.assert_eq(most, 1024);
+    let tb = box_slice(heap, endpoints.table_size(), 0);
+    let bb = box_slice(heap, endpoints.text_limit(), byte_of(0));
+    let xb = box_slice(heap, 8, byte_of(0));
+    let text = box_slice(heap, (most + 1) * 23, byte_of(0));
+    var at = 0;
+    var n = 0;
+    borrow mut text as &!xw in {
+        let t = contents(xw);
+        while n < most + 1 {
+            t[at] = byte_of('0' + n / 1000);
+            t[at + 1] = byte_of('0' + n / 100 % 10);
+            t[at + 2] = byte_of('0' + n / 10 % 10);
+            t[at + 3] = byte_of('0' + n % 10);
             let tail = " h 80 c2VjcmV0ISE=\n";
             var k = 0;
             while k < len(tail) {
-                text[at + 2 + k] = tail[k];
+                t[at + 4 + k] = tail[k];
                 k = k + 1;
             }
-            at = at + 2 + len(tail);
+            at = at + 4 + len(tail);
             n = n + 1;
         }
-        test.assert_eq(endpoints.parse(text[0..at - 21], table, blob, true), 62);
-        test.assert_eq(endpoints.parse(text[0..at], table, blob, true), 0 - 63);
     }
+    borrow mut tb as &!tw in {
+        borrow mut bb as &!bw in {
+            borrow text as &xr in {
+                test.assert_eq(endpoints.parse(contents(xr)[0..at - 23], contents(tw), contents(bw), true), 1024);
+                test.assert_eq(endpoints.parse(contents(xr)[0..at], contents(tw), contents(bw), true), 0 - 1025);
+            }
+        }
+    }
+    unbox_slice(heap, tb);
+    unbox_slice(heap, bb);
+    unbox_slice(heap, xb);
+    unbox_slice(heap, text);
     return 0;
 }
 
@@ -110,7 +127,7 @@ fn test_at_most_max_endpoints_are_accepted() -> [] int {
 
 fn test_replace_changes_one_endpoint_and_leaves_the_others() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let scratch = alloc_slice[a](512, byte_of(0));
         let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
@@ -135,7 +152,7 @@ fn test_replace_changes_one_endpoint_and_leaves_the_others() -> [] int {
 
 fn test_compact_moves_everything_to_the_front_unchanged() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let scratch = alloc_slice[a](512, byte_of(0));
         let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n";
@@ -161,7 +178,7 @@ fn test_compact_moves_everything_to_the_front_unchanged() -> [] int {
 
 fn test_replace_compacts_when_the_blob_is_full_and_refuses_when_it_cannot() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](40, byte_of(0));
         let scratch = alloc_slice[a](40, byte_of(0));
         // 7 + 8 (host and key of 1) and 7 + 8 (of 2) = 30 of 40 bytes
@@ -186,7 +203,7 @@ fn test_replace_compacts_when_the_blob_is_full_and_refuses_when_it_cannot() -> [
 
 fn test_remove_shifts_the_later_entries_and_keeps_every_other_one_unchanged() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let text = "1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n3 2.2.2.2 9003 c2VjcmV0ISE=\n4 3.3.3.3 9004 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n";
         test.assert_eq(endpoints.parse(text, table, blob, true), 4);
@@ -231,7 +248,7 @@ fn test_remove_shifts_the_later_entries_and_keeps_every_other_one_unchanged() ->
 
 fn test_remove_zeroes_the_removed_endpoints_host_and_key() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         test.assert_eq(endpoints.parse("1 8.8.8.8 9001 whsec_MDEyMzQ1Njc4OWFiY2RlZg==\n2 1.1.1.1 9002 c2VjcmV0ISE=\n", table, blob, true), 2);
         let host_at = table[2];
@@ -258,7 +275,7 @@ fn test_remove_zeroes_the_removed_endpoints_host_and_key() -> [] int {
 
 fn test_remove_refuses_an_index_that_is_not_there_and_changes_nothing() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         test.assert_eq(endpoints.parse("1 8.8.8.8 9001 c2VjcmV0ISE=\n2 1.1.1.1 9002 c2VjcmV0ISE=\n", table, blob, true), 2);
         test.assert_eq(endpoints.remove(table, blob, 2, 2), 0 - 1);
@@ -274,7 +291,7 @@ fn test_remove_refuses_an_index_that_is_not_there_and_changes_nothing() -> [] in
 
 fn test_after_remove_the_freed_room_is_used_by_append_and_the_survivors_are_intact() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](40, byte_of(0));
         let scratch = alloc_slice[a](40, byte_of(0));
         // two entries of 7 + 8 bytes: 30 of 40
@@ -303,7 +320,7 @@ fn test_after_remove_the_freed_room_is_used_by_append_and_the_survivors_are_inta
 
 fn test_the_optional_words_are_kept_beside_the_endpoint() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let xt = alloc_slice[a](2 * epx.stride(), 0);
         // the previous secret is base64("secret!!"); words in any order
@@ -376,7 +393,7 @@ fn test_a_bad_optional_word_refuses_the_line() -> [] int {
 
 fn test_the_limits_are_kept_beside_the_endpoint_in_either_order() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let xt = alloc_slice[a](2 * epx.stride(), 0);
         let text = "1 8.8.8.8 9001 c2VjcmV0ISE= concurrency=2 rate=9\n2 1.1.1.1 9002 c2VjcmV0ISE= types=a rate=3 concurrency=5\n";
@@ -392,7 +409,7 @@ fn test_the_limits_are_kept_beside_the_endpoint_in_either_order() -> [] int {
 
 fn test_a_line_without_limits_follows_the_service() -> [] int {
     region a {
-        let table = alloc_slice[a](endpoints.table_size(), 0);
+        let table = alloc_slice[a](32 * endpoints.stride(), 0);
         let blob = alloc_slice[a](512, byte_of(0));
         let xt = alloc_slice[a](2 * epx.stride(), 0);
         epx.set_conc(xt, 0, 4);
