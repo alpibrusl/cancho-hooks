@@ -4,7 +4,7 @@ The `/metrics` series, readiness and health, stopping the service, building it a
 
 ## Metrics
 
-`GET /metrics` answers in the Prometheus text format (counters are since this start; a restart is a reset, which `rate` and `increase` expect). About 70 series for the service and 9 for each endpoint (a tenth, its last failure, once it has failed), labelled by the endpoint's `id` and by nothing else that grows (62 endpoints at most):
+`GET /metrics` answers in the Prometheus text format (counters are since this start; a restart is a reset, which `rate` and `increase` expect). About 70 series for the service and 9 for each endpoint (a tenth, its last failure, once it has failed), labelled by the endpoint's `id` and by nothing else that grows, in pages of 64 endpoints (below):
 
 | | |
 |---|---|
@@ -18,6 +18,8 @@ The `/metrics` series, readiness and health, stopping the service, building it a
 | `hooks_cron_fires_total`, `_errors_total`, `_skipped_total`; `hooks_events_last_id`, `hooks_idempotency_keys`, `hooks_endpoints`, `hooks_uptime_seconds`, `hooks_ready`, `hooks_stopping` | the schedules, and the rest |
 
 `GET /metrics` is a **read**-scope route: when a `read-token` is configured (or, in production, the admin token), a scraper sends it as `Authorization: Bearer <token>`; without one the route is open, like the other reads ([security.md](security.md)). `GET /readyz` and `GET /healthz` are always open. What to alert on is in [`runbook.md`](runbook.md) section 1.
+
+**Pages.** The server's queue for one answer is 64 KiB, so with more than 64 endpoints `GET /metrics` is read in pages: `?page=0` (the default) has the service's own series and the per-endpoint series of the first 64 endpoints of the table, `?page=k` the endpoints 64k to 64k + 63 and nothing of the service's (so scraping every page counts nothing twice), a page past the last is a `404`, and `hooks_metrics_pages` says how many there are. A Prometheus scrapes one job for each page (`params: {page: ["1"]}`); with 64 endpoints or fewer there is one page and nothing changes. The longest page (64 endpoints, seven-digit values) is under 56 KB.
 
 ## Stopping
 
