@@ -2183,14 +2183,6 @@ The events log, the snapshot's shape and the outcomes header are unchanged. A lo
 | snapshots | the scenario with a `delivery-log-bytes` small enough that the outcomes log is replaced during it: the same |
 | an older build | refuses a log with kind 19 with status 15, and reads it again after `--compact-now` |
 | the cost | records of kind 19 written in the scenario: at most one per window of progress (1,500 wanted of 3,000 events: a handful), none for an endpoint without a list |
-## 46. Small pages for the process (transparent huge pages)
-
-**What CI showed.** `tests/leak_test.py` passed on a 16-core host (a fire kept 68 bytes) and failed on CI's runners (17 to 70 KB a fire, 3.5 KB a keyed event), and the growth, by `/proc/pid/smaps`, was all in one anonymous mapping of about 280 MiB, **in whole multiples of 2 MiB** (+2,044, +2,052, +8,168 KiB). That mapping is the delivery state: one zero-filled block resident only where it is written (41.2). The host runs transparent huge pages in `madvise` mode; the runners in `always`, in which the first write to a stretch of an anonymous mapping makes 2 MiB resident instead of 4 KiB. So the service's memory followed how many 2 MiB stretches of the block had been written once, up to all of it: the figures of 41.12 (an idle endpoint 0.15 KB, 1,024 idle endpoints 9.3 MB) hold only with small pages, and a host with `always` (the default of some distributions) could have held the whole block resident.
-
-**The cure.** At the start, before the large blocks are made, the service calls `prctl(PR_SET_THP_DISABLE, 1)` (`src/thp.ls`): small pages for this process, whatever the host's setting (`/proc/<pid>/status` says `THP_enabled: 0`). A kernel that refuses it leaves the host's setting, and the service goes on. It is a second function of libc in the authority report (`libc:prctl`, pinned in `docs/authority.json`), next to `statx`; lex-sys has no capability for it.
-
-**Not measured yet:** the resident sizes of 41.12 on a host with `always`, after the cure (CI's run of `leak_test` says whether the 2 MiB steps are gone).
-
 ## 43. The history is pruned (`history-days`)
 
 **The gap.** Every attempt that ends is a row of `attempts` (section 24), and nothing deleted one: a service that delivers a million attempts a day adds a million rows a day for ever (`docs/status.md` said so). The events themselves have been bounded since retention (38); their history had no bound.
@@ -2216,3 +2208,11 @@ An event that retention dropped answered `404` with a message that said retentio
 **Not built.** IPv6 (an AAAA answer); more than one address (the first is used); the answer's TTL (the address is kept until a connection is lost); `--compact-now` with a name still resolves through the pool (it holds no loop).
 
 **Tests.** `tests/dbname_test.py`, with a name server of the test's own: the endpoints read and an event's row written through `db.test`, one lookup, no failure; a name server that takes 2 s: `/healthz` at most 11 ms meanwhile, then the database is there; a name it does not know: `/readyz` 503 naming the database, three lookups failed in 3 s and one more in the 3 s after (the wait grows), and when the name is added the service connects with no restart; the backends ended under the service: the name is looked up again and the database is back.
+
+## 46. Small pages for the process (transparent huge pages)
+
+**What CI showed.** `tests/leak_test.py` passed on a 16-core host (a fire kept 68 bytes) and failed on CI's runners (17 to 70 KB a fire, 3.5 KB a keyed event), and the growth, by `/proc/pid/smaps`, was all in one anonymous mapping of about 280 MiB, **in whole multiples of 2 MiB** (+2,044, +2,052, +8,168 KiB). That mapping is the delivery state: one zero-filled block resident only where it is written (41.2). The host runs transparent huge pages in `madvise` mode; the runners in `always`, in which the first write to a stretch of an anonymous mapping makes 2 MiB resident instead of 4 KiB. So the service's memory followed how many 2 MiB stretches of the block had been written once, up to all of it: the figures of 41.12 (an idle endpoint 0.15 KB, 1,024 idle endpoints 9.3 MB) hold only with small pages, and a host with `always` (the default of some distributions) could have held the whole block resident.
+
+**The cure.** At the start, before the large blocks are made, the service calls `prctl(PR_SET_THP_DISABLE, 1)` (`src/thp.ls`): small pages for this process, whatever the host's setting (`/proc/<pid>/status` says `THP_enabled: 0`). A kernel that refuses it leaves the host's setting, and the service goes on. It is a second function of libc in the authority report (`libc:prctl`, pinned in `docs/authority.json`), next to `statx`; lex-sys has no capability for it.
+
+**Not measured yet:** the resident sizes of 41.12 on a host with `always`, after the cure (CI's run of `leak_test` says whether the 2 MiB steps are gone).
