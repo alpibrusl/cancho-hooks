@@ -1,6 +1,7 @@
 {
   "bounded": false,
   "unbounded_by": [
+    "libc:prctl",
     "libc:statx",
     "libcrypto:BIO_new",
     "libcrypto:BIO_read",
@@ -184,6 +185,7 @@
     "TLS_client_method",
     "X509_VERIFY_PARAM_set1_host",
     "X509_VERIFY_PARAM_set_hostflags",
+    "prctl",
     "statx"
   ]
 }

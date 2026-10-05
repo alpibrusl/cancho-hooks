@@ -2144,3 +2144,11 @@ The README and the page are the coordinator's; this change edits only the pages 
 | `docs/index.html` line 605 | "at most 62 endpoints" | "at most 1,024 endpoints" and the three memory figures |
 | `docs/index.html`, the evidence table | (no row) | a row for `tests/many_test.py` (nine stages, a tenth against the build before; 41.10) |
 | `docs/index.html`, "What it costs" | (no row) | a row for 1,024 endpoints with the figures of 41.12 |
+
+## 46. Small pages for the process (transparent huge pages)
+
+**What CI showed.** `tests/leak_test.py` passed on a 16-core host (a fire kept 68 bytes) and failed on CI's runners (17 to 70 KB a fire, 3.5 KB a keyed event), and the growth, by `/proc/pid/smaps`, was all in one anonymous mapping of about 280 MiB, **in whole multiples of 2 MiB** (+2,044, +2,052, +8,168 KiB). That mapping is the delivery state: one zero-filled block resident only where it is written (41.2). The host runs transparent huge pages in `madvise` mode; the runners in `always`, in which the first write to a stretch of an anonymous mapping makes 2 MiB resident instead of 4 KiB. So the service's memory followed how many 2 MiB stretches of the block had been written once, up to all of it: the figures of 41.12 (an idle endpoint 0.15 KB, 1,024 idle endpoints 9.3 MB) hold only with small pages, and a host with `always` (the default of some distributions) could have held the whole block resident.
+
+**The cure.** At the start, before the large blocks are made, the service calls `prctl(PR_SET_THP_DISABLE, 1)` (`src/thp.ls`): small pages for this process, whatever the host's setting (`/proc/<pid>/status` says `THP_enabled: 0`). A kernel that refuses it leaves the host's setting, and the service goes on. It is a second function of libc in the authority report (`libc:prctl`, pinned in `docs/authority.json`), next to `statx`; lex-sys has no capability for it.
+
+**Not measured yet:** the resident sizes of 41.12 on a host with `always`, after the cure (CI's run of `leak_test` says whether the 2 MiB steps are gone).

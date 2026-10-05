@@ -40,6 +40,7 @@ import pg;
 import roster;
 import record;
 import attempt;
+import thp;
 import crc;
 import idem;
 import std.conns;
@@ -4850,11 +4851,15 @@ fn start_tls[&f, &c](libssl: &f Ffi("libssl"), cafile: &c [byte]) -> [ffi("libss
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    // The only foreign authority the service holds, by library: libc (one function, `statx`, for the modes of the data directory, `src/perm.ls`; the
-    // production profile only), libssl and libcrypto (the TLS client of an `https` endpoint, `src/tls.ls`). `scripts/check-authority.sh` pins the exact
+    // The only foreign authority the service holds, by library: libc (two functions: `statx`, for the modes of the data directory, `src/perm.ls`, the
+    // production profile only; `prctl`, once, to ask for small pages, `src/thp.ls`), libssl and libcrypto (the TLS client of an `https` endpoint, `src/tls.ls`). `scripts/check-authority.sh` pins the exact
     // list of symbols. How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
     let libc = narrow(ffi, "libc,libcrypto,libssl");
     let stop = narrow(signals, "INT,TERM");
+    // Small pages for the whole process, before the large zero-filled blocks are made (`src/thp.ls`, `docs/design.md` section 46).
+    borrow libc as &lt in {
+        thp.small_pages(lt);
+    }
     var fs = fs;
     var port = 0 - 1;
     var status = 2;
