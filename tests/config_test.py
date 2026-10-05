@@ -38,7 +38,7 @@ def settings(**kw):
     base = {"schedule": [5000, 300000, 1800000, 7200000, 18000000, 36000000, 50400000, 72000000, 86400000],
             "deadline-ms": 2000, "window-ms": 86400000, "allow-private-hosts": 0, "breaker-days": 5, "production": 0, "cron-catchup": 1, "cron-seconds": 0,
             "stop-deadline-ms": 5000, "repair-logs": 0, "rotation-grace-ms": 86400000,
-            "retention-days": 30, "segment-bytes": 67108864, "delivery-log-bytes": 33554432, "idem-keys": 262144,
+            "retention-days": 30, "history-days": 30, "segment-bytes": 67108864, "delivery-log-bytes": 33554432, "idem-keys": 262144,
             "pg-backoff-min-ms": 100, "pg-backoff-max-ms": 5000, "pg-attempt-ms": 5000, "pg-request-ms": 10000, "pg-start-wait-ms": 30000,
             "retry-jitter": 10, "endpoint-concurrency": 8, "endpoint-rate": 0}
     base.update(kw)
