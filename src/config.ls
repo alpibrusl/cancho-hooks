@@ -63,7 +63,7 @@ import destination;
 //     cfg[28] retry-jitter (0 to 50; 10 until set)   cfg[29] endpoint-concurrency (1 to 8; 8 until set)   cfg[30] endpoint-rate (0 to 100000)
 //     cfg[31] dns-server address (packed, 0 until set)   cfg[32] its port (53 until set)   cfg[33] tls-ca-file length   cfg[34] tls-resume (0 or 1; 1 until set)
 //     cfg[35] history-days (0 to 36500; 30 until set)   cfg[36] audit-log (0 or 1; 1 until set)   cfg[37] audit-log-bytes (65536 to 2^40; 67108864)
-//     cfg[38] audit-log-files (1 to 100; 8)
+//     cfg[38] audit-log-files (1 to 100; 8)   cfg[39] max-age-days (0 to 36500; 0)   cfg[47] max-age-ms (the tests' knob; 0)
 //     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
@@ -224,6 +224,14 @@ pub fn rotation_grace_ms[&c](cfg: &c [int]) -> [] int {
 }
 
 // Retention (`docs/retention.md` section 3).
+pub fn max_age_days[&c](cfg: &c [int]) -> [] int {
+    return cfg[39];
+}
+
+pub fn max_age_ms_knob[&c](cfg: &c [int]) -> [] int {
+    return cfg[47];
+}
+
 pub fn audit_log[&c](cfg: &c [int]) -> [] bool {
     return cfg[36] == 1;
 }
@@ -715,6 +723,20 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             cfg[34] = 0;
         } else {
             why = why_value();
+        }
+    } else if bytes.equal(key, "max-age-days") {
+        let n = number(value);
+        if n < 0 || n > 36500 {
+            why = why_value();
+        } else {
+            cfg[39] = n;
+        }
+    } else if bytes.equal(key, "max-age-ms") {
+        let n = number(value);
+        if n < 0 {
+            why = why_value();
+        } else {
+            cfg[47] = n;
         }
     } else if bytes.equal(key, "audit-log") {
         if bytes.equal(value, "1") {

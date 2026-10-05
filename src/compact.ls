@@ -79,7 +79,30 @@ fn r_dropped_id() -> [] int {
     return 15;
 }
 
-fn rt_init[&d](dv: &!d [int], days: int, ms_knob: int, window_ms: int, delivery_limit: int) -> [] int {
+// The hard maximum age (`max-age-days`, `docs/design.md` section 47.2) in ms (0: none), and as set in days; the events it has expired (not final somewhere when
+// their segment went), and the segments it dropped that retention would have kept.
+fn r_max_age_ms() -> [] int {
+    return 16;
+}
+
+fn r_max_age_days() -> [] int {
+    return 17;
+}
+
+fn r_expired() -> [] int {
+    return 18;
+}
+
+fn r_expired_segments() -> [] int {
+    return 19;
+}
+
+fn rt_init[&d](dv: &!d [int], days: int, ms_knob: int, window_ms: int, delivery_limit: int, max_age_days: int, max_age_knob: int) -> [] int {
+    dv[rt_at() + r_max_age_days()] = max_age_days;
+    dv[rt_at() + r_max_age_ms()] = max_age_days * state.day_ms();
+    if max_age_knob > 0 {
+        dv[rt_at() + r_max_age_ms()] = max_age_knob;
+    }
     var retention = days * state.day_ms();
     if ms_knob > 0 {
         retention = ms_knob;
@@ -436,9 +459,12 @@ fn rt_maintain[&h, &l, &v, &i, &a, &s, &k, &w](heap: &!h Heap, lg: &!l evlog.Ev,
     // empty it would replace the outcomes log by nothing.
     let known = history.endpoints_known(dv[off_hq()..off_hq() + history.size()]);
     var action = 0;
-    if known && retain.may_drop(retention, oldest.0, oldest.1, floor, now, age) && sched.tick_state(sg) == 0 {
+    let max_age = dv[rt_at() + r_max_age_ms()];
+    // Past the hard maximum age the oldest segment goes whatever pins it (section 47.2): what is not final in it is expired first.
+    let expiring = known && oldest.0 > floor && retain.expired(max_age, oldest.0, oldest.1, now);
+    if known && (retain.may_drop(retention, oldest.0, oldest.1, floor, now, age) || expiring) && sched.tick_state(sg) == 0 {
         action = 2;
-    } else if retain.should_roll(evlog.active_bytes(lg), evlog.limit(lg), retention, evlog.active_created(lg), now, age) {
+    } else if retain.should_roll(evlog.active_bytes(lg), evlog.limit(lg), retention, evlog.active_created(lg), now, age) || retain.roll_for_age(evlog.active_bytes(lg), max_age, evlog.active_created(lg), now) {
         action = 1;
     } else if known {
         var sz = 0;
@@ -482,9 +508,15 @@ fn rt_maintain[&h, &l, &v, &i, &a, &s, &k, &w](heap: &!h Heap, lg: &!l evlog.Ev,
                 }
                 store.Locked::Got(f) => {
                     if action == 2 {
-                        // The cursors this decision rests on are made durable first.
+                        // The cursors this decision rests on are made durable first; past the maximum age, the records that move the cursors over the segment
+                        // and end the replays of its events go with them.
                         borrow mut d as &!dw in {
-                            rc = log.flush(dw);
+                            if expiring {
+                                rc = expire_through(dw, dv, oldest.0);
+                            }
+                            if rc == 0 {
+                                rc = log.flush(dw);
+                            }
                         }
                         let events = evlog.oldest_events(lg);
                         if rc == 0 {

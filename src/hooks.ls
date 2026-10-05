@@ -696,7 +696,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         if empty && want < evlog.first_id(lg) {
             // A tombstone (`docs/design.md` section 44): the ids are dense and never given twice, so an id below the oldest event the log keeps was an event,
             // and retention dropped it. Gone for good, which is what 410 says; an id that was never given is a 404.
-            answer = server.failure(heap, answer, 410, "the event was dropped by retention (it was final at every endpoint and older than retention-days)", keep);
+            answer = server.failure(heap, answer, 410, "the event was dropped by retention (it was final at every endpoint and older than retention-days, or older than max-age-days)", keep);
         } else if empty {
             answer = server.failure(heap, answer, 404, "no such event", keep);
         } else {
@@ -741,6 +741,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "events_expired");
+        w = json.put_int(heap, w, stats[rt_at() + r_expired()]);
+        w = json.put_key(heap, w, "segments_expired");
+        w = json.put_int(heap, w, stats[rt_at() + r_expired_segments()]);
         w = json.put_key(heap, w, "audit_lines");
         w = json.put_int(heap, w, audit.written(stats[off_aud()..off_aud() + audit.size()]));
         w = json.put_key(heap, w, "audit_failures");
@@ -849,6 +853,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, stats[off_ex() + ex_grace()]);
         w = json.put_key(heap, w, "retention-days");
         w = json.put_int(heap, w, stats[rt_at() + r_retention_days()]);
+        w = json.put_key(heap, w, "max-age-days");
+        w = json.put_int(heap, w, stats[rt_at() + r_max_age_days()]);
         w = json.put_key(heap, w, "history-days");
         w = json.put_int(heap, w, history.prune_days(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "segment-bytes");
@@ -1896,7 +1902,11 @@ fn before_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, i
 // Append `advanced(e, cursor)` (`docs/design.md` section 42), not yet flushed: from now on the log states the slot's cursor, and nothing has been passed over
 // since. Answers 1 if it was appended, 0 if the log refused it.
 fn note_advanced[&g, &d](done: &!g log.Log, dv: &!d [int], e: int) -> [file_write] int {
-    let c = dv[off_cur() + e];
+    return note_advanced_to(done, dv, e, dv[off_cur() + e]);
+}
+
+// `advanced(e, c)` for a cursor `c` the slot is about to have (`expire_through`), not yet flushed.
+fn note_advanced_to[&g, &d](done: &!g log.Log, dv: &!d [int], e: int, c: int) -> [file_write] int {
     var ok = 0;
     region a {
         let rec = alloc_slice[a](128, byte_of(0));
@@ -2067,6 +2077,46 @@ fn reset_window[&d](dv: &!d [int], e: int, start: int) -> [] int {
     }
     dv[off_adv() + e] = start;
     dv[off_lag() + e] = 0;
+    return 0;
+}
+
+// The hard maximum age (`docs/design.md` section 47.2): the oldest segment, whose last event is `last`, is about to go though something still needs it. Every
+// slot whose cursor is below `last` is moved to it, with an `advanced` record (what was not final is counted as expired); a waiting replay of an event up
+// to `last` is ended (`replay_cancelled`; one already on the wire finishes). Not flushed: the drop's own flush takes the records before the segment goes.
+// Answers 0, or -1 if the log refused a record.
+fn expire_through[&g, &d](done: &!g log.Log, dv: &!d [int], last: int) -> [file_write] int {
+    var e = 0;
+    while e < state.max_endpoints() {
+        let c = dv[off_cur() + e];
+        if dv[off_slotid() + e] >= 0 && c < last {
+            var finals = 0;
+            var id = c + 1;
+            while id <= last && id <= c + state.span() {
+                if state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) {
+                    finals = finals + 1;
+                }
+                id = id + 1;
+            }
+            if note_advanced_to(done, dv, e, last) == 0 {
+                return 0 - 1;
+            }
+            advance_window(dv, e, last);
+            dv[rt_at() + r_expired()] = dv[rt_at() + r_expired()] + last - c - finals;
+        }
+        e = e + 1;
+    }
+    var r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 6] == 0 && dv[b + 2] <= last {
+            if note_outcome(done, dv, state.replay_cancelled(), dv[b + 1], dv[b + 2], 0, 0) == 0 {
+                return 0 - 1;
+            }
+            dv[b] = 0;
+        }
+        r = r + 1;
+    }
+    dv[rt_at() + r_expired_segments()] = dv[rt_at() + r_expired_segments()] + 1;
     return 0;
 }
 
@@ -5515,13 +5565,13 @@ fn main(world: World) -> [] int {
                                                             status = table_status;
                                                             log.close(dl);
                                                         } else {
-                                                            rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
+                                                            rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg), config.max_age_days(cfg), config.max_age_ms_knob(cfg));
                                                             borrow mut io as &!iw0 in {
                                                                 status = compact_once(h, lw, dl, contents(dvw), contents(ixw), contents(arw), buffer.room(wb), now0, iw0);
                                                             }
                                                         }
                                                     } else {
-                                                        rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg));
+                                                        rt_init(contents(dvw), config.retention_days(cfg), config.retention_ms_knob(cfg), window_ms, config.delivery_log_bytes(cfg), config.max_age_days(cfg), config.max_age_ms_knob(cfg));
                                                         borrow net as &nn in {
                                                             match tcp_listen(nn, port, 1024, 0) {
                                                                 Listening::Ok(l) => {
