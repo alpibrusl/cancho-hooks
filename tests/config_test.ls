@@ -571,6 +571,12 @@ fn test_retention_settings_defaults_and_edges() -> [] int {
         test.assert_eq(config.retention_days(cfg), 0);
         test.assert_eq(config.set(cfg, blob, "retention-days", "36500"), 0);
         test.assert_eq(config.retention_days(cfg), 36500);
+        // the history's days: 30 by default, 0 keeps every row, 36,500 the most
+        test.assert_eq(config.history_days(cfg), 30);
+        test.assert_eq(config.set(cfg, blob, "history-days", "0"), 0);
+        test.assert_eq(config.history_days(cfg), 0);
+        test.assert(config.set(cfg, blob, "history-days", "36501") != 0);
+        test.assert_eq(config.history_days(cfg), 0);
         test.assert(config.set(cfg, blob, "retention-days", "36501") != 0);
         test.assert(config.set(cfg, blob, "retention-days", "a month") != 0);
         test.assert_eq(config.retention_days(cfg), 36500);
@@ -708,7 +714,7 @@ fn test_retry_jitter_and_the_limits_default_and_limits() -> [] int {
     return 0;
 }
 
-// No two settings share an index of the table (cfg[23..27] are the database's, cfg[28..30] the pace's, cfg[31..34] the names' and TLS's, cfg[40..46] retention's): every numeric setting is given a value
+// No two settings share an index of the table (cfg[23..27] are the database's, cfg[28..30] the pace's, cfg[31..34] the names' and TLS's, cfg[35] the history's, cfg[40..46] retention's): every numeric setting is given a value
 // of its own and each is read back, so one that landed on another's index would have overwritten it or been overwritten.
 fn test_no_two_settings_share_an_index() -> [] int {
     region a {
@@ -737,6 +743,7 @@ fn test_no_two_settings_share_an_index() -> [] int {
         test.assert_eq(config.set(cfg, blob, "dns-server", "10.1.2.3:5354"), 0);
         test.assert_eq(config.set(cfg, blob, "tls-ca-file", "/x/ca.pem"), 0);
         test.assert_eq(config.set(cfg, blob, "tls-resume", "0"), 0);
+        test.assert_eq(config.set(cfg, blob, "history-days", "45"), 0);
         test.assert_eq(config.retry_jitter(cfg), 11);
         test.assert_eq(config.endpoint_concurrency(cfg), 3);
         test.assert_eq(config.endpoint_rate(cfg), 777);
@@ -760,6 +767,7 @@ fn test_no_two_settings_share_an_index() -> [] int {
         test.assert_eq(config.dns_port(cfg), 5354);
         test.assert_eq(config.ca_file_len(cfg), 9);
         test.assert(!config.tls_resume(cfg));
+        test.assert_eq(config.history_days(cfg), 45);
         // and the table is wide enough for the highest of them
         test.assert(config.size() > 46);
     }

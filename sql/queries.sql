@@ -5,6 +5,9 @@
 -- name: add_attempt endpoint event replay attempt outcome status at_ms latency_ms reason
 insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing
 
+-- name: prune_attempts before most
+delete from attempts where ctid in (select ctid from attempts where at_ms < $1::bigint limit $2::int)
+
 -- name: attempts_of event
 select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200
 

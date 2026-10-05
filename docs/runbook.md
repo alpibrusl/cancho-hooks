@@ -443,6 +443,8 @@ The message says how far the log is whole (`whole for K records (up to byte X)`)
 
 7. **Stated cursors and the build before** (docs/design.md section 42). An endpoint with a list of types passes over the events it does not want with no record, so this build writes, once in a while, a record of kind 19 that says where that endpoint's cursor is (and one for each such endpoint at a clean stop): a restart then neither sends again what was delivered nor walks again what was passed over. **The build before refuses a `delivery.seg` with such a record with status 15**. A deployment with no list of types never writes one. To go back: stop this build, run it once with `--compact-now 1` (a snapshot has no kind 19), then start the build before.
 
+8. **The history's index** (docs/design.md section 43). The version that prunes `attempts` (`history-days`) adds an index on `attempts (at_ms)` in `sql/schema.sql`. On a large table `create index` holds off the inserts while it builds: before the upgrade, run `create index concurrently if not exists attempts_at on attempts (at_ms)` by hand, and `sql/schema.sql` then finds it there. Set `history-days = 0` to keep every row as before.
+
 `docker`: pull or build the new tag, `docker stop`, `docker run` with the same volume. The volume is the data directory; nothing else is state.
 
 ## 6. When it goes wrong

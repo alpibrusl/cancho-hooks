@@ -56,6 +56,37 @@ pub fn add_attempt[&h, &c](heap: &!h Heap, conn: &!c Conn, endpoint: int, event:
     return (reply, status);
 }
 
+// prune_attempts_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
+pub fn prune_attempts_start[&h](heap: &!h Heap, before: int, most: int) -> [heap] buffer.Buffer {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, before);
+    ps = pg.param_int(heap, ps, most);
+    var request = buffer.empty(heap, 1);
+    borrow ps as &pr in {
+        buffer.drop(heap, request);
+        request = pg.bind_named(heap, "prune_attempts", pr);
+    }
+    pg.drop_params(heap, ps);
+    return request;
+}
+
+// prune_attempts: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
+pub fn prune_attempts[&h, &c](heap: &!h Heap, conn: &!c Conn, before: int, most: int) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+    var ps = pg.params(heap);
+    ps = pg.param_int(heap, ps, before);
+    ps = pg.param_int(heap, ps, most);
+    var reply = buffer.empty(heap, 1);
+    var status = 0;
+    borrow ps as &pr in {
+        let (r, s) = pg.run_named(heap, conn, "prune_attempts", pr);
+        buffer.drop(heap, reply);
+        reply = r;
+        status = s;
+    }
+    pg.drop_params(heap, ps);
+    return (reply, status);
+}
+
 // attempts_of_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
 pub fn attempts_of_start[&h](heap: &!h Heap, event: int) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
@@ -918,48 +949,51 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r0, s0) = pg.prepare_after(heap, conn, reply, status, "add_attempt", "insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing");
     reply = r0;
     status = s0;
-    let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
+    let (r1, s1) = pg.prepare_after(heap, conn, reply, status, "prune_attempts", "delete from attempts where ctid in (select ctid from attempts where at_ms < $1::bigint limit $2::int)");
     reply = r1;
     status = s1;
-    let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id");
+    let (r2, s2) = pg.prepare_after(heap, conn, reply, status, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
     reply = r2;
     status = s2;
-    let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict do nothing");
+    let (r3, s3) = pg.prepare_after(heap, conn, reply, status, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id");
     reply = r3;
     status = s3;
-    let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers, concurrency, rate) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text, $6::int, $7::int returning id");
+    let (r4, s4) = pg.prepare_after(heap, conn, reply, status, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict do nothing");
     reply = r4;
     status = s4;
-    let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
+    let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers, concurrency, rate) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text, $6::int, $7::int returning id");
     reply = r5;
     status = s5;
-    let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
+    let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
     reply = r6;
     status = s6;
-    let (r7, s7) = pg.prepare_after(heap, conn, reply, status, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
+    let (r7, s7) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
     reply = r7;
     status = s7;
-    let (r8, s8) = pg.prepare_after(heap, conn, reply, status, "schedules_due", "select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32");
+    let (r8, s8) = pg.prepare_after(heap, conn, reply, status, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
     reply = r8;
     status = s8;
-    let (r9, s9) = pg.prepare_after(heap, conn, reply, status, "advance_schedule", "update schedules set last_fired = case when $4::bigint > 0 then $4::bigint else last_fired end, next_fire = $5::bigint where id = $1::bigint and base = $2::bigint and next_fire = $3::bigint");
+    let (r9, s9) = pg.prepare_after(heap, conn, reply, status, "schedules_due", "select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32");
     reply = r9;
     status = s9;
-    let (r10, s10) = pg.prepare_after(heap, conn, reply, status, "create_schedule", "insert into schedules (expr, event_type, body, enabled, created_at, base) select $1::text, $2::text, $3::text, $4::boolean, $5::bigint, $5::bigint where (select count(*) from schedules) < 64 returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    let (r10, s10) = pg.prepare_after(heap, conn, reply, status, "advance_schedule", "update schedules set last_fired = case when $4::bigint > 0 then $4::bigint else last_fired end, next_fire = $5::bigint where id = $1::bigint and base = $2::bigint and next_fire = $3::bigint");
     reply = r10;
     status = s10;
-    let (r11, s11) = pg.prepare_after(heap, conn, reply, status, "schedule_by_id", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules where id = $1::bigint");
+    let (r11, s11) = pg.prepare_after(heap, conn, reply, status, "create_schedule", "insert into schedules (expr, event_type, body, enabled, created_at, base) select $1::text, $2::text, $3::text, $4::boolean, $5::bigint, $5::bigint where (select count(*) from schedules) < 64 returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
     reply = r11;
     status = s11;
-    let (r12, s12) = pg.prepare_after(heap, conn, reply, status, "schedules_all", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64");
+    let (r12, s12) = pg.prepare_after(heap, conn, reply, status, "schedule_by_id", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules where id = $1::bigint");
     reply = r12;
     status = s12;
-    let (r13, s13) = pg.prepare_after(heap, conn, reply, status, "patch_schedule", "update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
+    let (r13, s13) = pg.prepare_after(heap, conn, reply, status, "schedules_all", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64");
     reply = r13;
     status = s13;
-    let (r14, s14) = pg.prepare_after(heap, conn, reply, status, "delete_schedule", "delete from schedules where id = $1::bigint returning id");
+    let (r14, s14) = pg.prepare_after(heap, conn, reply, status, "patch_schedule", "update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
     reply = r14;
     status = s14;
+    let (r15, s15) = pg.prepare_after(heap, conn, reply, status, "delete_schedule", "delete from schedules where id = $1::bigint returning id");
+    reply = r15;
+    status = s15;
     return (reply, status);
 }
 
@@ -969,6 +1003,7 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
 pub fn prepare_script[&h](heap: &!h Heap) -> [heap] (buffer.Buffer, int) {
     var script = buffer.empty(heap, 256);
     script = pg.parse_append(heap, script, "add_attempt", "insert into attempts (endpoint, event, replay, attempt, outcome, status, at_ms, latency_ms, reason) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing");
+    script = pg.parse_append(heap, script, "prune_attempts", "delete from attempts where ctid in (select ctid from attempts where at_ms < $1::bigint limit $2::int)");
     script = pg.parse_append(heap, script, "attempts_of", "select endpoint, replay, attempt, outcome, status, at_ms, latency_ms, reason from attempts where event = $1 order by endpoint, replay, attempt limit 200");
     script = pg.parse_append(heap, script, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id");
     script = pg.parse_append(heap, script, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict do nothing");
@@ -983,5 +1018,5 @@ pub fn prepare_script[&h](heap: &!h Heap) -> [heap] (buffer.Buffer, int) {
     script = pg.parse_append(heap, script, "schedules_all", "select id, expr, event_type, body, enabled, created_at, last_fired, next_fire from schedules order by id limit 64");
     script = pg.parse_append(heap, script, "patch_schedule", "update schedules set expr = coalesce($2::text, expr), event_type = coalesce($3::text, event_type), body = coalesce($4::text, body), enabled = coalesce($5::boolean, enabled), base = case when $2::text is not null or ($5::boolean and not enabled) then greatest(base, $6::bigint) else base end, next_fire = case when $2::text is not null or ($5::boolean and not enabled) then 0 else next_fire end where id = $1::bigint returning id, expr, event_type, body, enabled, created_at, last_fired, next_fire");
     script = pg.parse_append(heap, script, "delete_schedule", "delete from schedules where id = $1::bigint returning id");
-    return (script, 15);
+    return (script, 16);
 }
