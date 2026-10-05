@@ -747,6 +747,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, sched.skipped(sg));
         w = json.put_key(heap, w, "filtered");
         w = json.put_int(heap, w, stats[off_ex() + ex_filtered()]);
+        w = json.put_key(heap, w, "advanced");
+        w = json.put_int(heap, w, stats[off_ex() + ex_advanced()]);
         w = json.put_key(heap, w, "max_endpoints");
         w = json.put_int(heap, w, state.max_endpoints());
         w = json.put_key(heap, w, "turns");
@@ -1841,6 +1843,9 @@ fn paused_count[&d](dv: &d [int]) -> [] int {
 
 // Append an outcome record of any kind to `done`, not yet flushed. Answers 1 if it was appended, 0 if the log refused it.
 fn note_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, id: int, attempts: int, next_at: int) -> [file_write] int {
+    if before_outcome(done, dv, kind, e, id) == 0 {
+        return 0;
+    }
     var ok = 0;
     region a {
         let rec = alloc_slice[a](128, byte_of(0));
@@ -1850,6 +1855,35 @@ fn note_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, id:
             ok = 1;
         }
     }
+    return ok;
+}
+
+// What goes before a window outcome that a replay could not place (`docs/design.md` section 42.3): the endpoint has passed over events that leave no record,
+// and this event is more than a window above the cursor the log states, so where the cursor is goes first, in the same flush. Every record of a window outcome
+// (`note_outcome`, `finish_attempt`) is preceded by this. Answers 1, or 0 if the log refused the record.
+fn before_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, id: int) -> [file_write] int {
+    if (kind == state.delivered() || kind == state.failed() || kind == state.dead()) && e >= 0 && e < state.max_endpoints() && dv[off_lag() + e] == 1 && id > dv[off_adv() + e] + state.span() {
+        return note_advanced(done, dv, e);
+    }
+    return 1;
+}
+
+// Append `advanced(e, cursor)` (`docs/design.md` section 42), not yet flushed: from now on the log states the slot's cursor, and nothing has been passed over
+// since. Answers 1 if it was appended, 0 if the log refused it.
+fn note_advanced[&g, &d](done: &!g log.Log, dv: &!d [int], e: int) -> [file_write] int {
+    let c = dv[off_cur() + e];
+    var ok = 0;
+    region a {
+        let rec = alloc_slice[a](128, byte_of(0));
+        let total = state.put_outcome(rec, 0, dv[c_seq()], state.advanced(), e, c, 0, 0);
+        if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
+            dv[c_seq()] = dv[c_seq()] + 1;
+            dv[off_adv() + e] = c;
+            dv[off_lag() + e] = 0;
+            ok = 1;
+        }
+    }
+    dv[off_ex() + ex_advanced()] = dv[off_ex() + ex_advanced()] + ok;
     return ok;
 }
 
@@ -1931,8 +1965,18 @@ fn off_wused() -> [] int {
 
 // The bearer tokens (the admin token first; each is its length, then its bytes: `authz.ls`), and the one change that may wait for the
 // database (`manage.ls`).
-fn off_token() -> [] int {
+// Per slot, two integers (`docs/design.md` section 42): the largest cursor the outcomes log states for the slot (`adv`), and 1 if an event has been passed over
+// since (made final with no record, so that a replay of the log would leave the cursor behind the live one: `lag`).
+fn off_adv() -> [] int {
     return off_wused() + state.max_endpoints();
+}
+
+fn off_lag() -> [] int {
+    return off_adv() + state.max_endpoints();
+}
+
+fn off_token() -> [] int {
+    return off_lag() + state.max_endpoints();
 }
 
 fn off_mg() -> [] int {
@@ -1977,7 +2021,8 @@ fn apply_outcome[&d](dv: &!d [int], e: int, kind: int, id: int, attempts: int, n
     return state.apply(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, kind, id, attempts, next_at);
 }
 
-// Forget everything about slot `e`'s window and start its cursor at `start` (`state.reset`), reading the cells only if they may hold something.
+// Forget everything about slot `e`'s window and start its cursor at `start` (`state.reset`), reading the cells only if they may hold something. The log states
+// that cursor (a `created` record, or a snapshot's), and nothing has been passed over since (`docs/design.md` section 42).
 fn reset_window[&d](dv: &!d [int], e: int, start: int) -> [] int {
     if dv[off_wused() + e] != 0 {
         state.reset(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, start);
@@ -1985,7 +2030,45 @@ fn reset_window[&d](dv: &!d [int], e: int, start: int) -> [] int {
     } else {
         dv[off_cur() + e] = start;
     }
+    dv[off_adv() + e] = start;
+    dv[off_lag() + e] = 0;
     return 0;
+}
+
+// An `advanced` record replayed (`state.advance`): the cursor of `e` moves up to `to`, reading the cells only if they may hold something.
+fn advance_window[&d](dv: &!d [int], e: int, to: int) -> [] int {
+    if dv[off_wused() + e] != 0 {
+        state.advance(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, to);
+    } else if to > dv[off_cur() + e] {
+        dv[off_cur() + e] = to;
+    }
+    return 0;
+}
+
+// After recovery, or after a snapshot has become the outcomes log: what the log states of every cursor is where the cursor is, and nothing has been passed over
+// since (`docs/design.md` section 42.3).
+fn cursors_stated[&d](dv: &!d [int]) -> [] int {
+    var e = 0;
+    while e < state.max_endpoints() {
+        dv[off_adv() + e] = dv[off_cur() + e];
+        dv[off_lag() + e] = 0;
+        e = e + 1;
+    }
+    return 0;
+}
+
+// A clean stop (`docs/design.md` section 42.3): an `advanced` record for every slot that has passed over events since the log last stated its cursor, so that the
+// start after it re-walks nothing. Not flushed: the stop's own flush takes them. Answers how many were written.
+fn state_cursors[&g, &d](done: &!g log.Log, dv: &!d [int]) -> [file_write] int {
+    var n = 0;
+    var e = 0;
+    while e < state.max_endpoints() {
+        if dv[off_lag() + e] == 1 && dv[off_cur() + e] > dv[off_adv() + e] && dv[off_slotid() + e] >= 0 {
+            n = n + note_advanced(done, dv, e);
+        }
+        e = e + 1;
+    }
+    return n;
 }
 
 fn slot_free() -> [] int {
@@ -2067,6 +2150,11 @@ fn ex_again() -> [] int {
 // How many times that wait was left out (`/stats` says so: a backlog being drained is seen, and not only timed).
 fn ex_hurried() -> [] int {
     return 5;
+}
+
+// How many `advanced` records the service has written since the start (`docs/design.md` section 42; `/stats` says so).
+fn ex_advanced() -> [] int {
+    return 6;
 }
 
 // The type of the event being accepted, a byte to an integer: room for `filter.max_type()` after the counters.
@@ -2581,6 +2669,10 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                     set_disabled(dv, o.1, true);
                     set_paused(dv, o.1, true);
                 }
+            } else if o.0 == state.advanced() {
+                if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
+                    advance_window(dv, o.1, o.2);
+                }
             } else if o.0 == state.reason() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, o.4 % state.reason_replay());
@@ -2737,11 +2829,12 @@ fn finish_attempt[&g, &d, &k](done: &!g log.Log, dv: &!d [int], clock: &k Clock,
     } else {
         next_at = clock_unix_ms(clock) + jitter.delay(dv[off_sched() + tries], lim.jitter_percent(lim_of(dv)), ident_of_slot(dv, e), id, tries);
     }
+    let placed = before_outcome(done, dv, kind, e, id);
     var ok = 0;
     region a {
         let rec = alloc_slice[a](128, byte_of(0));
         let total = state.put_outcome(rec, 0, dv[c_seq()], kind, e, id, tries, next_at);
-        if log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
+        if placed == 1 && log.append(done, rec[0..total], dv[c_seq()], 0) == 0 {
             dv[c_seq()] = dv[c_seq()] + 1;
             apply_outcome(dv, e, kind, id, tries, next_at);
             if kind == state.delivered() {
@@ -3010,6 +3103,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
                         // The endpoint's subscription does not want this event (section 35): it is final here at once, with no attempt and no record;
                         // the cursor moves over it as over a delivered one, and a restart decides it again from the log.
                         apply_outcome(dv, e, state.delivered(), id, 0, 0);
+                        dv[off_lag() + e] = 1;
                         dv[off_ex() + ex_filtered()] = dv[off_ex() + ex_filtered()] + 1;
                         skips = skips + 1;
                     } else if !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, id) && dv[flight_at(e, id)] == 0 {
@@ -3976,8 +4070,12 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                 }
             }
             ops.release_claim(held);
-            // Whatever the loop ended on, what the logs hold is made durable once more before they are closed.
+            // Whatever the loop ended on, what the logs hold is made durable once more before they are closed. A clean stop first states the cursors of the
+            // endpoints that have passed over events (`docs/design.md` section 42.3), so that the start after it re-walks nothing.
             borrow mut done as &!dfw in {
+                if ops.stopping(ops_of(dv)) {
+                    state_cursors(dfw, dv);
+                }
                 log.flush(dfw);
             }
             evlog.flush(lg);
@@ -4150,6 +4248,8 @@ fn settle_endpoints[&g, &l, &w, &d](lg: &!g evlog.Ev, done: &!l log.Log, window:
         }
         // An endpoint that was away while events were dropped starts at the oldest that is left.
         rt_clamp(lg, dv);
+        // What the log states of every cursor is where the replay left it (`docs/design.md` section 42.3).
+        cursors_stated(dv);
         seek_slots(lg, window, dv);
     }
     return 0;

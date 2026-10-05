@@ -303,8 +303,10 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         // 18, the marker that the log uses a slot of 62 or above (section 41.5), reads back too and changes no cell
         state.put_outcome(buf, 0, 14, state.wide(), 0, 0, 0, 0);
         test.assert_eq(state.outcome_at(buf, 0).0, 18);
-        // one past the last kind is still not an outcome
-        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 19);
+        // 19, a slot's cursor (section 42), reads back and changes no cell through `apply`; one past it is still not an outcome
+        state.put_outcome(buf, 0, 15, state.advanced(), 2, 40, 0, 0);
+        test.assert_eq(state.outcome_at(buf, 0).0, 19);
+        record.put_u64(buf, record.first_pair(0) + 4 + 1 + 4, 20);
         test.assert_eq(state.outcome_at(buf, 0).0, 0);
         let w = alloc_slice[a](state.cells(2), 0);
         let c = alloc_slice[a](2, 0);
@@ -313,6 +315,7 @@ fn test_health_records_read_back_and_change_no_cell() -> [] int {
         test.assert_eq(state.apply(w, c, 0, state.replay_cancelled(), 1, 0, 0), 0);
         test.assert_eq(state.apply(w, c, 0, state.dead_entry(), 1, 65537, 5), 0);
         test.assert_eq(state.apply(w, c, 0, state.wide(), 1, 0, 0), 0);
+        test.assert_eq(state.apply(w, c, 0, state.advanced(), 1, 0, 0), 0);
         test.assert_eq(c[0], 0);
         test.assert(!state.is_final(w, c, 0, 1));
         test.assert_eq(state.attempts(w, 0, 1), 0);
@@ -386,6 +389,61 @@ fn test_the_format_header_reads_back_and_is_no_slot() -> [] int {
         let c = alloc_slice[a](2, 0);
         test.assert_eq(state.apply(w, c, 0, state.format(), 1, 0, 0), 0);
         test.assert_eq(c[0], 0);
+    }
+    return 0;
+}
+
+// An `advanced` record (`docs/design.md` section 42): the cursor goes up to it, the cells it passes are cleared, what is recorded above it stays, and a delivery
+// that was beyond the window before it lands now.
+fn test_an_advance_moves_the_cursor_and_keeps_what_is_above_it() -> [] int {
+    region a {
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        state.apply(w, c, 0, state.failed(), 3, 2, 777);
+        state.apply(w, c, 0, state.delivered(), 60, 1, 0);
+        // a delivery 2,000 ids up is above the window: dropped, as a replay drops it
+        test.assert_eq(state.apply(w, c, 0, state.delivered(), 2000, 1, 0), 0 - 1);
+        test.assert_eq(state.advance(w, c, 0, 50), 0);
+        test.assert_eq(c[0], 50);
+        test.assert_eq(state.attempts(w, 0, 3), 0);
+        test.assert(state.is_final(w, c, 0, 60));
+        test.assert(!state.is_final(w, c, 0, 51));
+        // an advance to below the cursor changes nothing
+        state.advance(w, c, 0, 10);
+        test.assert_eq(c[0], 50);
+        // one more than a window away: everything is final, every cell cleared; then the delivery lands
+        state.advance(w, c, 0, 1500);
+        test.assert_eq(c[0], 1500);
+        test.assert(!state.is_final(w, c, 0, 1501));
+        test.assert_eq(state.apply(w, c, 0, state.delivered(), 2000, 1, 0), 0);
+        test.assert(state.is_final(w, c, 0, 2000));
+        test.assert_eq(c[1], 0);
+    }
+    return 0;
+}
+
+fn test_an_advance_moves_over_final_cells_at_its_front() -> [] int {
+    region a {
+        let w = alloc_slice[a](state.cells(2), 0);
+        let c = alloc_slice[a](2, 0);
+        state.apply(w, c, 1, state.delivered(), 11, 1, 0);
+        state.apply(w, c, 1, state.delivered(), 12, 1, 0);
+        state.advance(w, c, 1, 10);
+        test.assert_eq(c[1], 12);
+        test.assert_eq(c[0], 0);
+    }
+    return 0;
+}
+
+fn test_the_advanced_record_reads_back() -> [] int {
+    region a {
+        let buf = alloc_slice[a](128, byte_of(0));
+        let n = state.put_outcome(buf, 0, 9, state.advanced(), 7, 4242, 0, 0);
+        test.assert(n > 0);
+        let o = state.outcome_at(buf, 0);
+        test.assert_eq(o.0, 19);
+        test.assert_eq(o.1, 7);
+        test.assert_eq(o.2, 4242);
     }
     return 0;
 }

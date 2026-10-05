@@ -132,6 +132,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/filter_test.py build/hooks
 
+      - name: "A restart remembers where an endpoint with a list of types was (no event sent again after SIGTERM, kill -9 or snapshots; no record for an endpoint without a list)"
+        working-directory: hooks
+        run: python3 tests/advance_test.py build/hooks
+
       - name: Secret rotation (two signatures checked with the reference library, restarts, every refusal)
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/rotation_test.py build/hooks

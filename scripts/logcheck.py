@@ -17,7 +17,7 @@ What is checked, and why each one matters to a restore:
     35.1): the pairs `event`; `event`, `typ` (the event's
     type, when it has one); `event`, `key`, `t` (an idempotency key); or `event`, `typ`, `key`, `t`. A log from before event types has only
     the first and the third. Any other shape is one the service refuses to start on (status 16).
-  * delivery.seg: every record is a well-formed outcome of a known kind (1 to 17; 15 is the header of a log written since retention, 14 the reason of a failed attempt, 16 a replay cancelled, 17 a dead letter in a snapshot).
+  * delivery.seg: every record is a well-formed outcome of a known kind (1 to 19; 19 states a slot's cursor, 18 marks a log that uses a slot of 62 or above, 15 is the header of a log written since retention, 14 the reason of a failed attempt, 16 a replay cancelled, 17 a dead letter in a snapshot).
   * **delivery.seg must not refer to an event that events.seg does not hold.** A service started on such a pair acknowledged new events
     under ids it already believed delivered, and never delivered them (measured: docs/runbook.md, "Backup"). The service refuses such a
     pair now too (status 18, docs/design.md section 34.5); this check is what keeps a backup from holding one.
@@ -39,10 +39,10 @@ import struct
 import sys
 
 MAX_RECORD = 65536          # a record's `len` is at most the service's max_len + 4 (65,536 bounds a torn tail)
-OUTCOME_KINDS = range(1, 19)         # 18 says the log uses a slot of 62 or above (docs/design.md 41.5); 12 and 13 (a failure streak began, the circuit breaker paused an endpoint) are about an endpoint: `event` is not an event id; 15 is the header
+OUTCOME_KINDS = range(1, 20)         # 19 states a slot's cursor (`event`, an event id: docs/design.md 42); 18 says the log uses a slot of 62 or above (docs/design.md 41.5); 12 and 13 (a failure streak began, the circuit breaker paused an endpoint) are about an endpoint: `event` is not an event id; 15 is the header
 FORMAT = 15                           # the outcomes log's header: `event` is the format number
 EVENT_FORMAT = 2                      # the format of the events log this version writes (1 has no header)
-EVENT_KINDS = (1, 2, 3, 6, 7, 8, 9, 14, 16, 17)   # delivered, failed, dead, replay, replay failed / delivered / dead, why an attempt failed (14), a replay cancelled (16), a dead letter of a snapshot (17): `event` is an event id
+EVENT_KINDS = (1, 2, 3, 6, 7, 8, 9, 14, 16, 17, 19)   # a cursor (19); delivered, failed, dead, replay, replay failed / delivered / dead, why an attempt failed (14), a replay cancelled (16), a dead letter of a snapshot (17): `event` is an event id
 REASONS = {0: "none", 1: "connect_refused", 2: "connect_timeout", 3: "connect_error", 4: "send_timeout", 5: "send_error", 6: "no_response",
            7: "reset", 8: "closed_early", 9: "bad_response", 10: "status_3xx", 11: "status_4xx", 12: "status_5xx", 13: "gone",
            14: "status_other", 15: "busy", 16: "too_large",

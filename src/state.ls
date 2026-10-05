@@ -147,6 +147,13 @@ pub fn wide() -> [] int {
     return 18;
 }
 
+// Where an endpoint's cursor was (`docs/design.md` section 42): `endpoint` is the slot, `event` a cursor (every event up to it is final there), the others 0.
+// Written when the endpoint has passed over events that leave no record (an unwanted type), before a window outcome that a replay could not otherwise place,
+// and at a clean stop. Replayed, it moves the cursor up to it (`advance`). A build that does not know it refuses the log (status 15).
+pub fn advanced() -> [] int {
+    return 19;
+}
+
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
 pub fn day_ms() -> [] int {
     return 86400000;
@@ -234,6 +241,42 @@ pub fn apply[&w, &c](w: &!w [int], cur: &!c [int], e: int, kind: int, id: int, a
     return 0;
 }
 
+// Move the cursor of `e` up to `to` (an `advanced` record): every event up to it is final, so the cells it passes are cleared; then over the final cells at
+// its front, as a delivery does. A `to` at or below the cursor changes nothing. Only a cell that is not zero is written.
+pub fn advance[&w, &c](w: &!w [int], cur: &!c [int], e: int, to: int) -> [] int {
+    if to <= cur[e] {
+        return 0;
+    }
+    var id = cur[e] + 1;
+    var last = to;
+    if last > cur[e] + span() {
+        last = cur[e] + span();
+    }
+    while id <= last {
+        let at = cell(e, id);
+        if w[at] != 0 || w[at + 1] != 0 || w[at + 2] != 0 {
+            w[at] = 0;
+            w[at + 1] = 0;
+            w[at + 2] = 0;
+        }
+        id = id + 1;
+    }
+    cur[e] = to;
+    var going = true;
+    while going {
+        let front = cell(e, cur[e] + 1);
+        if w[front] == 1 {
+            w[front] = 0;
+            w[front + 1] = 0;
+            w[front + 2] = 0;
+            cur[e] = cur[e] + 1;
+        } else {
+            going = false;
+        }
+    }
+    return 0;
+}
+
 // Forget everything about slot `e`: its window is empty and its cursor is `start`. What a `created` or a `removed` record does.
 // Only a cell that is not zero is written: the arrays are zero-filled when they are made, and a start gives a slot to every endpoint, so writing a zero over each
 // cell would make resident the 24 KiB of every slot there is, used or not (`docs/design.md` section 41.2). Reading a page that was never written is free.
@@ -280,7 +323,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 18 {
+    if kind < 1 || kind > 19 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));
