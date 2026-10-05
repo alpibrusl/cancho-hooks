@@ -7,7 +7,7 @@ A delivery to an `https` endpoint costs a handshake, because the service closes 
 delivery makes that handshake abbreviated (half the CPU, `scripts/bench/https_cost.py`). The service keeps one session per endpoint, in memory, and offers it only to the same
 name and port. What is checked here is seen from the receiver's side, which counts the handshakes that resumed one:
 
-  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2); `tls-resume 0` never resumes
+  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2, and in slot 1000); `tls-resume 0` never resumes
   2. a session is the endpoint's own: a second endpoint, behind the same receiver, starts with a full handshake of its own, and resumes its own after that
   3. the session is dropped when the endpoint changes: `PATCH` of the host, of the port, of the secret, and a `DELETE` followed by a new endpoint (which may have the old one's
      slot) each make the next delivery a full handshake, verified against the trust store again
@@ -92,6 +92,19 @@ def main():
         r.event(n)
         r.delivered(n)
     check("1. tls-resume 0: six full handshakes, none resumed", srv.handshakes == 6 and srv.resumed == 0, f"{srv.handshakes} {srv.resumed}")
+    r.close()
+    srv.close()
+
+    # 1b. an endpoint in a slot past the 64 there were sessions for before design section 41 (the id 1000 is its own slot) resumes as well
+    fresh_db()
+    srv = K.TlsServer(*cert)
+    r = Rig(pki, dns)
+    r.add(1000, "https://hooks.test", srv.port)
+    r.start()
+    for n in range(1, 7):
+        r.event(n)
+        r.delivered(n)
+    check("1. an endpoint in slot 1000: six deliveries, six handshakes, the first full and the five after it resumed", srv.handshakes == 6 and srv.resumed == 5, f"{srv.handshakes} {srv.resumed}")
     r.close()
     srv.close()
 

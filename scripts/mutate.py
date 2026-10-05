@@ -6,7 +6,8 @@
 The tree (without .git) is copied to a temporary directory and built there. For each mutant of the file named (a list `MUTANTS` of `(id, file, old, new, [test sets])`): the text `old`, which
 must occur exactly once in `file`, is replaced by `new`; the service is built; the test sets are run in order until one fails (the mutant is killed) or all pass (it survives); the file
 is restored and compared byte for byte with what it was (`filecmp`, a mutant never stays on disk). A mutant that does not compile is reported as that (the checker killed it).
-Test sets: unit (`lex-sys test`), https, names, sessions, api, ssrf, reason, metrics, config, patch (the `tests/*_test.py` of those names).
+Test sets: unit (`lex-sys test`), https, names, sessions, api, ssrf, reason, metrics, config, patch, slots, delete, ... (the `tests/*_test.py` of those names), many (all stages of
+`tests/many_test.py`) and many:<stage> (one).
 """
 import filecmp
 import os
@@ -31,8 +32,12 @@ for name in os.listdir(here):
         (shutil.copytree if os.path.isdir(os.path.join(here, name)) else shutil.copy2)(os.path.join(here, name), os.path.join(copy, name))
 env = dict(os.environ, LEX_SYS=lex)
 TESTS = {"unit": [lex, "test"]}
-for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch"):
+for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation"):
     TESTS[name] = ["python3", f"tests/{'https_api' if name == 'api' else name}_test.py", "build/hooks"]
+# the stages of tests/many_test.py (design section 41): "many:flags" runs only that stage, "many" all of them
+TESTS["many"] = ["python3", "tests/many_test.py", "build/hooks"]
+for stage in ("limit", "chaos", "flags", "replay", "quiet", "retention", "compactnow", "pool", "formats"):
+    TESTS[f"many:{stage}"] = ["env", f"STAGES={stage}", "python3", "tests/many_test.py", "build/hooks"]
 
 
 def run(cmd, timeout=900):

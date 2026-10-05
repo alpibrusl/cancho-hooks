@@ -21,7 +21,9 @@ key. Stages (all by default; `STAGES=name,name` runs some):
   pool       a database that is away at the start, 1,024 endpoints read from it when it comes back (a reply over 128 KiB), the events taken meanwhile delivered once to each
   formats    a log from before (62 endpoints, no marker) is read as it was and written as it was; a kind of record this build does not know is refused (15); a table of
              1,025 endpoints and a table too large to read are refused
+  oldbuild   (HOOKS_BIN_MAIN=the binary of the build before: not run in CI) that build reads this one's logs, and refuses one with a wide slot (15)
 """
+import base64
 import json
 import os
 import shutil
@@ -64,6 +66,11 @@ def authed(svc, method, path, body=None, timeout=10):
     if data is not None:
         headers["Content-Type"] = "application/json"
     status, out, hdrs = svc.request(method, path, data, headers, timeout=timeout)
+    # a change of the endpoints is a 503 for as long as the connections to the database that stores it are not up (just after a start, on a loaded machine): it is asked again
+    end = time.time() + 30
+    while status == 503 and method != "GET" and path.startswith("/endpoints") and time.time() < end:
+        time.sleep(0.2)
+        status, out, hdrs = svc.request(method, path, data, headers, timeout=timeout)
     try:
         return status, json.loads(out) if out else None, hdrs
     except ValueError:
@@ -223,6 +230,9 @@ def stage_limit():
     status, out, _ = authed(svc2, "POST", "/endpoints", {"host": addr(N + 1), "port": fan.port})
     check("limit: ... and the 1,025th is a 409 again", status == 409, str((status, out)))
     svc2.stop()
+    recs3 = mk.delivery_records(d)
+    check("limit: ... and the endpoint given a wide slot after a restart brings no second marker (the first, read at the start, is known)",
+          len([r for r in recs3 if r[0] == 18]) == 1 and len([r for r in recs3 if r[0] == 10]) == n_created + 1, str((len([r for r in recs3 if r[0] == 18]), len([r for r in recs3 if r[0] == 10]), n_created)))
     # a table of 1,025 rows is refused at the start
     mk.insert_endpoints(1, fan.port, ids=[900000], host=addr(N + 2))
     svc3 = service(d, ["--schedule", "200,200"])
@@ -320,9 +330,10 @@ def stage_flags():
     check("flags: after the start the paused slots are paused and disabled, and the others are not", all(cur[i]["paused"] and cur[i]["disabled"] for i in PAU) and not any(cur[i]["paused"] or cur[i]["disabled"] for i in range(N) if i not in pau_only))
     check("flags: /stats counts the paused endpoints", svc.stats()["paused"] == len(PAU), str(svc.stats()["paused"]))
     # event 4: the receivers answer 410 to the endpoints of DIS (the first attempt), the paused ones are not called at all
+    gone_events.add(e[2] + 1)        # (the ids are dense: the fourth event is the next id, and the receivers must know it before the first delivery of it)
     acked4 = post_events(svc, [4])
-    gone_events.add(acked4[4])
     e4 = acked4[4]
+    check("flags: the fourth event has the id the receivers were told", e4 == e[2] + 1, str((e4, e)))
     want = [by_id[i] for i in range(N) if i not in pau_only]
     check("flags: event 4 reaches every endpoint that is not paused, and none that is", wait_for(lambda: fan.reached([e4], want) == len(want), 90) and fan.reached([e4], [by_id[i] for i in PAU]) == 0, f"{fan.reached([e4], want)} of {len(want)}")
     time.sleep(0.5)
@@ -351,6 +362,20 @@ def stage_flags():
     acked6 = post_events(svc, [6])
     e6 = acked6[6]
     check("flags: event 6 reaches the others and none of the disabled or paused", wait_for(lambda: fan.reached([e6], active) == len(active), 90) and fan.reached([e6], [by_id[i] for i in set(DIS) | pau_only]) == 0)
+    # the loop does not look, turn after turn, at endpoints that are disabled or paused and behind (they have events to read and are sent nothing)
+    def looks_settle():
+        last = None
+        end = time.time() + 40
+        while time.time() < end:
+            a = svc.stats()
+            if not wait_for(lambda: svc.stats()["turns"] > a["turns"] + 10, 10):
+                return None
+            b = svc.stats()
+            if b["endpoints_looked_at"] == a["endpoints_looked_at"]:
+                return b["endpoints_looked_at"] - a["endpoints_looked_at"]
+            last = b["endpoints_looked_at"] - a["endpoints_looked_at"]
+        return last
+    check("flags: with 214 disabled and 158 paused endpoints behind the events, ten turns look at no endpoint (they are skipped, not read each turn)", looks_settle() == 0)
     # enabling: one wide slot of each kind, and only they resume
     dis_wide = max(i for i in dis_only if i >= 62)
     pau_wide = max(i for i in PAU if i not in set(DIS))      # (one of DIS would answer 410 to event 4 when it gets it, which is its own story: it is disabled again)
@@ -470,6 +495,7 @@ def stage_quiet():
     time.sleep(1.5)
     s3 = svc.stats()
     check("quiet: and then none again", s3["endpoints_looked_at"] == s2["endpoints_looked_at"] and s3["turns"] > s2["turns"] + 10, str(s3["endpoints_looked_at"] - s2["endpoints_looked_at"]))
+    # (the backlog of events nobody wants, passed over at the speed of the loop and not of its timer, is the `pool` stage's and the next check's)
     # an endpoint whose attempts fail is looked at when its retry is due, not before, and not every turn: 1,024 endpoints, nothing listening on the port of the receiver
     svc.stop()
     fan.close()
@@ -488,6 +514,40 @@ def stage_quiet():
     turns, looks = b["turns"] - a["turns"], b["endpoints_looked_at"] - a["endpoints_looked_at"]
     check("quiet: 1,024 endpoints whose attempts failed and wait are not all looked at in each turn (fewer than a quarter on average, in at least 4 turns)", turns >= 4 and looks < N * turns / 4, f"{looks} looks in {turns} turns")
     check("quiet: ... and their retries are made when due (the second attempt of each, then a third)", wait_for(lambda: svc.stats()["attempts"] >= 3 * N, 90), str(svc.stats()["attempts"]))
+    svc.stop()
+    # an attempt that ends while the turn is still looking at the endpoint (a multicast address: the kernel refuses the connection at once) is not a pass that "has seen
+    # everything": its retries are made, to the last (a dead letter), though no event comes to wake the endpoint
+    mk.reset_db()
+    mk.insert_endpoints(3, 9, host="224.0.0.1")
+    d3 = tmp()
+    svc = service(d3, ["--schedule", "200,200,200", "--deadline-ms", "1000"])
+    svc.start(timeout=60)
+    post_events(svc, [1])
+    check("quiet: attempts that end at once (the connection refused by the kernel) are retried by the schedule to the end: 4 attempts at each of 3 endpoints, then dead letters",
+          wait_for(lambda: svc.stats()["attempts"] >= 12 and svc.stats()["dead"] >= 3, 60), str(svc.stats()))
+    svc.stop()
+    # A backlog of events that nobody wants is read at the speed of the loop, not at the speed of its timer: 1,500 events are taken by a service with no endpoint at all,
+    # and 1,024 endpoints (endpoints.conf, no database) that subscribe to another type come to a log that has them all, with no request to wake the loop. A budget of 4,096
+    # pairs for each turn of 50 ms would take 19 s for the 1.5 million pairs; the loop goes on at once while there is more to pass over.
+    d4 = tmp()
+    args4 = ["--schedule", "100,100", "--deadline-ms", "2000"]
+    svc = opslib.Service(BIN, d4, args4)
+    svc.start()
+    backlog = post_events(svc, range(1, 1501), typ="nobody.wants")
+    svc.stop()
+    sec = "whsec_" + base64.b64encode(os.urandom(24)).decode()
+    with open(os.path.join(d4, "endpoints.conf"), "w") as f:
+        for i in range(N):
+            f.write(f"{i} 127.0.0.1 9 {sec} types=only.this\n")
+    svc = opslib.Service(BIN, d4, args4)
+    t0 = time.time()
+    svc.start()
+    ok = wait_for(lambda: svc.stats()["filtered"] >= 1500 * N, 60)
+    took = time.time() - t0
+    st = svc.stats()
+    check("quiet: 1,500 events nobody subscribes to are passed over by 1,024 endpoints in %.1f s (under the %.0f s of a budget a turn of the timer would allow), and the loop did not wait between "
+          "the turns that stopped for the budget (/stats waits_skipped: %d of the 375 or so)" % (took, 1500 * N / 82000.0, st["waits_skipped"]),
+          len(backlog) == 1500 and ok and took < 12 and st["waits_skipped"] >= 100, f"{len(backlog)} {st['filtered']} {took:.1f} {st['waits_skipped']}")
     svc.stop()
 
 
@@ -526,6 +586,8 @@ def stage_retention():
     check("retention: the outcomes log was replaced by a snapshot meanwhile (the log is over its limit)", s["snapshots"] >= 1, str(s["snapshots"]))
     recs = mk.delivery_records(d)
     check("retention: the snapshot of a log with a wide slot carries the marker (kind 18), once, right after the header", [r[0] for r in recs[:2]] == [15, 18] and len([r for r in recs if r[0] == 18]) == 1, str([r[0] for r in recs[:4]]))
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "logcheck.py"), "check", d], capture_output=True, text=True)
+    check("retention: the backup's checker reads the directory with the snapshot (one header, kind 18 known), and finds nothing wrong", p.returncode == 0, (p.stdout + p.stderr)[-300:])
     svc.stop()
     svc = service(d, args, port=port)
     svc.start(timeout=60)
@@ -548,7 +610,8 @@ def stage_pool():
     print("== pool: the database is away at the start, and 1,024 endpoints are read when it comes back", flush=True)
     d = tmp()
     fan = Fan({})
-    table = fresh(port=fan.port)
+    # (each endpoint has a subscription of 125 bytes, so that the table's answer is over 128 KiB, as the next check says, and about 215 KiB)
+    table = fresh(port=fan.port, types=lambda k: "t," + ",".join(f"p{j}.{'y' * 56}" for j in range(2)))
     fan.add(table)
     proxy = PgProxy(opslib.PG_HOST, int(opslib.PG_PORT))
     proxy.cut()
@@ -559,15 +622,26 @@ def stage_pool():
     check("pool: /readyz is 503 and says the database", status == 503 and b"database" in data, str((status, data)))
     got = post_events(svc, [1, 2, 3, 4, 5])
     check("pool: events are taken meanwhile (202)", len(got) == 5)
+    # (and a backlog of events that nobody subscribes to, which every endpoint will have to pass over when it comes: 1,500 x 1,024 pairs, with no request to wake the loop)
+    backlog = post_events(svc, range(10, 1510), typ="nobody.wants")
+    check("pool: ... and 1,500 more of a type nobody wants", len(backlog) == 1500)
     time.sleep(1.0)
     check("pool: ... and nothing is delivered while the endpoints are unknown", fan.count() == 0 and svc.stats()["endpoints_loaded"] is False)
     proxy.restore()
     check("pool: when the database is back the 1,024 are read (the table's answer is over 128 KiB)", wait_for(lambda: svc.has_line("endpoints loaded: 1024"), 60), svc.stderr()[-400:])
+    t0 = time.time()
+    ok = wait_for(lambda: svc.stats()["filtered"] >= 1500 * N, 60)
+    took = time.time() - t0
+    check("pool: ... and the 1,500 events nobody wants are passed over by every endpoint in %.1f s, well under the %.0f s of a budget a turn of the timer (50 ms) would allow" % (took, 1500 * N / 82000.0),
+          ok and took < 12, f"{svc.stats()['filtered']} {took:.1f}")
     ids = sorted(got.values())
     check("pool: ... and the five events reach every endpoint once", wait_for(lambda: fan.reached(ids) == 5 * N, 120), str(fan.reached(ids)))
     time.sleep(0.5)
     check("pool: ... exactly once, signed with their own keys", all(v == 1 for v in fan.hits.values()) and not fan.bad)
     check("pool: /readyz is 200", svc.request("GET", "/readyz")[0] == 200)
+    rows, pages, biggest, total = mk.listing(svc, limit=256)
+    check("pool: GET /endpoints with limit=256 and long subscriptions: a page ends at 40 KiB of text (5 or more pages, none over 48 KiB, every endpoint once)",
+          total == N and len(rows) == N and len({r["id"] for r in rows}) == N and pages >= 5 and biggest < 49152, str((total, len(rows), pages, biggest)))
     svc.stop()
     proxy.close()
     fan.close()
@@ -603,6 +677,19 @@ def stage_formats():
     p = subprocess.run([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", *opslib.pg_flags()], capture_output=True, text=True)
     recs = mk.delivery_records(d)
     check("formats: compact-now with a database (it reads the table first) snapshots it: exit 0, and the snapshot is header, `created` and cells, no marker", p.returncode == 0 and "compacted" in p.stderr and recs[0][:3] == (15, 62, 2) and not [r for r in recs if r[0] == 18], f"{p.returncode} {p.stderr[-300:]}")
+    # the header's endpoint is the number 62, which is a slot now: a new endpoint (id 5000) takes slot 62, the lowest free, and nothing of the header is in it
+    mk.insert_endpoints(1, fan.port, ids=[5000], host=addr(70))
+    svc = service(d, args, port=svc.port)
+    svc.start(timeout=30)
+    svc.stop()
+    created = [r for r in mk.delivery_records(d) if r[0] == 10]
+    check("formats: with 62 endpoints in the log the 63rd (id 5000) takes slot 62, the lowest free (the header's 62 is not an owner), and as the first wide slot it brings the marker",
+          created[-1][1:3] == (62, 5000) and len([r for r in mk.delivery_records(d) if r[0] == 18]) == 1, str(created[-1:]))
+    # a snapshot made while the only wide slot is 62 still carries the marker (every slot from 62 is looked at, not only the last ones)
+    p = subprocess.run([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", *opslib.pg_flags()], capture_output=True, text=True)
+    recs = mk.delivery_records(d)
+    check("formats: a snapshot made when the only endpoint in a wide slot is the one in slot 62 carries the marker once, right after the header",
+          p.returncode == 0 and [r[0] for r in recs[:2]] == [15, 18] and len([r for r in recs if r[0] == 18]) == 1, p.stderr[-200:] + str([r[0] for r in recs[:3]]))
     # 3. a record of a kind this build does not know is a refusal with status 15 (what a build from before does with kind 18)
     append_records(d, [(19, 0, 0, 0, 0)])
     before = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d) if n.endswith((".seg", ".first"))}
@@ -689,7 +776,59 @@ def stage_compactnow():
     fan.close()
 
 
-STAGE_FUNCS = {"limit": stage_limit, "chaos": stage_chaos, "flags": stage_flags, "replay": stage_replay, "quiet": stage_quiet, "retention": stage_retention, "compactnow": stage_compactnow, "pool": stage_pool, "formats": stage_formats}
+def stage_oldbuild():
+    """Only with HOOKS_BIN_MAIN=<the binary of the build before section 41> (CI does not build it): a log written by that build is read by this one without a byte
+    changed; a log with a wide slot is refused by it with status 15; and a log that is back to 62 slots after a snapshot is read by it again."""
+    old = os.environ.get("HOOKS_BIN_MAIN")
+    if not old:
+        print("== oldbuild: skipped (HOOKS_BIN_MAIN names the binary of the build before)", flush=True)
+        return
+    print("== oldbuild: the build before, on this build's logs and the reverse", flush=True)
+    fan = Fan({})
+    mk.reset_db()
+    fan.add(mk.insert_endpoints(62, fan.port))
+    d = tmp()
+    args = ["--schedule", "100,100", "--deadline-ms", "2000"]
+    svc = opslib.Service(old, d, [*opslib.pg_flags(), *args])
+    svc.start(timeout=30)
+    post_events(svc, [1, 2, 3], retry=False)
+    wait_for(lambda: len(fan.hits) >= 62 * 3, 30)
+    svc.stop()
+    written = open(os.path.join(d, "delivery.seg"), "rb").read()
+    svc = service(d, args, port=svc.port)
+    svc.start(timeout=30)
+    time.sleep(1)
+    svc.stop()
+    check("oldbuild: a directory the build before wrote is read by this one, and delivery.seg is not changed by a start and a stop", open(os.path.join(d, "delivery.seg"), "rb").read() == written)
+    svc = service(d, ["--schedule", "100,100"], port=svc.port)
+    svc.start(timeout=30)
+    ids = []
+    for k in range(3):
+        status, out, _ = authed(svc, "POST", "/endpoints", {"host": addr(900 + k), "port": fan.port})
+        ids.append(out["id"])
+    svc.stop()
+    check("oldbuild: with three endpoints in wide slots the log has the marker", [r[0] for r in mk.delivery_records(d)].count(18) == 1)
+    opslib.psql("delete from endpoints where id in (%s)" % ",".join(map(str, ids)))
+    o = opslib.Service(old, d, [*opslib.pg_flags(), *args])
+    o.start(timeout=20, loaded=False)
+    code = o.wait_exit(20)
+    check("oldbuild: the build before refuses that log with status 15 (the table back at 62 rows)", code == 15, f"{code} {o.stderr()[-200:]}")
+    for i in ids:
+        opslib.psql("insert into endpoints (id, host, port, secret) values (%d, '%s', %d, '%s')" % (i, addr(900 + i % 7), fan.port, opslib.secret()))
+    svc = service(d, args, port=svc.port)
+    svc.start(timeout=30)
+    for i in ids:
+        authed(svc, "DELETE", f"/endpoints/{i}")
+    svc.stop()
+    p = subprocess.run([BIN, "--port", str(chaos.free_port()), "--dir", d, "--allow-private-hosts", "1", "--compact-now", "1", "--retention-ms", "1", "--window-ms", "1", *opslib.pg_flags()], capture_output=True, text=True)
+    check("oldbuild: the three deleted and a snapshot made (compact-now with the database), the marker is gone", p.returncode == 0 and [r[0] for r in mk.delivery_records(d)].count(18) == 0, p.stderr[-200:])
+    o = opslib.Service(old, d, [*opslib.pg_flags(), *args])
+    check("oldbuild: ... and the build before reads it again", o.start(timeout=30) and o.has_line("endpoints loaded: 62"), o.stderr()[-200:])
+    o.stop()
+    fan.close()
+
+
+STAGE_FUNCS = {"limit": stage_limit, "chaos": stage_chaos, "flags": stage_flags, "replay": stage_replay, "quiet": stage_quiet, "retention": stage_retention, "compactnow": stage_compactnow, "pool": stage_pool, "formats": stage_formats, "oldbuild": stage_oldbuild}
 
 
 def main():

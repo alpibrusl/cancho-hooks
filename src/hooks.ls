@@ -752,6 +752,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, stats[off_ex() + ex_turns()]);
         w = json.put_key(heap, w, "endpoints_looked_at");
         w = json.put_int(heap, w, stats[off_ex() + ex_looked()]);
+        w = json.put_key(heap, w, "waits_skipped");
+        w = json.put_int(heap, w, stats[off_ex() + ex_hurried()]);
         w = json.put_key(heap, w, "cron_keys");
         w = json.put_int(heap, w, idem.count(ix[idem.second_at(ix)..len(ix)]));
         w = json.put_key(heap, w, "events_first_id");
@@ -2047,6 +2049,17 @@ fn ex_looked() -> [] int {
     return 3;
 }
 
+// 1 if the last turn stopped because it had passed over `most_skips()` events that endpoints do not subscribe to, with more to pass: the loop's next wait is 0, not
+// up to 50 ms (without it a backlog of events nobody wants drains at `most_skips()` every 50 ms: 82,000 pairs a second, which at 1,024 endpoints is 80 events a second).
+fn ex_again() -> [] int {
+    return 4;
+}
+
+// How many times that wait was left out (`/stats` says so: a backlog being drained is seen, and not only timed).
+fn ex_hurried() -> [] int {
+    return 5;
+}
+
 // The type of the event being accepted, a byte to an integer: room for `filter.max_type()` after the counters.
 fn ex_type() -> [] int {
     return 8;
@@ -2297,9 +2310,6 @@ fn scan_slots[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) 
             going = false;
         } else {
             let o = state.outcome_at(window, 0);
-            if o.0 == state.wide() {
-                dv[c_wide()] = 1;
-            }
             // The header and the marker are about the log, not about a slot: the header's endpoint field is 62, which is a slot (`state.format_slot()`).
             if o.0 != 0 && o.0 != state.format() && o.0 != state.wide() && o.1 >= 0 && o.1 < state.max_endpoints() {
                 if o.0 == state.created() {
@@ -3009,6 +3019,9 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
         }
         step = step + 1;
     }
+    if skips >= most_skips() {
+        dv[off_ex() + ex_again()] = 1;
+    }
     // Then the replays that are due, with what is left of the budget.
     let now = clock_unix_ms(clock);
     var rr = 0;
@@ -3363,6 +3376,11 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                 // The longest the wait may be: 50 ms (less while an endpoint waits for a token of its rate limit: `lim.wait_ms`), or less when the pool has something to do sooner (a backoff that ends, a login with a key to
                 // derive, an attempt or a request that runs out of time). The poller wakes the loop for the rest of what the pool waits for.
                 var nap = lim.wait_ms(lim_of(dv));
+                if dv[off_ex() + ex_again()] == 1 {
+                    nap = 0;
+                    dv[off_ex() + ex_again()] = 0;
+                    dv[off_ex() + ex_hurried()] = dv[off_ex() + ex_hurried()] + 1;
+                }
                 if history.enabled(dv[off_hq()..off_hq() + history.size()]) {
                     borrow pl as &qr in {
                         let due = pool.next_wake(qr, clock_ms(clock));
