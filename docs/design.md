@@ -2249,6 +2249,10 @@ Retention (38) drops an event only when it is final everywhere; an event that a 
 
 **Built** (`tests/encrypt_test.py`, native): `bodies.ls` seals at `store_event` (a pair `x` with the key's fingerprint, last) and opens where a body is read (`start_one`, `start_replay`, `find_event`), each in a room of its own left by falling out of it; a body that does not open is not sent (a failed attempt) and `GET` answers its `event` as `null`; `load_keys` before the logs are read (46), `check_sealed` after (47). The nonce is four random bytes of the start and the id. Not done: a check of the key file's mode by the production profile (the file may be anywhere: the operator's); a key held anywhere but a file (a KMS).
 
-### 47.5 Tests, stated first
+### 47.5 The operator's page
+
+`docs/privacy.md`: what is held, where and for how long; answering a request for access or erasure with the service; what the service does for each SOC 2 criterion it touches and what stays the operator's; what is not done.
+
+### 47.6 Tests, stated first
 
 `tests/audit_test.py`: every route in the right class (written or not), a held change written twice with its outcome, no token or header value in the file, the rotation, `audit-log = 0` refused by `production = 1`, a full disk making `/readyz` say `audit_log`. `tests/maxage_test.py`: events pinned by a paused endpoint and a waiting replay dropped at the age, cursors moved, the counts, a restart that agrees. `tests/erase_test.py`: the body gone from the segment's bytes (read apart from the service), the event never sent again or served, the rest of the segment intact and read by `chaos.py`'s reader, `kill -9` at each step. `tests/encrypt_test.py`: no body readable in the files, delivery and `GET` the same, a start without the key refused, rotation.

@@ -16,7 +16,8 @@ A webhook delivery service, written in [lex-sys](https://github.com/alpibrusl/le
 * **Cron.** Schedules that append ordinary events, exactly once, even across a crash.
 * **`https` and names.** TLS with the certificate chain and host name verified; names resolved by the service, with the destination checked at every attempt.
 * **Operable.** `/healthz`, `/readyz`, Prometheus `/metrics`, a graceful stop, a refusal to start on a corrupt log, backup and restore.
-* **Bounded.** Retention drops old, finished events; scoped bearer tokens, and a `production` profile that refuses an unsafe configuration.
+* **Bounded.** Retention drops old, finished events, a maximum age drops whatever is older, the history is pruned; scoped bearer tokens, and a `production` profile that refuses an unsafe configuration.
+* **Privacy and audit.** Erase one event (`DELETE /events/:id`), encrypt bodies at rest, an audit log of who read and changed what ([docs/privacy.md](docs/privacy.md)).
 
 ## Quick start
 
@@ -142,7 +143,8 @@ The scope says which bearer token a route needs when that token is configured (`
 | route | scope | what it does |
 |---|---|---|
 | `POST /events` | ingest | store an event (a JSON object with a string `"type"`; optional `Idempotency-Key`); `202 {"id":N}` after the flush |
-| `GET /events/:id` | read | the stored event |
+| `GET /events/:id` | read | the stored event (`410` once it was dropped or erased) |
+| `DELETE /events/:id` | admin | erase one event: its body is replaced in the log, and it is never sent or served again |
 | `GET /events/:id/attempts` | read | the attempts of an event and why each failed (needs a database) |
 | `POST /events/:id/replay[/:endpoint]` | admin | send an event again to every subscribed endpoint, or to one |
 | `GET /endpoints`, `GET /endpoints/:id` | read | the endpoints (never the host, a secret or a header's value) |
@@ -161,11 +163,15 @@ Settings come from a file (`--config hooks.conf`, `key = value` a line), from fl
 |---|---|---|
 | `port`, `dir` | required | the TCP port, and the data directory (the logs, and `endpoints.conf`) |
 | `admin-token`, `ingest-token`, `read-token` | none | bearer tokens of the three scopes; a scope without one is open |
-| `production` | `0` | `1`: refuse to start unless tokens are set, private hosts are off and the data directory is closed to others |
+| `production` | `0` | `1`: refuse to start unless tokens are set, private hosts are off, the audit log is on and the data directory is closed to others |
 | `pg-host` (`pg-user`, `pg-database`, `pg-password`) | none | a PostgreSQL for the endpoints and the attempt history |
 | `schedule` | nine delays, 5 s to 24 h | retry delays in ms; after the last, a dead letter |
 | `retry-jitter` | `10` | percent each retry delay is moved, up or down |
 | `retention-days` | `30` | drop finished events older than this (`0` keeps them) |
+| `max-age-days` | `0` | drop any event older than this, finished or not (`0`: none) |
+| `history-days` | `30` | delete history rows older than this (`0` keeps them) |
+| `encryption-key-file` | none | encrypt event bodies at rest with this key (32 bytes or 64 hex digits; keep it apart from backups) |
+| `audit-log` | `1` | write `<dir>/audit.log`: who read and changed what |
 | `allow-private-hosts` | `0` | `1`: endpoints may be on private, loopback or link-local addresses |
 
 ## Documentation
@@ -173,7 +179,7 @@ Settings come from a file (`--config hooks.conf`, `key = value` a line), from fl
 * [docs/api.md](docs/api.md): every route, scope and error. [docs/configuration.md](docs/configuration.md): every setting and exit status.
 * [docs/endpoints.md](docs/endpoints.md): the database, `endpoints.conf`, event types, secret rotation, custom headers. [docs/cron.md](docs/cron.md): schedules.
 * [docs/delivery.md](docs/delivery.md): how delivery works, retries, idempotency, dead letters, pace. [docs/https.md](docs/https.md): `https` and host names.
-* [docs/security.md](docs/security.md): tokens, the production profile, authority. [docs/operating.md](docs/operating.md): metrics, stopping, building, the prebuilt binary.
+* [docs/security.md](docs/security.md): tokens, the production profile, authority, the audit log, encryption at rest. [docs/privacy.md](docs/privacy.md): what is held, for how long, erasure, and GDPR and SOC 2. [docs/operating.md](docs/operating.md): metrics, stopping, building, the prebuilt binary.
 * [docs/runbook.md](docs/runbook.md): running it, log lines, backup and restore, what to do when it goes wrong.
 * [docs/status.md](docs/status.md): what is built, what is not, measured costs, limits. [docs/production.md](docs/production.md): what "production" means here and the plan.
 * [docs/testing.md](docs/testing.md): how the tests are built and run. [docs/layout.md](docs/layout.md): the source map.
@@ -186,8 +192,8 @@ Settings come from a file (`--config hooks.conf`, `key = value` a line), from fl
 * **One process, one thread, one core**, at most 1,024 endpoints (a constant of the build; [status.md](docs/status.md)), 64 attempts in flight.
 * **`https` uses OpenSSL in the process** by default; with lex-sys's own TLS it is a second build, `hooks-pure`, with no foreign function for TLS, no resumption and about 4 to 7 times the CPU a handshake ([docs/pure-tls.md](docs/pure-tls.md)); no revocation checks, client certificates or IPv6, and each delivery costs a handshake.
 * **No TLS on the service's own port** (put a reverse proxy in front); signing secrets are stored in the clear in the database, which is the trust boundary.
-* **The endpoints table is read once**, and a host *name* for `pg-host` stalls the loop: give an address.
-* **An event dropped by retention is gone**; delivery is at least once, and not strictly ordered.
+* **The endpoints table is read once**: a change made behind the service's back is seen at the next start.
+* **An event dropped by retention is gone** (`410`); delivery is at least once, and not strictly ordered.
 
 ## Contributing
 
