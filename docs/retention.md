@@ -203,3 +203,8 @@ Everything above was built without changing `lexsys-log`: its record and recover
 ## 17. Open
 
 See `docs/design.md` section 38.6 and `docs/production.md` 0.2 for what is not verified and what is still open.
+
+## The hard maximum age (`max-age-days`)
+
+Retention keeps an event that is not final somewhere for as long as that lasts: a paused, disabled or dead endpoint, or a waiting replay, can keep the whole log from that event on. `max-age-days` (default 0: none) is the bound nothing can hold back: the oldest segment, once it is older than that, is dropped whatever pins it. Before it goes, in the same flush, every endpoint whose cursor is below its last event is moved past it with an `advanced` record (`docs/design.md` section 42), and a replay waiting for one of its events is ended (`replay_cancelled`); the events that were not final are counted (`/stats events_expired`, `segments_expired`) and are a `410` like any dropped event. The active segment is sealed when it is that old, so that a quiet service drops its events too. `docs/design.md` section 47.2.
+
