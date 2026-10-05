@@ -986,7 +986,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             return server.failure(heap, out, 400, manage.why(4), keep);
         }
         // The subscription and the headers (`epx.ls`): judged here, kept in the delivery state until the database answers.
-        let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], false, stats[off_ex() + ex_grace()], now);
+        let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], false, stats[off_ex() + ex_grace()]);
         if named != 0 {
             return server.failure(heap, out, 400, epx.why(named), keep);
         }
@@ -1030,12 +1030,12 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         // The subscription, the headers, and how long the previous secret stays valid (`epx.ls`).
         epx.clear_pending(stats[off_xg()..off_xg() + epx.xg_size()]);
         if parsed.1 & 16 != 0 {
-            let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], true, stats[off_ex() + ex_grace()], now);
+            let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], true, stats[off_ex() + ex_grace()]);
             if named != 0 {
                 return server.failure(heap, out, 400, epx.why(named), keep);
             }
             // Keeping a previous secret without making a new one needs one to keep (to end the overlap there need not be).
-            if epx.pending_mask(stats[off_xg()..off_xg() + epx.xg_size()]) & epx.m_keep() != 0 && parsed.1 & 12 == 0 && epx.pending_keep_until(stats[off_xg()..off_xg() + epx.xg_size()]) > 0 && !epx.old_active(stats[off_xt()..off_xt() + epx.xt_size()], index_of_id(stats, want), now) {
+            if epx.pending_mask(stats[off_xg()..off_xg() + epx.xg_size()]) & epx.m_keep() != 0 && parsed.1 & 12 == 0 && epx.pending_keep_ms(stats[off_xg()..off_xg() + epx.xg_size()]) > 0 && !epx.old_active(stats[off_xt()..off_xt() + epx.xt_size()], index_of_id(stats, want), now) {
                 return server.failure(heap, out, 400, epx.why(305), keep);
             }
         }
@@ -3643,7 +3643,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     let secret = alloc_slice[ra](96, byte_of(0));
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), hl, host);
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_secret(), sl, secret);
-                                    let request = change_request(heap, dv, host[0..hl], secret[0..sl]);
+                                    let request = change_request(heap, dv, host[0..hl], secret[0..sl], clock_unix_ms(clock));
                                     borrow request as &rb in {
                                         borrow mut pl as &!qw in {
                                             sent = pool.submit(qw, next_tag, buffer.bytes(rb));
@@ -3983,7 +3983,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     var created = buffer.empty(heap, 0);
                                     borrow mut done as &!dgw in {
                                         buffer.drop(heap, created);
-                                        created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                        created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1, clock_unix_ms(clock));
                                     }
                                     if changed >= 0 {
                                         borrow mut at as &!aw2 in {
@@ -4566,7 +4566,7 @@ fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
 }
 
 // The statement for the change that waits in `mg`: the insert of a new endpoint, the update of an address, or of the address and the secret.
-fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte]) -> [heap] buffer.Buffer {
+fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte], now: int) -> [heap] buffer.Buffer {
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return queries.delete_endpoint_start(heap, dv[off_mg() + manage.mg_target()]);
     }
@@ -4586,7 +4586,11 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
             q = queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
         } else {
             let mask = epx.pending_mask(xg);
-            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
+            var keep_until = 0;
+            if epx.pending_keep_ms(xg) > 0 {
+                keep_until = now + epx.pending_keep_ms(xg);
+            }
+            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, keep_until, mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
     }
     return q;
@@ -4607,7 +4611,7 @@ fn schedule_answer[&h, &m](heap: &!h Heap, kind: int, target: int, rep: &m [byte
     return sched.answer(heap, kind, target, rep, status, keep, now, seconds);
 }
 
-fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool, now: int) -> [heap, file_write] buffer.Buffer {
     if pool.lost(status) {
         // The connection went with the change on it (section 37.4): nothing in memory changes, and the row may or may not be in the table.
         return lost_answer(heap, keep);
@@ -4616,7 +4620,7 @@ fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         return finish_delete(heap, dv, blob, done, rep, status, keep);
     }
     if dv[off_mg() + manage.mg_kind()] == 1 {
-        return finish_patch(heap, dv, blob, rep, status, keep);
+        return finish_patch(heap, dv, blob, rep, status, keep, now);
     }
     return finish_create(heap, dv, blob, lg, done, rep, status, keep);
 }
@@ -4739,7 +4743,7 @@ fn finish_delete[&h, &b, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [b
 // The database has answered a `PATCH`: on commit the table in memory takes the new address (and key), so the next attempt, a retry of an event
 // first tried under the old secret included, uses them; an attempt on the wire finishes against what it began with. The answer carries the
 // secret if the change made or brought one, as `POST /endpoints` does.
-fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], rep: &m [byte], status: int, keep: bool) -> [heap] buffer.Buffer {
+fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], rep: &m [byte], status: int, keep: bool, now: int) -> [heap] buffer.Buffer {
     let out = buffer.empty(heap, 512);
     if status != 0 || pg.failure(rep) >= 0 {
         return server.failure(heap, out, 503, "the database did not store the change", keep);
@@ -4801,7 +4805,11 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
         if !failed {
             // The subscription, the headers and the previous secret (`epx.ls`): the database has them, now the delivery does.
             let mask = epx.pending_mask(dv[off_xg()..off_xg() + epx.xg_size()]);
-            let until = epx.pending_keep_until(dv[off_xg()..off_xg() + epx.xg_size()]);
+            // the overlap is counted from now, the commit: the time the change waited for the database is not taken from it
+            var until = 0;
+            if epx.pending_keep_ms(dv[off_xg()..off_xg() + epx.xg_size()]) > 0 {
+                until = now + epx.pending_keep_ms(dv[off_xg()..off_xg() + epx.xg_size()]);
+            }
             let ex_types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
             let ex_spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
             if mask & epx.m_types() != 0 {

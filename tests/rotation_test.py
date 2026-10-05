@@ -18,6 +18,7 @@ The database must exist; the test applies sql/schema.sql and empties `endpoints`
      not the one before; a new secret without a period ends a running one
   8. every way a period can be wrong is a 400 with its reason; neither secret is in GET /endpoints, /stats or /config; the old secret is in the row
   9. a replay in the period carries both; `endpoints.conf` with `old=` and the database's columns give the same
+ 11. the period is counted from the commit: a change the database held 2.5 s keeps its whole period after the answer
 """
 import json
 import os
@@ -103,7 +104,9 @@ def main():
     until = out["secret_old_until"]
     check("2. GET shows that time (and never a secret)", until_of(svc, 1) == until, str(get(svc, "/endpoints/1")))
     row = psql("select secret, secret_old, secret_old_until from endpoints where id = 1")[0]
-    check("2. the row has the new secret, the old one and the time", row == (s2, s1, str(until)), str(row))
+    # the row's time is fixed when the change is sent, the answer's at the commit (section 35): the row's is at most the answer's, and not before the request's plus the period
+    check("2. the row has the new secret, the old one and the time (as of when the change was sent: between the request's and the answer's)",
+          row[:2] == (s2, s1) and t_before + 4000 <= int(row[2]) <= until, str((row, t_before, until)))
     post_event(svc, 2)
     check("2. the next event arrives", wait_for(lambda: rc.count() == 2, 5))
     r = last(rc)
@@ -155,7 +158,9 @@ def main():
     wait_for(lambda: rc.count() == 1, 5)
     kill9(svc)
     svc = start(d)
-    check("5. after kill -9 the period is the one the row has", until_of(svc, 1) == until, str((until_of(svc, 1), until)))
+    row_until = int(psql("select secret_old_until from endpoints where id = 1")[0][0])
+    check("5. after kill -9 the period is the one the row has (its time as of when the change was sent, at most the answer's)",
+          until_of(svc, 1) == row_until and until - 1000 <= row_until <= until, str((until_of(svc, 1), row_until, until)))
     post_event(svc, 2)
     check("5. ... and the next event carries both signatures", wait_for(lambda: 2 in rc.events(), 5) and len(sigs(of_event(rc, 2))) == 2 and verifies(of_event(rc, 2), s1) and verifies(of_event(rc, 2), s2), str([sigs(r) for r in rc.seen]))
     stop(svc)
@@ -225,7 +230,7 @@ def main():
     check("7. a second rotation keeps the secret it replaced (s2) and not the one before (s1)", wait_for(lambda: rc.count() == 1, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s3) and verifies(last(rc), s2) and not verifies(last(rc), s1), str(sigs(last(rc))))
     st, out = patch(svc, 1, {"keep_old_ms": 90000})
     check("7. a period alone moves the time of the previous secret", st == 200 and out["secret_old_until"] > now_ms() + 80000 and until_of(svc, 1) == out["secret_old_until"], str((st, out)))
-    check("7. ... in the row too", int(psql("select secret_old_until from endpoints where id = 1")[0][0]) == out["secret_old_until"])
+    check("7. ... in the row too (as of when the change was sent)", out["secret_old_until"] - 1000 <= int(psql("select secret_old_until from endpoints where id = 1")[0][0]) <= out["secret_old_until"])
     st, out = patch(svc, 1, {"keep_old_ms": 0})
     check("7. {keep_old_ms: 0} ends it now", st == 200 and until_of(svc, 1) == 0 and psql("select secret_old, secret_old_until from endpoints where id = 1") == [("", "0")], str(psql("select secret_old, secret_old_until from endpoints where id = 1")))
     post_event(svc, 2)
@@ -331,6 +336,40 @@ def main():
     shutil.rmtree(d)
     for r in (ra, rb, rn):
         r.close()
+
+    # ---- 11. the period is counted from the commit, not from the request ---------------------------------------------
+    # A change that waits for the database (here 2.5 s, through a proxy that holds every byte) keeps its whole overlap: counted from the request,
+    # the soak's rotation held 4 s by an unreachable database lost 4 s of it.
+    reset_db()
+    s1, s2 = secret(), secret()
+    rc = Receiver()
+    add_endpoint(1, rc.port, s1)
+    from pgproxy import PgProxy
+    px = PgProxy(PG_HOST, PG_PORT)
+    flags = ["--pg-host", "127.0.0.1", "--pg-port", str(px.port), "--pg-user", PG_USER, "--pg-database", PG_DB, "--admin-token", TOKEN]
+    if PG_PASSWORD:
+        flags += ["--pg-password", PG_PASSWORD]
+    d = tmp()
+    svc = start(d, extra=flags)
+    px.mode = "freeze"
+    t_asked = now_ms()
+    import threading
+    threading.Timer(2.5, px.restore).start()
+    st, out = patch(svc, 1, {"secret": s2, "keep_old_ms": 4000})
+    t_answered = now_ms()
+    check(f"11. a PATCH held by the database for {t_answered - t_asked} ms is a 200 whose period ends 4000 ms after the commit, not after the request",
+          st == 200 and t_answered - t_asked >= 2000 and t_answered + 4000 - 300 <= out["secret_old_until"] <= t_answered + 4000, str((st, out, t_asked, t_answered)))
+    row = psql("select secret_old_until from endpoints where id = 1")[0][0]
+    check("11. the row's time is the one as of when the change was sent: at least the request's plus the period", int(row) >= t_asked + 4000, str((row, t_asked)))
+    while now_ms() < t_answered + 2500:
+        time.sleep(0.05)
+    post_event(svc, 1)
+    check("11. an event 2.5 s after the answer (past the request's time plus the period) still carries both signatures",
+          wait_for(lambda: rc.count() == 1, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s1) and verifies(last(rc), s2), str([sigs(r) for r in rc.seen]))
+    stop(svc)
+    shutil.rmtree(d)
+    rc.close()
+    px.alive = False
     finish("rotation")
 
 
