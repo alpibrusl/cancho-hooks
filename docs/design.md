@@ -2258,10 +2258,10 @@ An endpoint may be given an **Ed25519 public key** (`"receipt_key"` on `POST` an
 
 ### 48.8 What building it would ask of lex-sys
 
-Two gaps are known from reading `docs/ed25519.md` in lex-sys, and a third is a question:
+Two gaps in lex-sys, one of them known and unfiled until now, and a question:
 
 1. **`std.ed25519` signing is not constant-time.** Its field and point arithmetic no longer branch on data (`docs/x25519.md` §3.1), but the scalar arithmetic modulo the group order still does (`bn_mulmod`, `bn_reduce_wide`: the ctgrind check names them). For a service that signs a checkpoint a second, with the key in memory, that is a timing channel for anyone who can measure signing; the network position that would let them is the same as for any request. The fix belongs in lex-sys (a constant-time scalar reduction), and receipts should not be called production-grade until it is there and until the signature code has been independently reviewed (lex-sys#209, area C: signatures).
-2. **lex-sys has no source of randomness** (`docs/ed25519.md`: no CSPRNG capability), so the service cannot make a key or the event salts itself: the key comes from a file the operator makes, and the salt needs a `random` capability or a read of `/dev/urandom` through `Fs` (a file read: `fs_read("/dev/urandom")`, which the authority report would show). A narrow `Random` capability is the clean answer and a gap worth filing before the salt is built.
+2. **Randomness exists, but not in a form hooks can share.** lex-sys has no randomness builtin by design: `docs/tls-pure.md` decides that the caller reads 32 bytes of `/dev/urandom` through `Fs` (the authority report names `fs_read("/dev/urandom")`) and draws everything else from a ChaCha20 fast-key-erasure generator, which today lives inside `packages/tls`. Hooks already reads `/dev/urandom` by hand in three places (`history.ls`'s SCRAM nonce and seed, `manage.ls`'s endpoint secrets). The salts of 48.4 would be a fourth. A generator in `std` that any program can seed and draw from, with the same refusal to run unseeded, is the clean answer and replaces all of them.
 3. **What "only the receipts module can sign" means.** The compiler's authority report has labels for the file system, the network and foreign calls; it has none for "reaches this key". What CI can pin is structural: that `std.ed25519.sign` is imported by exactly one module of the service (a check over the sources, as `scripts/check-authority.sh` is a check over a report). That is a convention a person approves in a diff, not a property the type system proves, and the documents should say so.
 
 ### 48.9 How it would be tested
@@ -2280,4 +2280,4 @@ Two gaps are known from reading `docs/ed25519.md` in lex-sys, and a third is a q
 4. The receiver counter-signature (48.5) and the key setting on endpoints.
 5. Witnessing (48.7), and an ingest receipt.
 
-Slices 1 and 2 need the two lex-sys gaps of 48.8 only for the salt (2) and for the claim of production quality (1); both can be filed now.
+Slices 1 and 2 need the two lex-sys gaps of 48.8 for the salt (2) and for any claim of production quality (1); both are filed (lex-sys#289: a shared generator, and lex-sys#290: constant-time signing).
