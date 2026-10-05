@@ -133,6 +133,9 @@ pub fn scope_of(id: int) -> [] int {
     if id == 23 {
         return s_admin(); // DELETE /endpoints/:id/replays
     }
+    if id == 24 {
+        return s_admin(); // DELETE /events/:id
+    }
     if id == 40 {
         return s_open(); // GET /readyz
     }

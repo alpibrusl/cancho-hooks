@@ -577,7 +577,7 @@ fn metrics_reply[&h, &d, &l, &g, &x, &j, &q, &t](heap: &!h Heap, dv: &d [int], l
 // One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
 // `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
 // `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, fs_read(""), file_read, file_write] buffer.Buffer {
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
@@ -680,11 +680,28 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         note[1] = 0;
         return out;
     }
+    if id == 24 {
+        // DELETE /events/:id (`docs/design.md` section 47.3): erase one event.
+        let want = route.param_nat(path, params, 0);
+        if want < 1 {
+            return server.failure(heap, out, 400, "the id must be a positive number", keep);
+        }
+        if want < evlog.first_id(lg) {
+            return server.failure(heap, out, 410, "the event was dropped by retention: there is nothing left of it to erase", keep);
+        }
+        if want > evlog.last_id(lg) {
+            return server.failure(heap, out, 404, "no such event", keep);
+        }
+        return erase_event(heap, lg, done, window, stats, want, now, keep, out);
+    }
     if id == 3 {
         // GET /events/:id
         let want = route.param_nat(path, params, 0);
         if want < 1 {
             return server.failure(heap, out, 400, "the id must be a positive number", keep);
+        }
+        if event_erased(lg, window, want) {
+            return server.failure(heap, out, 410, "the event was erased (DELETE /events/:id)", keep);
         }
         let found = find_event(heap, lg, window, want);
         var answer = out;
@@ -740,6 +757,8 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "events_erased");
+        w = json.put_int(heap, w, stats[off_ex() + ex_erased()]);
         w = json.put_key(heap, w, "events_expired");
         w = json.put_int(heap, w, stats[rt_at() + r_expired()]);
         w = json.put_key(heap, w, "segments_expired");
@@ -1155,6 +1174,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         }
         if offset < 0 {
             return server.failure(heap, out, 404, "no such event", keep);
+        }
+        if erased_record(window) {
+            return server.failure(heap, out, 410, "the event was erased and cannot be replayed", keep);
         }
         // A replay to every endpoint goes to those whose subscription wants the event's type; a replay to one endpoint, named, goes whatever it
         // subscribes to (section 35). The type is read from the record, which is left in `window` for the loops below.
@@ -1659,6 +1681,7 @@ fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
     r = route.add(heap, r, "POST", "/endpoints/:id/replay-dead", 21);
     r = route.add(heap, r, "DELETE", "/events/:id/replay/:endpoint", 22);
     r = route.add(heap, r, "DELETE", "/endpoints/:id/replays", 23);
+    r = route.add(heap, r, "DELETE", "/events/:id", 24);
     r = route.add(heap, r, "GET", "/readyz", 40);
     r = route.add(heap, r, "GET", "/metrics", 41);
     return r;
@@ -1886,6 +1909,162 @@ fn note_outcome[&g, &d](done: &!g log.Log, dv: &!d [int], kind: int, e: int, id:
         }
     }
     return ok;
+}
+
+// Erase event `want` (`docs/design.md` section 47.3), in this order, each step durable before the next: the `erased` record, flushed (from then on it is never
+// sent, replayed or served); in memory, final in every window that holds it (an attempt on the wire finishes), its waiting replays ended, its dead letters gone;
+// the segment that holds it sealed if it is the one being written; its body replaced in the segment (`evlog.redact`). A start finds an `erased` record whose
+// body is not yet replaced and replaces it (`redo_erasures`).
+fn erase_event[&h, &l, &g, &w, &d](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], dv: &!d [int], want: int, now: int, keep: bool, out: buffer.Buffer) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] buffer.Buffer {
+    let at = find_offset(lg, window, want);
+    if at < 0 {
+        return server.failure(heap, out, 404, "no such event", keep);
+    }
+    var already = erased_record(window);
+    if !already {
+        if note_outcome(done, dv, state.erased(), 0, want, 0, 0) == 0 || log.flush(done) != 0 {
+            return server.failure(heap, out, 503, "the erasure could not be stored; nothing was changed", keep);
+        }
+        erase_in_memory(done, dv, want);
+        log.flush(done);
+        var rc = evlog.flush(lg);
+        if rc == 0 {
+            rc = evlog.redact(heap, lg, at);
+            if rc == 1 {
+                rc = evlog.roll(lg, now);
+                if rc == 0 {
+                    rc = evlog.redact(heap, lg, at);
+                }
+            }
+        }
+        dv[off_ex() + ex_erased()] = dv[off_ex() + ex_erased()] + 1;
+        if rc != 0 && rc != 4 {
+            return server.failure(heap, out, 503, "the event is erased for delivery, replay and reading, but its segment could not be rewritten now (the disk?); it is rewritten at the next start", keep);
+        }
+    }
+    var wr = json.writer(heap, 96);
+    wr = json.begin_object(heap, wr);
+    wr = json.put_key(heap, wr, "id");
+    wr = json.put_int(heap, wr, want);
+    wr = json.put_key(heap, wr, "erased");
+    wr = json.put_bool(heap, wr, true);
+    if already {
+        wr = json.put_key(heap, wr, "already");
+        wr = json.put_bool(heap, wr, true);
+    }
+    wr = json.end_object(heap, wr);
+    let body = json.finish(wr);
+    var answer = out;
+    borrow body as &sb in {
+        answer = server.reply(heap, answer, 200, buffer.bytes(sb), keep);
+    }
+    buffer.drop(heap, body);
+    return answer;
+}
+
+// What an erasure does to the state (section 47.3), at the request and when the `erased` record is replayed: the event is final in every window that holds it and
+// is not on the wire, its dead letters are gone, and (with `done`, at the request) its waiting replays are ended with a `replay_cancelled` record each.
+fn erase_in_memory[&g, &d](done: &!g log.Log, dv: &!d [int], want: int) -> [file_write] int {
+    erase_cells(dv, want);
+    var r = 0;
+    while r < rp_cap() {
+        let b = off_rp() + r * rp_stride();
+        if dv[b] == 1 && dv[b + 6] == 0 && dv[b + 2] == want {
+            note_outcome(done, dv, state.replay_cancelled(), dv[b + 1], want, 0, 0);
+            dv[b] = 0;
+        }
+        r = r + 1;
+    }
+    return 0;
+}
+
+fn erase_cells[&d](dv: &!d [int], want: int) -> [] int {
+    var e = 0;
+    while e < state.max_endpoints() {
+        if dv[off_slotid() + e] >= 0 {
+            if state.in_window(dv[off_cur()..off_cur() + state.max_endpoints()], e, want) && !state.is_final(dv[off_cells()..off_flight()], dv[off_cur()..off_cur() + state.max_endpoints()], e, want) && dv[flight_at(e, want)] == 0 {
+                apply_outcome(dv, e, state.delivered(), want, 0, 0);
+            }
+            dead.remove(dead_of_mut(dv), e, want);
+        }
+        e = e + 1;
+    }
+    return 0;
+}
+
+// At the start (section 47.3): every event the outcomes log says was erased whose body is still in its segment (the service stopped between the record and the
+// rename) is erased in its segment now. Answers how many were.
+fn redo_erasures[&h, &l, &g, &w](heap: &!h Heap, lg: &!l evlog.Ev, done: &!g log.Log, window: &!w [byte], now: int) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] int {
+    var redone = 0;
+    var at = 0;
+    var going = true;
+    var ids = buffer.empty(heap, 64);
+    var n = 0;
+    while going {
+        let r = log.read_at(done, at, window);
+        if r.0 != 0 {
+            going = false;
+        } else {
+            let o = state.outcome_at(window, 0);
+            if o.0 == state.erased() && n < 4096 {
+                ids = buffer.push_nat(heap, ids, o.2);
+                ids = buffer.append(heap, ids, ",");
+                n = n + 1;
+            }
+            at = at + r.1;
+        }
+    }
+    var k = 0;
+    var v = 0;
+    var bl = 0;
+    borrow ids as &ir in {
+        bl = len(buffer.bytes(ir));
+    }
+    while k < bl {
+        var c = 0;
+        borrow ids as &ir in {
+            c = int_of(buffer.bytes(ir)[k]);
+        }
+        if c == ',' {
+            if v >= evlog.first_id(lg) && !event_erased(lg, window, v) {
+                let off = find_offset(lg, window, v);
+                if off >= 0 {
+                    var rc = evlog.redact(heap, lg, off);
+                    if rc == 1 && evlog.roll(lg, now) == 0 {
+                        rc = evlog.redact(heap, lg, off);
+                    }
+                    if rc == 0 {
+                        redone = redone + 1;
+                    }
+                }
+            }
+            v = 0;
+        } else {
+            v = v * 10 + c - '0';
+        }
+        k = k + 1;
+    }
+    buffer.drop(heap, ids);
+    return redone;
+}
+
+// Is the record in `window` an event whose body was erased (`docs/design.md` section 47.3)? Its first pair is the body.
+fn erased_record[&w](window: &w [byte]) -> [] bool {
+    let p = record.pair_at(window, record.first_pair(0));
+    return evlog.is_erased(window[p.2..p.2 + p.3]);
+}
+
+// Is event `id` in the log and erased? Reads its record into `window`.
+fn event_erased[&l, &w](lg: &!l evlog.Ev, window: &!w [byte], id: int) -> [fs_read(""), file_read] bool {
+    let at = find_offset(lg, window, id);
+    if at < 0 {
+        return false;
+    }
+    let r = evlog.read_at(lg, at, window);
+    if r.0 != 0 || record.ms_of(window, 0) != id {
+        return false;
+    }
+    return erased_record(window);
 }
 
 // What goes before a window outcome that a replay could not place (`docs/design.md` section 42.3): the endpoint has passed over events that leave no record,
@@ -2234,6 +2413,11 @@ fn ex_again() -> [] int {
 // How many times that wait was left out (`/stats` says so: a backlog being drained is seen, and not only timed).
 fn ex_hurried() -> [] int {
     return 5;
+}
+
+// How many events have been erased since the start (`docs/design.md` section 47.3).
+fn ex_erased() -> [] int {
+    return 7;
 }
 
 // How many `advanced` records the service has written since the start (`docs/design.md` section 42; `/stats` says so).
@@ -2757,6 +2941,9 @@ fn replay[&l, &w, &d](done: &!l log.Log, window: &!w [byte], dv: &!d [int]) -> [
                 if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     advance_window(dv, o.1, o.2);
                 }
+            } else if o.0 == state.erased() {
+                // about an event, not a slot (section 47.3): final in every window that holds it, its dead letters gone
+                erase_cells(dv, o.2);
             } else if o.0 == state.reason() {
                 if o.1 >= 0 && o.1 < state.max_endpoints() && slot_known(dv, o.1) {
                     ops.set_last_reason(dv[off_ops()..off_ops() + ops.size()], o.1, o.4 % state.reason_replay());
@@ -2994,6 +3181,12 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
         }
     }
     let p = record.pair_at(window, record.first_pair(0));
+    if evlog.is_erased(window[p.2..p.2 + p.3]) {
+        // Erased while it waited for a retry (`docs/design.md` section 47.3): final here, never sent.
+        apply_outcome(dv, e, state.delivered(), id, 0, 0);
+        dv[off_lag() + e] = 1;
+        return (atab, 0);
+    }
     let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
     var table = atab;
     var started = 0 - 1;
@@ -3035,6 +3228,13 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
         return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
     }
     let p = record.pair_at(window, record.first_pair(0));
+    if evlog.is_erased(window[p.2..p.2 + p.3]) {
+        // Erased while the replay waited (section 47.3): the replay ends, nothing is sent.
+        dv[base] = 0;
+        dv[off_flying() + e] = dv[off_flying() + e] - 1;
+        note_outcome(done, dv, state.replay_cancelled(), e, id, 0, 0);
+        return (atab, 1);
+    }
     let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
     var table = atab;
     var started = 0 - 1;
@@ -3183,7 +3383,7 @@ fn start_attempts[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg
                     }
                 }
                 if going {
-                    if loaded && unwanted(window, dv, i, e, id) {
+                    if loaded && (unwanted(window, dv, i, e, id) || erased_record(window)) {
                         // The endpoint's subscription does not want this event (section 35): it is final here at once, with no attempt and no record;
                         // the cursor moves over it as over a delivered one, and a restart decides it again from the log.
                         apply_outcome(dv, e, state.delivered(), id, 0, 0);
@@ -5505,6 +5705,10 @@ fn main(world: World) -> [] int {
                                                     ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
                                                     borrow mut dl as &!dw in {
                                                         status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), cblob[0..0], from_db, config.allow_private_hosts(cfg), now0);
+                                                        if status == 0 {
+                                                            // An erasure the last run recorded and did not finish in the segment is finished now (section 47.3).
+                                                            redo_erasures(h, lw, dw, buffer.room(wb), now0);
+                                                        }
                                                     }
                                                     if status == 0 && config.production(cfg) {
                                                         // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).

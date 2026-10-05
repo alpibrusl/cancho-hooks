@@ -655,6 +655,157 @@ pub fn peek[&e](ev: &!e Ev, at: int) -> [fs_read(""), file_read] (int, int, int)
     return (2, 0, 0);
 }
 
+// The body an erased event's record holds in place of its own (`docs/design.md` section 47.3), padded with spaces to the length the body had, so that every offset
+// stays where it was; `{}` and spaces for a body shorter than it (an event always has a "type", so a body that is `{}` and spaces is no event's).
+pub fn erased_marker() -> [] &static [byte] {
+    return "{\"erased\":true}";
+}
+
+// Is `value` (the `event` pair of a record) an erased body?
+pub fn is_erased[&v](value: &v [byte]) -> [] bool {
+    let m = erased_marker();
+    var head = 0;
+    if len(value) >= len(m) && bytes_equal(value[0..len(m)], m) {
+        head = len(m);
+    } else if len(value) >= 2 && int_of(value[0]) == '{' && int_of(value[1]) == '}' {
+        head = 2;
+    } else {
+        return false;
+    }
+    var i = head;
+    while i < len(value) {
+        if int_of(value[i]) != ' ' {
+            return false;
+        }
+        i = i + 1;
+    }
+    return head == len(m) || len(value) > 2;
+}
+
+fn bytes_equal[&a, &b](x: &a [byte], y: &b [byte]) -> [] bool {
+    if len(x) != len(y) {
+        return false;
+    }
+    var i = 0;
+    while i < len(x) {
+        if int_of(x[i]) != int_of(y[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Where the `event` pair of the whole record at `at` in `buf` has its value: `(start, length)`, or `(-1, 0)` if it has none.
+pub fn event_value[&b](buf: &b [byte], at: int) -> [] (int, int) {
+    var p = record.first_pair(at);
+    var f = 0;
+    while f < record.fields_of(buf, at) {
+        let pr = record.pair_at(buf, p);
+        if pr.1 == 5 && bytes_equal(buf[pr.0..pr.0 + 5], "event") {
+            return (pr.2, pr.3);
+        }
+        p = pr.4;
+        f = f + 1;
+    }
+    return (0 - 1, 0);
+}
+
+// Erase the body of the event whose record is at the logical offset `at` (`docs/design.md` section 47.3). Its segment, which must be sealed, is read whole,
+// the record's `event` value replaced by `erased_marker()` and spaces to the same length and the record sealed again; the copy is written to
+// `<segment>.tmp` and synced, renamed over the segment, and the directory synced (steps 34 to 36 of `compact-kill-at`). The cache is forgotten. Answers 0; 1 if
+// the record is in the segment being written (seal it first); 2 if there is no whole record there; 3 if the copy could not be made or put in place (the
+// segment is then as it was, or wholly the new one); 4 if it was erased already.
+pub fn redact[&h, &e](heap: &!h Heap, ev: &!e Ev, at: int) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] int {
+    if at < ev.first || at >= ev.synced {
+        return 2;
+    }
+    let j = row_of(ev, at);
+    if j == ev.nseg - 1 {
+        return 1;
+    }
+    var rc = 0;
+    region a {
+        let path = alloc_slice[a](2112, byte_of(0));
+        let tmp = alloc_slice[a](2112, byte_of(0));
+        let pn = path_for(ev, path, seg_k(ev, j));
+        var tn = 0;
+        while tn < pn {
+            tmp[tn] = path[tn];
+            tn = tn + 1;
+        }
+        let ext = ".tmp";
+        var x = 0;
+        while x < len(ext) {
+            tmp[tn + x] = ext[x];
+            x = x + 1;
+        }
+        tn = tn + len(ext);
+        let size = store.size_of(ev.fs, path[0..pn]);
+        if size <= 0 {
+            rc = 3;
+        } else {
+            let whole = box_slice(heap, size, byte_of(0));
+            borrow mut whole as &!w in {
+                let buf = contents(w);
+                let got = store.read_range(ev.fs, path[0..pn], 0, buf);
+                let pos = seg_hdr(ev, j) + at - seg_base(ev, j);
+                if got != size {
+                    rc = 3;
+                } else {
+                    let r = record.check(buf, pos, size, max_len());
+                    if r.0 != record.ok() {
+                        rc = 2;
+                    } else {
+                        let v = event_value(buf, pos);
+                        if v.0 < 0 {
+                            rc = 2;
+                        } else if is_erased(buf[v.0..v.0 + v.1]) {
+                            rc = 4;
+                        } else {
+                            let m = erased_marker();
+                            var i = 0;
+                            while i < v.1 {
+                                buf[v.0 + i] = byte_of(' ');
+                                i = i + 1;
+                            }
+                            if v.1 >= len(m) {
+                                i = 0;
+                                while i < len(m) {
+                                    buf[v.0 + i] = m[i];
+                                    i = i + 1;
+                                }
+                            } else {
+                                buf[v.0] = byte_of('{');
+                                buf[v.0 + 1] = byte_of('}');
+                            }
+                            record.seal(buf, pos, pos + r.1);
+                            if store.write_file(ev.fs, tmp[0..tn], buf, true) != 0 {
+                                store.remove(ev.fs, tmp[0..tn]);
+                                rc = 3;
+                            }
+                        }
+                    }
+                }
+            }
+            unbox_slice(heap, whole);
+            if rc == 0 {
+                step(ev, 34);
+                if store.rename(ev.fs, tmp[0..tn], path[0..pn]) != 0 {
+                    store.remove(ev.fs, tmp[0..tn]);
+                    rc = 3;
+                } else {
+                    step(ev, 35);
+                    store.sync_path(ev.fs, contents(ev.dir)[0..ev.dlen]);
+                    step(ev, 36);
+                }
+            }
+        }
+    }
+    ev.clen = 0;
+    return rc;
+}
+
 // The cache `peek` reads into, lent. A position `peek` answered is good until the next `peek`.
 pub fn cache[&e](ev: &e Ev) -> [] &e [byte] {
     return contents(ev.cache);

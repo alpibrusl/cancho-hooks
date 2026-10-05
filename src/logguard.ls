@@ -431,7 +431,7 @@ fn last_reference[&f, &w](file: &!f File, valid_end: int, window: &!w [byte], ma
                     ref = o.2;
                 } else if o.0 == state.created() {
                     ref = o.3;
-                } else if o.0 == state.advanced() {
+                } else if o.0 == state.advanced() || o.0 == state.erased() {
                     ref = o.2;
                 }
                 if ref > most {
