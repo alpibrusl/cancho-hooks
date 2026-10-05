@@ -300,6 +300,11 @@ class Verifier:
         if c[0] - 1 <= self.repl.get(key, 0) + c[2]:
             self.explained["replay"] += 1
             return
+        if ep.ambiguous:
+            # a create that was not answered (a 504): the row may be in the table while the running service does not know it, so a DELETE is a 404 and the next start
+            # loads it, at the slowest cursor, where a replay to it is not one the harness asked for (docs/status.md: the table is read once). No claim about it is judged.
+            self.explained["ambiguous"] += 1
+            return
         k = self._kill_between(prev_t, t)
         if k is not None:
             c[2] += 1
