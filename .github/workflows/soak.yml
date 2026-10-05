@@ -1,6 +1,7 @@
 name: soak
 
-# The soak test of docs/soak.md. It is never run by a push or a pull request: by hand (Actions, "soak", Run workflow) or once a week.
+# The soak test of docs/soak.md: by hand (Actions, "soak", Run workflow) or once a week. A pull request that changes the harness runs its self-test instead
+# (`soak.py --selftest`: three minutes on the real service that must pass, three with a fault that must fail), on the same kind of machine CI uses.
 # A job on a GitHub-hosted runner may not run longer than six hours, so the run is of at most five and a half; the real 24-hour run is made on a machine of its own with
 #   python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out
 # and its report is published in docs/soak.md. The numbers of this job are those of a shared two-or-four-core virtual machine and say so in their report.
@@ -34,6 +35,8 @@ on:
         default: "0"
   schedule:
     - cron: "41 3 * * 0"
+  pull_request:
+    paths: ["scripts/soak/**", ".github/workflows/soak.yml"]
 
 permissions:
   contents: read
@@ -96,8 +99,14 @@ jobs:
         working-directory: hooks
         run: python3 scripts/soak/soak.py --selftest-ledger
 
+      - name: The harness on the real service (a clean run must pass, a run with a fault must fail)
+        if: github.event_name == 'pull_request'
+        working-directory: hooks
+        run: python3 scripts/soak/soak.py --selftest --binary build/hooks --out "$RUNNER_TEMP/soak-selftest"
+
       - name: Soak
         id: soak
+        if: github.event_name != 'pull_request'
         working-directory: hooks
         run: |
           hours="${{ github.event.inputs.hours || '5.5' }}"
@@ -151,7 +160,7 @@ jobs:
       - name: Keep the data directory and the ledgers of a failed run
         if: failure()
         run: |
-          cd "$RUNNER_TEMP" && tar czf soak-evidence.tgz --exclude='soak-out/backups' soak-out/data soak-out/ledger soak-out/acked.bin soak-out/spec.json soak-out/state.json 2>/dev/null || true
+          cd "$RUNNER_TEMP" && tar czf soak-evidence.tgz --exclude='*/backups' soak-out soak-selftest 2>/dev/null || true
           ls -l soak-evidence.tgz || true
 
       - name: Upload the evidence
