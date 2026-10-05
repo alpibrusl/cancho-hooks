@@ -658,7 +658,7 @@ fn rt_clamp[&l, &d](lg: &!l evlog.Ev, dv: &!d [int]) -> [] int {
 }
 
 // The event with id `id`, as a JSON body `{"id":N,"event":<the stored object>}`, or an empty buffer if there is none (never made, or dropped).
-fn find_event[&h, &l, &w](heap: &!h Heap, lg: &!l evlog.Ev, window: &!w [byte], id: int) -> [heap, fs_read(""), file_read] buffer.Buffer {
+fn find_event[&h, &l, &w, &z](heap: &!h Heap, lg: &!l evlog.Ev, window: &!w [byte], id: int, bd: &!z [int]) -> [heap, fs_read(""), file_read] buffer.Buffer {
     var at = evlog.seek(lg, id);
     var found = buffer.empty(heap, 0);
     var going = id >= evlog.first_id(lg);
@@ -674,7 +674,21 @@ fn find_event[&h, &l, &w](heap: &!h Heap, lg: &!l evlog.Ev, window: &!w [byte], 
             w = json.put_key(heap, w, "id");
             w = json.put_int(heap, w, id);
             w = json.put_key(heap, w, "event");
-            w = json.put_fragment(heap, w, window[p.2..p.2 + p.3]);
+            let fp = bodies.sealed_by(window, 0);
+            if fp < 0 {
+                w = json.put_fragment(heap, w, window[p.2..p.2 + p.3]);
+            } else {
+                // a sealed body, opened for the answer (section 47.4); one that does not open is answered as `null`
+                region ob {
+                    let plain = alloc_slice[ob](p.3, byte_of(0));
+                    let n = bodies.open(bd, id, fp, window[p.2..p.2 + p.3], plain);
+                    if n >= 0 {
+                        w = json.put_fragment(heap, w, plain[0..n]);
+                    } else {
+                        w = json.put_null(heap, w);
+                    }
+                }
+            }
             w = json.end_object(heap, w);
             buffer.drop(heap, found);
             found = json.finish(w);
