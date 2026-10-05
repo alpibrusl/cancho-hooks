@@ -38,7 +38,7 @@ of it. The `endpoints` table holds the secrets in a form the service can sign wi
 ## endpoints.conf
 
 `endpoints.conf`, in the data directory, takes one endpoint a line (`#` comments and blank lines are
-ignored; at most 62 endpoints, each with an id of up to six digits, written and never counted). It is its own file because it holds the secrets: give it the permissions secrets need, and keep it out of the settings.
+ignored; at most 1,024 endpoints, each with an id of up to six digits, written and never counted). It is its own file because it holds the secrets: give it the permissions secrets need, and keep it out of the settings.
 
 ```
 # <id> <host> <port> <secret> [types=...] [headers=...] [old=...] [concurrency=...] [rate=...]   (the words after the secret: see below, and delivery.md for concurrency and rate)
@@ -89,4 +89,4 @@ Connection: close
 1 127.0.0.1 9001 whsec_... old=whsec_...@1791100000000 concurrency=2 rate=20
 ```
 
-`types=` is the comma separated patterns; `headers=` is `Name:value` pairs separated by commas, each value percent-encoded (every byte but `A-Za-z0-9-._~` as `%XX`: a space is `%20`, a comma `%2C`, a percent `%25`), which is also how the `headers` column of the table holds them; `old=` is the previous secret and the Unix ms until which it is signed with too; `concurrency=` and `rate=` are the endpoint's own limits ([delivery.md](delivery.md)). A word that is none of these, or one twice, or one that is not good, is a bad line (status 13, naming the line); `--import-endpoints` copies the words into the table. The table is read as one text of at most 32 KiB, so 62 endpoints with large header sets do not all fit (`POST` answers `507` before the table would not start).
+`types=` is the comma separated patterns; `headers=` is `Name:value` pairs separated by commas, each value percent-encoded (every byte but `A-Za-z0-9-._~` as `%XX`: a space is `%20`, a comma `%2C`, a percent `%25`), which is also how the `headers` column of the table holds them; `old=` is the previous secret and the Unix ms until which it is signed with too; `concurrency=` and `rate=` are the endpoint's own limits ([delivery.md](delivery.md)). A word that is none of these, or one twice, or one that is not good, is a bad line (status 13, naming the line); `--import-endpoints` copies the words into the table. The table is read as one text of at most 528 KiB (528 bytes for each of the 1,024 endpoints: 540,672), and the database's answer to the read is at most 1 MiB; over either, the start ends with status 20, `the table is too large`, and `POST` answers `507` before the text would not fit.

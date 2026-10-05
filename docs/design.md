@@ -2094,7 +2094,7 @@ The suites that assumed the limit were changed and are marked here: `slots_test.
 
 ### 41.12 Measured
 
-One shared 4-core VM (Intel Xeon 2.10 GHz, Linux 6.18, 16 GB), other work on it; each figure is from `scripts/bench/run.py` or `scripts/bench/many_bench.py` of this change, and the build before is the binary of `origin/main` built the same way. Runs of the two builds were alternated.
+One shared 4-core VM (Intel Xeon 2.10 GHz, Linux 6.18, 16 GB), other work on it; each figure is from `scripts/bench/run.py` or `scripts/bench/many_bench.py` of this change, and the build before is the binary of `origin/main` built the same way. Runs of the two builds were alternated. Which lex-sys built the measured binaries was not recorded. The idle figures need the zero fill of `box_slice` to be `calloc` (lex-sys #235, which the pin includes), so they were not taken on a compiler older than that; they were not taken again on the pinned compiler, and are to be re-measured on it, on a machine of its own, with the capacity page.
 
 | gate (41.7) | result |
 |---|---|
@@ -2110,7 +2110,9 @@ One shared 4-core VM (Intel Xeon 2.10 GHz, Linux 6.18, 16 GB), other work on it;
 
 What was not measured: CPU a delivery with a database (the history) at 1,024 endpoints; the snapshot with both the windows and the tables full; a limit above 1,024; the CI database (SCRAM-SHA-256 behind a mapped port) for the figures (the tests ran against it in CI, and here with the pool code against a trusting local server and through `tests/pgproxy.py`).
 
-### 41.13 What the user-facing documents should say (they are not edited by this change)
+### 41.13 What the user-facing documents should say
+
+**Applied before the merge**: every row of the table below is now what the pages say (`README.md`, `docs/status.md`, `docs/endpoints.md`, `docs/api.md`, `docs/index.html`; the counts of unit tests by set and of harness programs were taken from a run of this commit). The line numbers are those of when this was written.
 
 The README and the page are the coordinator's; this change edits only the pages that state its own facts (`docs/api.md`, `docs/operating.md`, `docs/retention.md`, `docs/configuration.md`, `docs/testing.md`). The statements below mention the old limit or the old facts and are left for whoever reconciles the wording.
 
