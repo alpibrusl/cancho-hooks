@@ -48,8 +48,8 @@ scripts/check-authority.sh   regenerates the authority report and compares it wi
 scripts/backup.sh, restore.sh, logcheck.py   backup and restore of the two logs (and the tables), and the checker that refuses an inconsistent pair
 scripts/release.sh a tarball, SHA256SUMS and an SBOM stub
 Dockerfile, deploy/   the container image; the systemd unit, a settings sample (with the production profile) and the container's health check and entry point
-tests/             unit tests (lex-sys, `tests/*_test.ls`) and harnesses (Python, `tests/*_test.py`, `chaos.py`, `delivery.py`), the shims they preload (`*.c`) and the mutants of the https work (`mutants/`)
-scripts/bench/     the scripts behind the figures under "Measured" (`run.py`, `https_cost.py`, `retention_bench.py`, `stall_probe.py`)
+tests/             unit tests (lex-sys, `tests/*_test.ls`) and harnesses (Python, `tests/*_test.py`, `chaos.py`, `delivery.py`), the shims they preload (`*.c`) the kit of the many-endpoints test (`manykit.py`) and the mutants of the https work and of the work on 1,024 endpoints (`mutants/`)
+scripts/bench/     the scripts behind the figures under "Measured" (`run.py`, `https_cost.py`, `retention_bench.py`, `stall_probe.py`, `many_bench.py` with `mklog.c`)
 docs/design.md     the design and what building it found
 ```
 
