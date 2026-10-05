@@ -23,6 +23,10 @@ fn test_a_refusal_for_now_is_waited_out() -> [] int {
     test.assert_eq(dbup.verdict(4, "28", 5, 30000), 0);
     test.assert_eq(dbup.verdict(4, "3D00", 5, 30000), 0);
     test.assert_eq(dbup.verdict(4, "57P03", 30000, 30000), 2);
+    // and when the wait is over, the message names why the server still refused
+    test.assert(bytes.equal(dbup.state_words("53300"), ": the server has too many connections"));
+    test.assert(bytes.equal(dbup.state_words("57P03"), ": the server is starting up"));
+    test.assert_eq(len(dbup.state_words("28P01")), 0);
     return 0;
 }
 

@@ -2,6 +2,8 @@ edition 5;
 
 module dbup;
 
+import std.bytes;
+
 // `dbup` -- the database coming up (`docs/design.md` section 37). The decision, kept apart from the loop so that it can be tested alone.
 //
 // The service starts without waiting for the database: it listens, takes events, and its pool makes the connections in the background.
@@ -34,6 +36,18 @@ fn refused_for_good[&s](state: &s [byte]) -> [] bool {
         return true;
     }
     return int_of(state[0]) == '3' && int_of(state[1]) == 'D' && int_of(state[2]) == '0' && int_of(state[3]) == '0' && int_of(state[4]) == '0';
+}
+
+// The words for a SQLSTATE that is a refusal only for now, after the code in the message the service ends with: after waiting `pg-start-wait-ms`, a
+// server that still refused says why (`53300` is a server with every connection taken: by whom is in its `pg_stat_activity`).
+pub fn state_words[&s](state: &s [byte]) -> [] &static [byte] {
+    if bytes.equal(state, "53300") {
+        return ": the server has too many connections";
+    }
+    if bytes.equal(state, "57P03") {
+        return ": the server is starting up";
+    }
+    return "";
 }
 
 // 0 if the endpoints may still be read; otherwise the reason (above) the service ends. `failure` is `pool.last_failure` (1 the server closed the

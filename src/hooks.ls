@@ -3435,8 +3435,8 @@ fn dbname_token() -> [] int {
 }
 
 // Why the service ends because the endpoints could not be read from the database after the start (section 37.2), on stderr: `status` is 20 and `detail` a reason
-// of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log.
-fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int {
+// of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log. `state` is the SQLSTATE of the server's last error, if there was one.
+fn say_unreadable[&i, &s](out: &!i Io, status: int, detail: int, state: &s [byte]) -> [err_write] int {
     if status == 13 {
         say(out, "hooks: the endpoints table: row ");
         ops.say_number(out, detail);
@@ -3446,6 +3446,12 @@ fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int 
     if status == 20 {
         say(out, "hooks: the database's endpoints cannot be read: ");
         say(out, dbup.message(detail));
+        if len(state) == 5 {
+            say(out, " (the server's last answer: SQLSTATE ");
+            say(out, state);
+            say(out, dbup.state_words(state));
+            say(out, ")");
+        }
         say(out, "\n");
         return 0;
     }
@@ -3938,7 +3944,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     // the answer to the read of the endpoints table (section 37.2)
                                     if pool.status(qw) == 8 {
                                         // the answer does not fit the pool's input slab (1 MiB): a table far over the 540,672 bytes of text the service reads
-                                        say_unreadable(io, 20, 6);
+                                        say_unreadable(io, 20, 6, "");
                                         code = 20;
                                         running = false;
                                     } else if pool.status(qw) != 0 {
@@ -3958,7 +3964,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                             ops.say_number(io, detail);
                                             say(io, "\n");
                                         } else {
-                                            say_unreadable(io, loaded, detail);
+                                            say_unreadable(io, loaded, detail, "");
                                             code = loaded;
                                             running = false;
                                         }
@@ -4112,7 +4118,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     let known = pool.sqlstate(qw, state5);
                                     let why = dbup.verdict(pool.last_failure(qw), state5[0..known], now_ms - began_ms, history.start_wait_ms(dv[off_hq()..off_hq() + history.size()]));
                                     if why != 0 {
-                                        say_unreadable(io, 20, why);
+                                        say_unreadable(io, 20, why, state5[0..known]);
                                         code = 20;
                                         running = false;
                                     }
