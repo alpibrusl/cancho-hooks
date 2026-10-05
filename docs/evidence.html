@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lexsys-hooks: evidence</title>
+<meta name="description" content="What lexsys-hooks has been tested for and how, and what it costs: each claim with the test that checks it and the design section that records the result.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d4ed8'/%3E%3Cpath d='M8 16h13m-5-6 6 6-6 6' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1c1f24;
+  --muted: #4b5563;
+  --line: #d9dde3;
+  --line-strong: #8b95a3;
+  --surface: #f5f6f8;
+  --code-bg: #f1f3f5;
+  --accent: #1d4ed8;
+  --accent-fg: #ffffff;
+  --warn: #92400e;
+  --warn-bg: #fdf6e7;
+  --warn-line: #d9a441;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --fg: #e6e8eb;
+    --muted: #a6aeba;
+    --line: #2a3038;
+    --line-strong: #5d6877;
+    --surface: #171b21;
+    --code-bg: #171b21;
+    --accent: #8ab4ff;
+    --accent-fg: #0b1020;
+    --warn: #f3c77a;
+    --warn-bg: #1d1a12;
+    --warn-line: #8a6a2a;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 4.5rem; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 1rem/1.6 var(--font);
+}
+a { color: var(--accent); text-underline-offset: 0.15em; }
+a:focus-visible, button:focus-visible, pre:focus-visible, .scroll:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: 0.5rem 0.75rem; border-radius: 4px; z-index: 10; }
+.skip:focus { top: 8px; }
+.wrap { width: 100%; max-width: 62rem; margin: 0 auto; padding: 0 16px; }
+.prose { max-width: 42rem; }
+
+header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
+header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.brand { font-weight: 700; color: var(--fg); text-decoration: none; font-family: var(--mono); letter-spacing: -0.01em; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; padding: 0; }
+nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; display: inline-block; }
+nav a:hover { color: var(--fg); text-decoration: underline; }
+.top .gh { margin-left: auto; }
+
+h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 0.75rem; letter-spacing: -0.02em; font-family: var(--mono); }
+h2 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.75rem; letter-spacing: -0.01em; }
+h3 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+p { margin: 0 0 1rem; }
+section { padding: 2.75rem 0 0; }
+code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { margin: 0 0 1rem; padding: 0.875rem 1rem; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font: 0.85rem/1.55 var(--mono); max-width: 100%; }
+pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+.muted { color: var(--muted); }
+.small { font-size: 0.9rem; }
+
+.hero { padding: 3rem 0 0.5rem; }
+.lede { font-size: 1.15rem; max-width: 40rem; }
+.badge { display: inline-block; font-size: 0.85rem; border: 1px solid var(--warn-line); background: var(--warn-bg); color: var(--warn); padding: 0.2rem 0.6rem; border-radius: 999px; margin-bottom: 1rem; }
+.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.5rem 0 0; }
+.btn { display: inline-block; padding: 0.55rem 1rem; border-radius: 6px; border: 1px solid var(--accent); text-decoration: none; font-weight: 600; transition: background-color 0.15s, color 0.15s; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.secondary { color: var(--accent); background: transparent; }
+.btn.secondary:hover { background: var(--surface); }
+.btn.primary:hover { filter: brightness(1.08); }
+
+.facts { list-style: none; padding: 0; margin: 2rem 0 0; display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+.facts li { border-left: 3px solid var(--accent); padding: 0.1rem 0 0.1rem 0.75rem; }
+.facts strong { display: block; }
+
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin-top: 1.25rem; }
+.card { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 1rem; }
+.card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.card h3 { color: var(--fg); }
+
+.how { display: grid; gap: 2rem; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 52rem) { .how { grid-template-columns: minmax(0, 1fr) 26rem; } }
+ol.steps { margin: 0; padding-left: 1.4rem; }
+ol.steps li { margin-bottom: 0.75rem; padding-left: 0.2rem; }
+figure { margin: 0; }
+figure svg { width: 100%; height: auto; max-width: 28rem; display: block; margin: 0 auto; }
+figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; }
+svg .n { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+svg .d { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+svg .p { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .t { fill: var(--fg); font: 600 13px var(--font); }
+svg .s { fill: var(--muted); font: 12px var(--font); }
+svg .a { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+svg .a.dash { stroke-dasharray: 5 4; }
+svg .head { fill: var(--muted); }
+
+.chips { list-style: none; padding: 0; margin: 0 0 1rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chips li { font-family: var(--mono); font-size: 0.85rem; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 0.15rem 0.5rem; }
+.chips li.end { border-color: var(--warn-line); color: var(--warn); background: var(--warn-bg); }
+
+.scroll { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.55rem 0.75rem 0.55rem 0; border-bottom: 1px solid var(--line); }
+th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+td:first-child { white-space: nowrap; }
+.note { font-size: 0.9rem; color: var(--muted); }
+@media (max-width: 40rem) {
+  table.stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
+  table.stack tr { border-bottom: 1px solid var(--line); padding: 0.6rem 0; }
+  table.stack td { border: 0; padding: 0.1rem 0; white-space: normal; }
+  table.stack td:first-child { font-weight: 600; margin-bottom: 0.2rem; }
+  table.ev td:last-child { color: var(--muted); font-size: 0.85rem; }
+  table.stack td:first-child code { font-weight: 400; }
+}
+
+.limits { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 1.25rem 1rem 0.5rem; }
+.limits h2 { margin-bottom: 0.25rem; }
+.limits ul { margin: 0 0 1rem; padding-left: 1.25rem; }
+.limits li { margin-bottom: 0.5rem; }
+.limits code { background: transparent; border: 1px solid var(--line); }
+
+footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding: 1.5rem 0 2.5rem; color: var(--muted); font-size: 0.9rem; }
+footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; }
+
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">lexsys-hooks</a>
+    <nav aria-label="Pages">
+      <ul>
+        <li><a href="./">Overview</a></li>
+        <li><a href="#evidence">Tested</a></li>
+        <li><a href="#costs">Costs</a></li>
+        <li><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md">Status</a></li>
+      </ul>
+    </nav>
+    <a class="gh" href="https://github.com/alpibrusl/lexsys-hooks">GitHub</a>
+  </div>
+</header>
+
+<main id="main">
+<div class="wrap">
+  <section class="hero" aria-labelledby="h-title" style="padding-bottom:0">
+    <h1 id="h-title" style="font-size:clamp(1.6rem,5vw,2.25rem)">Evidence</h1>
+    <p class="lede">Each claim about lexsys-hooks, with the test in the repository that checks it and the section of the <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/design.md">design document</a> that records the result; then what it costs, each figure with its method. How the tests are built is in <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/testing.md">testing.md</a>.</p>
+  </section>
+
+  <section id="evidence" aria-labelledby="h-ev">
+    <h2 id="h-ev">What has been tested, and how</h2>
+    <p class="prose muted">Each row is a test in the repository, run by CI, with the design section that records the result. Where a row gives a number of checks, it is the number the test reports (the lines it prints as passed) on a run of the commit this page describes. Times come from runs on a shared development machine and are not a throughput benchmark: &ldquo;What it costs&rdquo; below has the figures there are, with their methods; <code>docs/capacity.md</code> is the method in one place.</p>
+    <div class="scroll" tabindex="0" role="region" aria-label="Test evidence table">
+    <table class="stack ev">
+      <thead><tr><th scope="col">Claim</th><th scope="col">Test and result</th><th scope="col">Where</th></tr></thead>
+      <tbody>
+        <tr><td>No acknowledged event is lost</td><td><code>tests/chaos.py</code>: 2,000 acknowledged events while the service is killed with <code>kill -9</code>. An <code>LD_PRELOAD</code> shim records what had been fsynced, and at each kill the harness cuts the logs to that plus a random part of the rest, so a missing flush shows up as it would after a power cut. Mutants that acknowledge before, or without, flushing are caught.</td><td>design.md &sect;13, &sect;16</td></tr>
+        <tr><td>Signatures verify</td><td><code>tests/sign_test.py</code>: 548 comparisons against the reference <code>standardwebhooks</code> library, including lengths around SHA-256&rsquo;s block boundaries and keys under, at and over the HMAC block. Ten mutants of <code>sign.ls</code> are all caught.</td><td>&sect;15</td></tr>
+        <tr><td>Retries follow the schedule, across restarts</td><td><code>tests/retry_test.py</code> with scaled-down schedules. With 500, 1,000 and 2,000 ms and kills in between, the gaps were 502, 1,048 and 2,048 ms in a recent run (515, 1,045 and 2,004 in the first).</td><td>&sect;15, &sect;16</td></tr>
+        <tr><td>A bad endpoint costs the others little</td><td><code>tests/isolation_test.py</code>, 80 events at about 20 a second beside two healthy endpoints. Ingest median: 2.3 ms with a silent endpoint, 2.3 ms with one that answers after 300 ms, 2.4 ms with one whose accept queue is full. Healthy endpoints&rsquo; delivery p99: 2, 5 and 3 ms. The gate is a 50 ms median.</td><td>&sect;16</td></tr>
+        <tr><td>A dead endpoint does not stop the others</td><td><code>tests/scan_test.py</code>, 16 checks: two endpoints, one with nothing listening, 3,000 events. The healthy one is sent all 3,000 once each (its cursor 3,000, the dead one&rsquo;s 0). Before the fix it stopped at 1,024. When the dead one&rsquo;s receiver comes up it is sent all 3,000 once each, never an event more than its 1,024-event window past what it had been sent in order. With <code>kill -9</code> twelve times in the middle nothing is lost and what is sent twice is at most what was in flight (in one run 31 and 42 events, in another 14 and 72, against a limit of 96). A mutant that restores the shared bound fails it; 21 of 22 mutants of the new code are killed, and the one that survives gives the same sends.</td><td>&sect;31</td></tr>
+        <tr><td>Dead letters can be listed and replayed in bulk</td><td><code>tests/dead_test.py</code>, 99 checks: the list against the delivery log read by a separate reader; pages in both orders with none twice or missing; 300 events dying across three <code>kill -9</code> give exactly 300 dead letters; 100 replayed by a loop of calls, none above 32 at a time, each sent once; six <code>kill -9</code> in the middle of a bulk replay of 200 lose none; 2,200 dead letters: the newest 2,048 listed, the 152 older ones listed and replayed after, also when the database is away at the start; a snapshot of the log keeps the list.</td><td>&sect;39.1</td></tr>
+        <tr><td>A waiting replay can be cancelled, durably</td><td><code>tests/cancel_test.py</code>, 64 checks: one or all, <code>kill -9</code>, a log cut to what the last <code>fsync</code> covered after an acknowledged cancel or bulk replay, an attempt on the wire, the bound of 32, a snapshot of the log that keeps the cancel.</td><td>&sect;39.2</td></tr>
+        <tr><td>Retries are spread, and the time chosen is kept</td><td><code>tests/jitter_test.py</code>, 21 checks: 400 events failing at once, every recorded delay within 20 percent of 2,000 ms, the mean within 2 percent, the whole range occupied; <code>0</code> is exactly the schedule; 20 events waiting through two <code>kill -9</code> keep their recorded times, also when restarted with <code>--retry-jitter 0</code>.</td><td>&sect;39.3</td></tr>
+        <tr><td>Concurrency and rate are observed at the receiver</td><td><code>tests/limits_test.py</code>, 92 checks: never more than N requests in flight at a receiver (2, 4, 1, 3, 8); no second above the rate plus a bucket; held-back events delivered later with no failed attempt; an endpoint at 2 a second beside one that is sent 300 events in 0.4 s; six <code>kill -9</code> while 120 events were held back.</td><td>&sect;39.4</td></tr>
+        <tr><td>The circuit breaker</td><td><code>tests/breaker_test.py</code>, 56 checks in ten stages: a run of failed attempts is written once with its time and survives <code>kill -9</code>; a delivery ends it; after <code>breaker-days</code> (a record written five days and an hour back stands in for the days) the next failed attempt pauses the endpoint, which is disabled, marked <code>paused</code>, logged once on stderr and in the delivery log, while the other endpoint is untouched; its events wait, also across a restart, and <code>enable</code> sends each once; 0 turns it off, 25 hours trips a one-day breaker and 23 do not; a <code>410</code> is not a pause; a replay counts like any attempt. The five real days themselves were not waited for.</td><td>&sect;31</td></tr>
+        <tr><td>Idempotency survives crashes</td><td><code>tests/idempotency_test.py</code>: twenty simultaneous requests with one key make one event; 600 keyed events retried under kills leave exactly one record per key; 65,536 keys are rebuilt at start in 0.08 s in a recent run (0.24 s in the first; &sect;38 has the larger index and the start at one million retained events).</td><td>&sect;17</td></tr>
+        <tr><td>Three endpoints, poisoned events</td><td><code>tests/delivery.py</code>: 300 events, 101 kills, every request verified with the reference library; 18 poisoned events dead-lettered and none delivered.</td><td>&sect;15, &sect;16</td></tr>
+        <tr><td>Endpoints can be created while it runs</td><td><code>tests/manage_test.py</code> against a real PostgreSQL, 79 checks: who may call it (no token configured, a missing, wrong, shorter, longer or doubled token), what a request may say (18 refusals), the secret returned once and in no read, a new endpoint starting from now and signed with the secret it was given (the test receiver verifies the signature itself), a refused insert changing nothing, two requests at once, a database slower than five seconds, 62 endpoints. 25 mutants of the code were all caught.</td><td>&sect;25.2</td></tr>
+        <tr><td>Endpoints can be deleted while it runs</td><td><code>tests/delete_test.py</code> against a real PostgreSQL, 170 checks: nothing is sent to a deleted endpoint (also under a stream of events), an attempt already on the wire finishes and is recorded under the endpoint&rsquo;s id before its slot is reused, waiting replays are dropped with a record, a refused delete changes nothing, a slot given to a new endpoint inherits nothing (checked across restarts and with 1,040 events), the history keeps the old rows, a deleted id is not given again, and 1,024 endpoints can be churned 70 times (a 1,025th is a <code>409</code>). 38 mutants of the code: 35 caught, 3 survive (two equivalent, one that cannot fire).</td><td>&sect;25.5</td></tr>
+        <tr><td>A retry is not lost after 1,008 events</td><td><code>tests/layout_test.py</code>, 3 checks: 2,300 events, two of which fail once. A bug in the layout of the delivery state (found while planning the endpoint work, and fixed) made a retry of some events read the wrong place in the log; the test fails on the code before the fix.</td><td>&sect;25</td></tr>
+        <tr><td>Cron expressions mean what cron means</td><td><code>tests/cron_test.ls</code> (18 unit tests: the calendar for each of 80,000 days, February in 2100 and 2400, every month&rsquo;s length, 34 wrong expressions each refused with its code, the day-of-month or day-of-week rule both ways, Sunday as 0 and 7, steps, the next and last fire at the edges) and <code>tests/cron_test.py</code>, which checks the same functions against Python&rsquo;s <code>datetime</code> and a day-by-day scan on 620 expressions (7,123 checks, no failure).</td><td>&sect;32.1</td></tr>
+        <tr><td>A schedule fires once, even if the service is killed in the middle of the fire</td><td><code>tests/schedules_test.py</code> against a real PostgreSQL, 174 checks: a proxy swallows the one update that tells the database, the service is killed with <code>kill -9</code> (half the rounds as power cuts) right after the event is flushed, and after six restarts no scheduled second has two events, there is no gap but the one stop longer than the grace period, and every event has its key <code>cron:&lt;id&gt;:&lt;second&gt;</code>. Then 37 kills under a schedule of every second, 25 of them within milliseconds of an event reaching the log: one event per second, none missing, none twice. 18 mutants run, 18 killed, among them dropping the key check, dropping the key, never flushing, firing every missed fire and ignoring <code>cron-catchup</code>.</td><td>&sect;32.4, &sect;32.8</td></tr>
+        <tr><td>The logs are bounded by retention, not by history</td><td><code>scripts/bench/retention_bench.py through</code>: retention 20 s and 32 MiB segments so that a month happens in seconds. 10,000,000 events through one endpoint before the merge with the other work (every one delivered, 5,274 a second end to end on a shared 4-core machine): the data directory peaked at 93 MB where the history is about 3,180 MB (34 times less), 100 segments were sealed and dropped, the outcomes log was replaced 45 times, no step held the loop longer than 68 ms. 3,000,000 events on the merged build (7,775 a second): a peak of 95 MB against a history of about 1,002 MB, 24 segments sealed and dropped, 13 snapshots, resident memory between 2.7 and 9.7 MB, no step longer than 30 ms. <code>tests/retention_test.py</code>: <code>kill -9</code> as a power cut at every one of the 19 steps of a roll, a drop and a snapshot, for both logs, for a log that is final and for one that is pinned; an event pinned by a paused endpoint, a disabled one or a waiting replay is never dropped. The start with 1,000,000 retained events takes 0.9 s (2.1 to 2.2 s with an endpoint and 128,000 outcome records to replay).</td><td>&sect;38</td></tr>
+        <tr><td>Missed fires are fired once</td><td><code>tests/schedules_test.py</code>: the real five-field service after a stop of an hour makes one event (not 60) for the last minute, then the next minute&rsquo;s on time (the test waits for a real minute); <code>cron-catchup 0</code> skips them; a stop of an hour under <code>*/5 * * * * *</code> is one event, not 720, plus the ones within the 10-second grace period each on its own.</td><td>&sect;32.5</td></tr>
+        <tr><td>Every route has a credential, and a route added without one is refused</td><td><code>tests/authz_test.py</code> reads the routes from the source and checks them against the table of scopes and the test&rsquo;s own rows (a route with no row or no entry fails), then calls each of 25 routes (<code>/readyz</code> open, <code>/metrics</code> read) with no token, a wrong one, and the ingest, read and admin token, in five ways of configuring the tokens: 625 requests, each with its status (256 checks in all). No token appears in 866 answers or on stderr, and a token that is refused as a setting is not echoed. A route with no entry in the table is admin-only at run time. Unit tests cover the verdicts and a 255-byte token that differs in its last byte. 42 of 45 mutants are killed; the rest are equivalent in behaviour.</td><td>&sect;33</td></tr>
+        <tr><td>The production profile refuses to be unsafe</td><td><code>tests/production_test.py</code>, 113 checks: no admin token (30), no ingest token (31), private hosts on (32), a data directory or log readable or writable by the group or others (33; twelve modes of the directory, nine of each file), two tokens the same (34), a mode that cannot be read (35, with a preloaded <code>statx</code> that fails): each a different exit status and a message that names the setting or the path; the logs made under a umask of 022 are refused; every safe combination starts.</td><td>&sect;33</td></tr>
+        <tr><td>The numbers in <code>/metrics</code> are right</td><td><code>tests/metrics_test.py</code>, 60 checks, against a workload whose answer is known: 43 events one at a time (three with keys and repeated, five refused), three endpoints (one answers 204, one 500, one has nothing listening). Ingest accepted 43, duplicate 3, refused 5 by status; group commits of the events log 43; log sizes equal the files; attempts by outcome 43, 172 and 86, equal to <code>/stats</code> and to the outcome records read by a second reader; failures by reason equal to the reason records of the log; lag, retries waiting and last failure right, also after a restart; 62 endpoints answer in one response that parses, and 1,024 in 16 pages, with 9 series for each endpoint; the history&rsquo;s counters equal the rows of the table. A strict parser reads the text.</td><td>&sect;34.2</td></tr>
+        <tr><td>Why an attempt failed is recorded</td><td><code>tests/reason_test.py</code>, 36 checks, a receiver for each reason: a closed port, a receiver silent past the deadline, one that resets mid-response, one that closes without a word, one that answers twelve bytes of garbage, <code>500</code>, <code>404</code>, <code>301</code>, <code>410</code>, a blackholed address. Each reason is in <code>GET /events/:id/attempts</code>, in <code>/metrics</code>, in the table&rsquo;s column and in the delivery log next to its outcome, and the last failure of each endpoint is read back after a restart.</td><td>&sect;34.3</td></tr>
+        <tr><td>Ready means ready</td><td><code>tests/ready_test.py</code>, 31 checks: <code>/readyz</code> is 503 when the database is cut (delivery goes on), when a 256 KiB disk fills through the service (the log is broken, <code>/healthz</code> still says 200, a restart finds every acknowledged event) and when another process fills it (503 <code>data_dir</code>, and 200 again when space is freed, with no restart). When the database comes back the service reconnects by itself and says 200 again, with no restart (<code>tests/pgre_test.py</code>).</td><td>&sect;34.1, &sect;37</td></tr>
+        <tr><td>It stops cleanly</td><td><code>tests/stop_test.py</code>, 54 checks: <code>SIGTERM</code> and <code>SIGINT</code> exit 0; with eight attempts on the wire and 192 events waiting the service refuses writes, starts no ninth attempt, records the eight and exits, and the next start delivers the rest and repeats none; with a silent receiver it exits 0 after <code>stop-deadline-ms</code>; a second signal ends it at once. Under load, with four clients and a slow receiver, it exits 0 in under 5.5 s, every acknowledged event is in the log and, across the stop and the next start, every event reached each receiver exactly once.</td><td>&sect;34.4</td></tr>
+        <tr><td>Corruption is refused, not repaired silently</td><td><code>tests/corrupt_test.py</code>, 113 checks: a delivery log ahead of its events log (exit 18, nothing listening, both files byte for byte as they were); seven kinds of damage in the middle of a log (exit 19, with where, how many bytes and how many intact records); eight torn tails still cut and now reported; <code>--repair-logs 1</code> keeping the cut bytes in a file; and 153 corruptions (150 random, 3 directed) that the service and <code>scripts/logcheck.py</code> classify the same way. The flipped byte that used to turn 500 events into 250 without a word is a refusal in <code>tests/backup_test.py</code>.</td><td>&sect;34.5</td></tr>
+        <tr><td>A stop is noticed at once</td><td>The loop&rsquo;s poller waits on the claim on <code>SIGINT</code> and <code>SIGTERM</code>, so a signal wakes it. Measured from the signal to the service&rsquo;s first line about it, 60 starts of an idle service: median 0.24 ms, 90th percentile 0.54 ms, longest 3.2 ms (the version that looked once a turn: median 25.0 ms, longest 49.5 ms).</td><td>&sect;36</td></tr>
+        <tr><td>The authority report is the committed one</td><td><code>scripts/check-authority.sh</code> regenerates <code>lex-sys authority</code> for the service and compares it with <code>docs/authority.json</code> in CI; an added foreign symbol (tried: <code>getpid</code>, which adds the line <code>libc:getpid</code> to <code>unbounded_by</code>) or capability is a red diff until a person commits the new file.</td><td>&sect;36</td></tr>
+        <tr><td>Delivery over TLS fails for the right reason</td><td><code>tests/https_test.py</code>, 94 checks, against a Python TLS receiver behind a throwaway authority: a good chain is delivered and its signature verifies with the reference library; an expired, a not-yet-valid, a wrong-name, a wrong-authority, a self-signed and a wrong-purpose certificate each have a reason of their own and nothing is delivered (with and without <code>tls-ca-file</code>, and the controls that show the check and not the setup failed); a receiver that closes, resets, speaks something else, offers TLS 1.1 only or never answers; partial and refused I/O; <code>kill -9</code> in the middle of a handshake loses nothing; 64 handshakes that never complete hold nothing (the longest wait of a request to the service was 0.6 to 1.3 ms).</td><td>&sect;40</td></tr>
+        <tr><td>A name is judged at every attempt</td><td><code>tests/names_test.py</code>, 37 checks, against a name server of the test&rsquo;s own: 21 unsafe addresses behind names are refused with the receiver on loopback never connected to; a mixed answer is refused whole; rebinding changes nothing (one lookup per attempt, the connection to the address that was judged); failing and slow name servers have their reasons; 64 lookups waiting hold nothing.</td><td>&sect;40</td></tr>
+        <tr><td>TLS sessions are resumed, dropped and bounded</td><td><code>tests/sessions_test.py</code>, 32 checks: resumption seen from the receiver (the first delivery full, the others resumed), dropped by a change of host, port or secret and by a delete; no more memory than a control without TLS over 3,000 deliveries; <code>tests/https_api_test.py</code>, 57 checks: the scheme over the API, the file, the table, a backup and a restore.</td><td>&sect;40</td></tr>
+        <tr><td>The history tolerates a bad database</td><td><code>tests/history_test.py</code> against a real PostgreSQL, 44 checks: with the database silent or cut mid-run, delivery goes on and the lost rows are counted.</td><td>&sect;24</td></tr>
+        <tr><td>A database that goes away comes back</td><td><code>tests/pgre_test.py</code>: the connection cut, frozen, black-holed or ended under the service, while idle, with events flowing, with a change in flight, with a schedule due and at the start: no restart, every event delivered once, no schedule fired twice, the history rows that waited written, and the loop never stalls.</td><td>&sect;37</td></tr>
+        <tr><td>Up to 1,024 endpoints</td><td><code>tests/many_test.py</code>, nine stages against a PostgreSQL of its own (a tenth, against the binary of the build before, is not in CI): 1,024 endpoints created through the API and a 1,025th refused; five starts and four <code>kill -9</code> as power cuts while 1,024 endpoints fail three attempts in ten, every acknowledged event reaching every endpoint signed with its own key; disabled and paused endpoints in wide slots; replays and dead letters in slot 1,000; the loop not looking at endpoints with nothing to do; an event pinned by a paused endpoint in slot 1,000 kept across a snapshot; <code>--compact-now</code> reading the table; the table of 1,024 read when a database that was away at the start comes back; a log of 62 endpoints or fewer byte for byte what the build before wrote.</td><td>&sect;41.10</td></tr>
+        <tr><td>No memory is kept by a call that changes the database, or by a schedule&rsquo;s fire</td><td><code>tests/leak_test.py</code>: <code>PATCH</code> (limits; headers and types; a new secret kept beside the old), an endpoint created and deleted, a bulk replay of dead letters, a schedule created and deleted, events with an <code>Idempotency-Key</code>, and two minutes of a schedule of every second, each in two rounds after the windows and the indexes are warm; the second round may keep at most 1 KiB a call. On the build before, a <code>PATCH</code> kept 18 to 36 KB and a fire 13 KB; now 0 to 102 bytes, and 68 bytes a fire.</td><td>&sect;38.5</td></tr>
+        <tr><td>A full disk does not make the service send the same events again</td><td><code>tests/fulldisk_test.py</code>, on an 8 MB tmpfs: 200 events delivered, the disk filled to the last byte for four seconds while 200 more are posted; no event is sent more than twice, <code>/readyz</code> is 503 and names the broken log, and after the disk is freed and the service restarted every acknowledged event arrives, none more than twice in all. On the build before, one event was sent 925 times in those four seconds.</td><td>&sect;38.5</td></tr>
+        <tr><td>A restart does not send again what was delivered</td><td><code>tests/advance_test.py</code>: one endpoint whose list wants half of 3,000 events, its cursor held behind a refused event while the window moves, then released. After <code>SIGTERM</code> and a start, after <code>kill -9</code> as a power cut, and with the outcomes log replaced by snapshots meanwhile, no event is delivered again, and after a clean stop the cursor is back at the end within a second (on the build before, 987 of the 1,499 wanted events were sent again and the cursor climbed from 0). Two records of kind 19 were written for the 3,000 events, none for an endpoint without a list; the build before refuses a log with one (status 15) and reads it after <code>--compact-now</code>.</td><td>&sect;42</td></tr>
+        <tr><td>The pure parts are unit-tested in lex-sys</td><td><code>lex-sys test</code> runs <code>tests/*_test.ls</code>: <strong>226 tests in 21 sets</strong>, all passing (state 21, endpoints 15, destination 11, idem 9, cron 18, authz 9, filter 12, hdrs 12, epx 11, retain 8, config 24, dns 6, resolve 2, manage 3, reason 6, dbup 7, jitter 8, bulk 6, dead 12, lim 11, ops 15). Among them: the calendar for each of 80,000 days; a million damaged DNS answers, each answered without a fault; 300 inserts into a full table of dead letters at every position, checked for order and duplicates; the token bucket over 20 seconds at 30 a second; every reason in a counter of its own.</td><td>&sect;32.1, &sect;39.6, &sect;40.8</td></tr>
+        <tr><td>An endpoint is sent only the event types it subscribes to</td><td><code>tests/filter_test.py</code>, 62 checks: the matching rules against a model written apart from the service; 3,000 events of which almost none are wanted leave both cursors at 3,000 (the window is 1,024); a dead endpoint on a rare type passes over 2,500 events with no attempt; 39 to 40 <code>kill -9</code> driven by the receivers&rsquo; progress, every wanted event arriving at least once and no unwanted one ever; a log from before the type existed read as it was; replay to all and to one.</td><td>&sect;35.8</td></tr>
+        <tr><td>Rotation sends two signatures, and both verify</td><td><code>tests/rotation_test.py</code>, 61 checks, with the reference library: during the period a receiver that knows only the old secret and one that knows only the new both verify and a third does not, the header being exactly the two signatures the library computes; afterwards only the new one; <code>kill -9</code> in the period, a period that ended while the service was down, every wrong period a <code>400</code>.</td><td>&sect;35.8</td></tr>
+        <tr><td>Custom headers arrive, and never leak or inject</td><td><code>tests/headers_test.py</code>, 87 checks: name and value byte for byte at a real receiver; 120 requests with a forbidden name refused; 20 injection attempts (CR, LF, NUL and others) refused at <code>PATCH</code> and <code>POST</code> and as raw bytes; no value in any read, answer, history row or stderr line; the largest event with the largest headers and two signatures delivered.</td><td>&sect;35.8</td></tr>
+        <tr><td>Endpoints can be changed while it runs</td><td><code>tests/patch_test.py</code> against a real PostgreSQL, 50 checks: a new host and port reach the next attempt and not the one on the wire; a new secret signs the next attempt and a retry of an event first tried under the old one; a database that refuses the update changes nothing; one change at a time; the endpoint after a restart is what the database says.</td><td>&sect;25.4</td></tr>
+        <tr><td>Replay, and 410 Gone</td><td><code>tests/replay_test.py</code>, 37 checks: one endpoint or all with the same <code>webhook-id</code>, a replay that survives a restart, at most 32 waiting, an event far behind the cursor. <code>tests/gone_test.py</code>, 25 checks: a <code>404</code> is not a disablement, a <code>410</code> dead-letters at once and disables the endpoint, a restart keeps it, enabling it sends what it missed and not the dead event.</td><td>&sect;22, &sect;23</td></tr>
+        <tr><td>One delivery attempt, against each kind of receiver</td><td><code>tests/attempt_test.py</code>, eight receivers: <code>204</code>; <code>500</code>; accepts and never answers (failed at about the deadline); closes; junk; a status line in two parts (delivered after the pause); nothing listening; a 60,000-byte body to a slow reader.</td><td>&sect;16</td></tr>
+        <tr><td>Settings mean what they say</td><td><code>tests/config_test.py</code>, 71 checks: every setting from a file and from flags ends up the same, read back from <code>GET /config</code>; the later source wins; each refusal exits 2 before the service listens or writes, and names the argument or the line.</td><td>&sect;20</td></tr>
+        <tr><td>The endpoints table, and endpoint slots</td><td><code>tests/roster_test.py</code> against a real PostgreSQL, 37 checks: the import, the table read at start and the file not read, every refusal of a bad row. <code>tests/slots_test.py</code>, 49 checks: ids above 15, a dormant endpoint that comes back where it was, a slot given to a second endpoint inheriting nothing, a log from before slots read as it was.</td><td>&sect;24.1, &sect;25.1</td></tr>
+        <tr><td>Where a delivery may go</td><td><code>tests/ssrf_test.py</code>, 15 checks: 48 refused hosts stop the start and are each a <code>400</code> from <code>POST /endpoints</code> with nothing stored; 23 public hosts (the edges of every range) and 7 names are accepted; a <code>302</code> is a failed attempt and its target is never called.</td><td>&sect;26, &sect;40.5</td></tr>
+        <tr><td>Attempts beyond the 64 connections are not failures</td><td><code>tests/saturation_test.py</code>, 4 checks: ten endpoints share a receiver that holds each request 60 to 400 ms; 600 deliveries make 600 attempts, 600 delivered, none failed, each pair seen once and never more than 64 requests at the same time. It fails on the build before the fix.</td><td>&sect;28</td></tr>
+        <tr><td>A backup restores to what was acknowledged</td><td><code>tests/backup_test.py</code>, 73 checks: a stopped and an online backup of the two logs and the tables; total loss of the data directory and the tables, then a restore equal row for row; online backups taken while the service is killed as a power cut, and while segments are dropped and the outcomes log is replaced, each holding every event acknowledged before it began, byte for byte, or one dropped after it was final at both endpoints; a restored directory serves what is retained, answers <code>404</code> for what is not, and delivers each retained event not final in the backup once; every refusal (an inconsistent pair, a flipped byte, a held lock). The scripts were mutated: 7 mutants, all killed.</td><td>runbook &sect;4, &sect;38.1</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note prose" style="margin-top:1rem">The design document also says what the tests do not cover. For example, the partial-write branch of a plain <code>http</code> delivery attempt has never run in a test (&sect;16): the I/O shim reaches the TLS and name-lookup paths (&sect;40), not that one.</p>
+  </section>
+
+  <section id="costs" aria-labelledby="h-costs">
+    <h2 id="h-costs">What it costs</h2>
+    <p class="prose muted">Measured on a shared 4-core VM (Intel Xeon 2.10 GHz) that other work was also using, so each figure is a bound and a few percent is noise; these are measurements of this service, not a benchmark against any other. A range is the spread of the runs. Each row says where its method is written down; <code>docs/capacity.md</code> gives the method in one place, and its long-run cells are empty until the 24-hour run is made.</p>
+    <div class="scroll" tabindex="0" role="region" aria-label="Measured costs table">
+    <table class="stack ev">
+      <thead><tr><th scope="col">What</th><th scope="col">Figure</th><th scope="col">Method and where</th></tr></thead>
+      <tbody>
+        <tr><td>CPU of the service per delivery, plain HTTP to an address</td><td><strong>100 &micro;s</strong> (67 to 117) with ten endpoints; 267 &micro;s (183 to 300) with one</td><td><code>scripts/bench/https_cost.py</code>: service pinned to one core, receivers on the others, 600 deliveries a run, median of the runs, user plus system CPU from <code>/proc</code>; the ingest of the event and the logs are in the figure (&sect;40.9)</td></tr>
+        <tr><td>The same through a name</td><td>167 &micro;s (150 to 217) with ten endpoints; 283 &micro;s (267 to 317) with one</td><td>the same: one lookup a delivery</td></tr>
+        <tr><td><code>https</code>, a full handshake every time</td><td><strong>1,033 &micro;s</strong> (983 to 1,317) with ten endpoints; 1,433 &micro;s (1,400 to 1,533) with one</td><td>the same, <code>tls-resume 0</code>: a full verified handshake is about 0.9 ms of the service&rsquo;s CPU</td></tr>
+        <tr><td><code>https</code>, session resumed</td><td><strong>683 &micro;s</strong> (650 to 817) with ten endpoints; 833 &micro;s (767 to 983) with one</td><td>the same: a resumed handshake is about 0.5 ms</td></tr>
+        <tr><td>Deliveries a second one core does</td><td>about 10,000 plain, 970 over <code>https</code> with full handshakes, 1,460 resumed (ten endpoints)</td><td>worked out from the CPU per delivery above; not a throughput that was run (&sect;40.9)</td></tr>
+        <tr><td>1,024 endpoints</td><td>9.3 MB resident at the start with 1,024 idle endpoints (9.1 MB with one); 50 to 52 MB with every window full of failed attempts; 73 to 97 MB and 13 to 16 s to start with every table of dead letters full; 53 &micro;s of CPU a delivery at 1,024 endpoints</td><td><code>scripts/bench/many_bench.py</code>; both full at once (125 MiB) is computed, the two halves were measured apart (&sect;41.12)</td></tr>
+        <tr><td>Deliveries a second, end to end</td><td>9,977 with ten endpoints, 6,126 with one (plain HTTP)</td><td><code>scripts/bench/run.py</code>: a load generator and a sink in C, 64 connections, four alternated rounds, medians; measured before retention and the reconnecting pool were put under it and not repeated (&sect;39.8)</td></tr>
+        <tr><td>Ingest</td><td>11 &micro;s of CPU an event (10 to 12); 40,484 to 55,460 events a second over 64 keep-alive connections</td><td><code>scripts/bench/run.py</code>, 50,000 events, no endpoint; the CPU figure is from &sect;39.8, the rate is the least and the most of &sect;31 (52,703 and 55,460) and &sect;34.8 (40,484 and 40,793), run under different load</td></tr>
+        <tr><td>Disk, with retention</td><td>a peak of <strong>95 MB</strong> for 3,000,000 events (the history: about 1,002 MB); between 15 and 93 MB for 10,000,000 (the history: about 3,180 MB, 34 times more)</td><td><code>scripts/bench/retention_bench.py through</code>: one endpoint, every event delivered, retention 20 s and 32 MiB segments so that a month happens in seconds; 7,775 and 5,274 events a second end to end. The 10,000,000 run was on the build before the merge with the tokens, operating and filtering work, the 3,000,000 run on the merged build; neither has <code>https</code> (&sect;38.1). The bound is the retention, one segment, the events a paused, disabled or dead endpoint or a waiting replay still needs, and <code>delivery-log-bytes</code> (&sect;38.2)</td></tr>
+        <tr><td>Memory</td><td>2.5 MB resident after <code>listening</code> whatever <code>idem-keys</code> is; flat between 2.7 and 9.7 MB through 3,000,000 events and deliveries; 200,000 distinct idempotency keys in 30 MB; with OpenSSL linked and the system&rsquo;s trust store loaded the process is about 5.7 MB larger (9.7 MB against 4.0 MB after 100 deliveries)</td><td><code>scripts/bench/retention_bench.py</code>, the <code>memory</code> stage of <code>tests/retention_test.py</code>, <code>scripts/bench/https_cost.py</code> (&sect;38.1, &sect;38.2, &sect;40.9); all but the last are from builds before <code>https</code></td></tr>
+        <tr><td>Start</td><td><strong>0.89 to 0.95 s</strong> with 1,000,000 events retained (257 MB, 8 segments) and no endpoint; 2.12 to 2.22 s with one endpoint that has been sent all of them and 128,460 outcome records to replay. 10,000,000 retained events: about 7.5 to 9.5 s plus the replay, <strong>extrapolated, not measured</strong></td><td><code>scripts/bench/retention_bench.py start</code>: from <code>exec</code> to <code>listening</code>, three runs, files in the page cache (&sect;38.1)</td></tr>
+        <tr><td>The loop held by maintenance</td><td>34 to 70 ms for the largest snapshot of 62 endpoints with full windows (4.9 MB; six runs, and 32 ms on the merged build), and 473 to 581 ms at 1,024 endpoints with every window full (&sect;41.12); the longest step of the 3,000,000-event run was 30 ms, of the 10,000,000-event run 68 ms</td><td><code>maintenance_ms_max</code> in <code>GET /stats</code> (&sect;38.1, &sect;38.5)</td></tr>
+        <tr><td>A database that comes back</td><td><code>/readyz</code> is <code>200</code> again 1.66 s after a cut connection is restored; both connections replaced in 0.07 s after their backends were ended; ready 2.1 s after a real server stopped for four seconds started; the longest wait of a probe of <code>/healthz</code> in any phase 3 to 23 ms</td><td><code>tests/pgre_test.py</code> (&sect;37.8)</td></tr>
+        <tr><td><code>https</code> and names do not hold the loop</td><td>the longest wait of a request while 64 handshakes were pending 0.6 to 1.3 ms (idle: 0.9 to 3.2 ms); while 64 lookups waited on a name server that takes 2 s, 1.1 to 2.2 ms</td><td><code>tests/https_test.py</code>, <code>tests/names_test.py</code> (&sect;40.9)</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <ul>
+      <li><a href="https://github.com/alpibrusl/lexsys-hooks">Repository</a></li>
+      <li><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/README.md">README</a></li>
+      <li><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/design.md">Design document</a></li>
+      <li><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/LICENSE">EUPL-1.2</a></li>
+    </ul>
+    <p>Built on <a href="https://github.com/alpibrusl/lex-sys">lex-sys</a>, <a href="https://github.com/alpibrusl/lexsys-log">lexsys-log</a> and <a href="https://github.com/alpibrusl/lexsys-pg">lexsys-pg</a>. Signatures follow the Standard Webhooks specification.</p>
+  </div>
+</footer>
+</body>
+</html>
