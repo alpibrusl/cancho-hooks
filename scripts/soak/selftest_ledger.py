@@ -283,6 +283,17 @@ def series_tests():
     results.append(("failed probes outside an excused window are a stall", bool(failed(series_rows("flat"), "H1", probe=errs)[0])))
     slow_tail = [{"t": 2_000_000 + i, "n": 10, "max": 90.0, "ctl": 0.2, "err": 0, "l": [1.0] * 8 + [90.0, 80.0]} for i in range(100)]
     results.append(("a slow 99.9th percentile is caught (H2)", bool(failed(series_rows("flat"), "H2", probe=slow_tail)[0])))
+    pending = Verifier(SEED)
+    pending.add_endpoint(0, "new", "churn", [], c0=None)
+    pending.add_endpoint(1, "old", "healthy", [], c0=0)
+    try:
+        pending.purge(1e9)
+        pending.settle("new", 5)
+        pending.cursor_sample("new", 5, 1.0, 1)
+        ok = True
+    except TypeError:
+        ok = False
+    results.append(("an endpoint whose start is not yet known does not stop the checker", ok))
     return results
 
 

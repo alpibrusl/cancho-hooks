@@ -108,6 +108,7 @@ class Verifier:
         self.floor = 0               # ids at or below are purged
         self.t_last = 0.0
         self.explained = Counter()
+        self.replayed = {}           # event -> when a replay of it was asked for: an endpoint created while the replay waits is sent it too
         self.restarts = []           # times the service was stopped or killed to be started again
         self.recoveries = []         # seconds a cursor took to get back to what it was before a restart
         self.recover_s = 120.0
@@ -143,6 +144,8 @@ class Verifier:
         ep = self.by_label.get(label)
         if ep:
             self.repl[(ep.idx, ev)] += n
+        if n > 0:
+            self.replayed[ev] = self.t_last
 
     def note_rotation(self, label, t_start, t_end):
         """Two signatures are due from t_start + 3 s to t_end - 3 s."""
@@ -239,7 +242,7 @@ class Verifier:
             elif not exempt:
                 if not wanted(ep.types, name):
                     v.add("C_filter", ep=ep.label, ev=ev, type=name, subscribed=ep.types)
-                elif ev <= ep.c0 and not ep.ambiguous:
+                elif ev <= ep.c0 and not ep.ambiguous and ev not in self.replayed:
                     v.add("C_old_event", ep=ep.label, ev=ev, c0=ep.c0)
             if flags & F_EFF:
                 ep.eff += 1
@@ -376,7 +379,7 @@ class Verifier:
 
     def purge(self, now, min_settled=None):
         """Forget what is old and settled everywhere: the window is `keep_s` of the newest events."""
-        live = [ep for ep in self.by_idx.values() if ep.retired is None]
+        live = [ep for ep in self.by_idx.values() if ep.retired is None and ep.c0 is not None and not ep.ambiguous]
         floor = min([ep.settled for ep in live], default=0) if min_settled is None else min_settled
         cutoff = now - self.keep_s
         drop = [i for i, e in self.ev.items() if i <= floor and e[3] < cutoff]
@@ -390,6 +393,7 @@ class Verifier:
             self.floor = max(self.floor, dset)
             self.cnt = {k: c for k, c in self.cnt.items() if c[1] >= cutoff or k[1] > self.floor}
             self.repl = Counter({k: c for k, c in self.repl.items() if k[1] > self.floor})
+            self.replayed = {k: v for k, v in self.replayed.items() if k > self.floor}
             if len(self.n2id) > 400000:
                 self.n2id.clear()
             if len(self.posted_n) > 600000:

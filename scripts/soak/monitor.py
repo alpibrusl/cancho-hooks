@@ -18,7 +18,7 @@ COLUMNS = ["t", "el", "inc", "pid", "up", "rss_kb", "hwm_kb", "threads", "fds", 
            "dropped", "snapshots", "maint_ms_max", "maint_errors", "lock_skips", "delivered", "failed", "dead", "filtered", "in_flight", "retries_waiting", "replays_waiting",
            "lag_max", "lag_sum", "lag_over_1024", "db_reconnects", "db_failures", "db_losses", "hist_written", "hist_failed", "hist_dropped", "probe_max_ms", "probe_p99_ms",
            "probe_errors", "control_max_ms", "ingest_per_s", "ingest_p50_ms", "ingest_p99_ms", "ingest_max_ms", "ingested_bytes", "deliv_lat_p50_ms", "deliv_lat_p99_ms",
-           "deliv_lat_max_ms", "harness_cpu_pct", "receivers_cpu_pct", "loadavg1", "recv_loop_lag_max_ms", "bursting", "acked"]
+           "deliv_lat_max_ms", "harness_cpu_pct", "receivers_cpu_pct", "loadavg1", "recv_loop_lag_max_ms", "bursting", "acked", "phase"]
 
 SERIES = re.compile(r'^(hooks_[a-z_]+)\{endpoint="(\d+)"\} (\S+)$', re.M)
 PLAIN = re.compile(r'^(hooks_[a-z_]+) (\S+)$', re.M)
@@ -148,6 +148,7 @@ class Watcher(threading.Thread):
         self.js = open(os.path.join(run.out, "samples.jsonl"), "a", buffering=1)
         self.probe_off = 0
         self.last_sweep = 0.0
+        self.last_trim = 0.0
         self.last = {"t": time.time(), "cpu": time.process_time(), "recv_cpu": None, "probe_cpu": None}
         self.rows = []
 
@@ -179,7 +180,7 @@ class Watcher(threading.Thread):
     def sample(self):
         r = self.r
         now = time.time()
-        row = {"t": round(now, 3), "el": round(r.elapsed(), 1), "inc": r.svc.inc, "pid": r.svc.pid or "", "up": 0, "bursting": int(r.bursting), "acked": r.poster.counts["acked"],
+        row = {"t": round(now, 3), "el": round(r.elapsed(), 1), "inc": r.svc.inc, "pid": r.svc.pid or "", "up": 0, "bursting": int(r.bursting), "phase": r.phase, "acked": r.poster.counts["acked"],
                "ingested_bytes": r.poster.bytes_ingested}
         try:
             row["loadavg1"] = os.getloadavg()[0]
@@ -194,6 +195,14 @@ class Watcher(threading.Thread):
         if now - self.last_sweep > 60:
             self.last_sweep = now
             sweep_sidecars(r.datadir)
+        if now - self.last_trim > 300:
+            self.last_trim = now
+            # the history of attempts is a row for each delivery attempt: 38 million a day at the soak's rate. Nobody reads it here; keep half an hour of it (it is written through the service, and what is
+            # trimmed is behind the service's back, which it does not mind: it only inserts)
+            try:
+                r.psql_rows("delete from attempts where at_ms < (extract(epoch from now()) * 1000)::bigint - 1800000")
+            except Exception:  # noqa: BLE001
+                pass
         detail = {"t": row["t"], "lag": {}, "dead": {}}
         s, st = r.read("/stats", timeout=3)
         if s == 200 and isinstance(st, dict):

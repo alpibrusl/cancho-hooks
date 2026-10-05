@@ -80,7 +80,7 @@ class Replayer(threading.Thread):
         if not cands:
             return
         ev = rng.choice(cands)
-        actives = [e for e in r.eps.values() if e.active and e.svc_id is not None and e.cls != "dead"]
+        actives = [e for e in r.eps.values() if e.active and e.svc_id is not None]
         typ = r.type_of(ev)
         if typ is None:
             return
@@ -117,26 +117,62 @@ class Replayer(threading.Thread):
 
 
 class Enabler(threading.Thread):
-    """An endpoint that answered 410 is disabled until someone enables it: this is that someone, for the `gone` class. For any other class a disabled endpoint is a finding."""
+    """An endpoint that answered 410 is disabled until someone enables it: this is that someone, for the `gone` class. For any other class a disabled endpoint is a finding.
+
+    It is also the janitor: a create that was not answered (the database was frozen, or cut) may have been made after the harness gave up on it, and an endpoint the harness does not know of,
+    with no receiver to answer it, is a factory of dead letters and a pin on the log. One that has been seen for 5 s is looked up by its port in the table, matched to the receiver the harness
+    made for it, and deleted."""
 
     def __init__(self, run):
         super().__init__(daemon=True, name="enabler")
         self.r = run
+        self.unknown = {}
 
     def run(self):
         r = self.r
-        while not r.stop.is_set():
-            r.stop.wait(1.5)
+        while not r.stop_all.is_set():
+            r.stop_all.wait(1.5)
             status, eps = r.read("/endpoints")
-            if status != 200:
+            if status != 200 or not isinstance(eps, list):
                 continue
+            now = time.time()
+            seen = set()
             for e in eps:
                 label = r.label_of.get(e["id"])
                 if not label:
+                    seen.add(e["id"])
+                    since = self.unknown.setdefault(e["id"], now)
+                    if now - since > 5.0:
+                        self.stray(e["id"])
                     continue
-                if e.get("disabled") and r.eps[label].cls == "gone":
+                if e.get("disabled") and r.eps[label].cls == "gone" and not r.stop.is_set():
                     s, _ = r.admin("POST", f"/endpoints/{e['id']}/enable", None, timeout=5)
                     r.counts["enables"] += s == 200
+            for k in [k for k in self.unknown if k not in seen]:
+                del self.unknown[k]
+
+    def stray(self, sid):
+        r = self.r
+        try:
+            rows = r.psql_rows(f"select port from endpoints where id = {sid}")
+        except Exception:  # noqa: BLE001
+            return
+        port = int(rows[0][0]) if rows else None
+        ep = next((e for e in r.eps.values() if e.port == port and e.svc_id is None), None) if port else None
+        if ep is not None:
+            ep.svc_id = sid
+            r.label_of[sid] = ep.label
+            with r.vlock:
+                r.verifier.activate(ep.label, 0, time.time(), ambiguous=True)
+            r.log("stray", svc_id=sid, label=ep.label, port=port)
+        elif port is not None:
+            r.log("stray", svc_id=sid, label=None, port=port, note="not one of the harness's")
+            return
+        s, _ = r.admin("DELETE", f"/endpoints/{sid}", None, timeout=8)
+        if s in (200, 404):
+            r.counts["strays_deleted"] += 1
+            if ep is not None:
+                r.drop_endpoint(ep)
 
 
 # ---- endpoint churn ----------------------------------------------------------------------------------------------------
@@ -205,7 +241,7 @@ class Churn(threading.Thread):
     def reconcile(self, ep):
         """A create that was not answered: the row may be there. Find it by its port, and take it away."""
         r = self.r
-        time.sleep(1.0)
+        time.sleep(3.0)
         try:
             rows = r.psql_rows(f"select id from endpoints where port = {ep.port}")
         except Exception:  # noqa: BLE001
@@ -218,7 +254,9 @@ class Churn(threading.Thread):
             r.label_of[sid] = ep.label
             r.log("churn", label=ep.label, step="ambiguous", svc_id=sid)
             self.delete(ep)
-        r.drop_endpoint(ep, keep_receiver=bool(rows))
+            r.drop_endpoint(ep, keep_receiver=True)
+            return
+        # not there (yet): if the create completes late the janitor (Enabler) finds the endpoint by its port; the receiver stays up for that
 
     def retire(self, ep):
         r = self.r
@@ -248,13 +286,24 @@ class Churn(threading.Thread):
         threading.Timer(12.0, lambda: r.recv({"op": "remove", "label": ep.label})).start()
 
     def delete(self, ep):
+        """DELETE until the service says it is gone (or has never heard of it). A database that is cut or frozen refuses it with a 503 or a 504 for as long as the fault lasts, so
+        this waits that out: an endpoint that is left behind with no receiver is a dead letter factory and a pin on the log, and that is the harness's fault, not the service's."""
         r = self.r
-        for _ in range(5):
+        end = time.time() + 180
+        s = 0
+        while time.time() < end:
             s, _ = r.admin("DELETE", f"/endpoints/{ep.svc_id}", None, timeout=8)
             if s in (200, 404):
                 break
-            time.sleep(1.0)
+            if s in (0, 504):
+                g, _ = r.read(f"/endpoints/{ep.svc_id}", timeout=5)      # the row may have gone although the answer did not come
+                if g == 404:
+                    s = 404
+                    break
+            time.sleep(1.5)
         r.log("churn", label=ep.label, step="deleted", status=s)
+        if s not in (200, 404):
+            r.violate("P_zombie_endpoint", ep=ep.label, svc_id=ep.svc_id, status=s)
 
 
 # ---- the sick endpoint -------------------------------------------------------------------------------------------------
