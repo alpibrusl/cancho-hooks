@@ -686,7 +686,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             empty = buffer.size(sz) == 0;
         }
         if empty && want < evlog.first_id(lg) {
-            answer = server.failure(heap, answer, 404, "no such event: events past the retention are dropped", keep);
+            // A tombstone (`docs/design.md` section 44): the ids are dense and never given twice, so an id below the oldest event the log keeps was an event,
+            // and retention dropped it. Gone for good, which is what 410 says; an id that was never given is a 404.
+            answer = server.failure(heap, answer, 410, "the event was dropped by retention (it was final at every endpoint and older than retention-days)", keep);
         } else if empty {
             answer = server.failure(heap, answer, 404, "no such event", keep);
         } else {
@@ -1127,6 +1129,9 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             only = endpoints.slot_of(stats[off_table()..off_table() + endpoints.table_size()], oi);
         }
         let offset = find_offset(lg, window, want);
+        if offset < 0 && want < evlog.first_id(lg) {
+            return server.failure(heap, out, 410, "the event was dropped by retention and cannot be replayed", keep);
+        }
         if offset < 0 {
             return server.failure(heap, out, 404, "no such event", keep);
         }

@@ -38,7 +38,7 @@ files, read with the reader of tests/chaos.py (not the one in scripts/logcheck.p
      13. every backup exits 0; each holds, byte for byte, every event acknowledged before it began, or the event was dropped and was final at both
          endpoints in the backup's own delivery.seg; ids are dense from the first retained, no torn tail, the pair consistent
      14. a sample (the first, a middle one, the last, and some that had dropped segments) is restored and started with retention off: what is
-         retained is served, what was dropped answers 404, a new event takes the next id (even when every event had been dropped), each retained
+         retained is served, what was dropped answers 410 (a tombstone), a new event takes the next id (even when every event had been dropped), each retained
          event not final in the backup is delivered once to the endpoint that lacked it, none that was final is delivered again
   E. 15. compact.lock held by someone else (what a backup is): the service drops nothing and replaces nothing, counts the deferral, still takes
          events; a backup waits for the lock and finishes when it is let go; the service resumes
@@ -733,7 +733,7 @@ def verify_restore_retained(bk, before, fin, ev):
                 if got != json.loads(body):
                     bad.append(i)
             except urllib.error.HTTPError as e:
-                if e.code == 404 and i < first:
+                if e.code == 410 and i < first:
                     gone.append(i)
                 else:
                     bad.append((i, e.code))
@@ -744,7 +744,7 @@ def verify_restore_retained(bk, before, fin, ev):
         ok = wait_for(lambda: set(r0.delivered()) >= want[0] and set(r1.delivered()) >= want[1], 20)
         time.sleep(0.5)
         g0, g1 = sorted(r0.delivered()), sorted(r1.delivered())
-        check(f"14. {name} (events {first}..{last}, {len(gone)} acknowledged ones dropped): retained ones served intact, dropped ones 404, next id {last + 1}",
+        check(f"14. {name} (events {first}..{last}, {len(gone)} acknowledged ones dropped): retained ones served intact, dropped ones 410, next id {last + 1}",
               not bad and new_id == last + 1, f"bad {bad[:3]} new_id {new_id}")
         check(f"14. {name}: the new event reaches both endpoints; each retained event not final in the backup exactly once, none that was final again",
               ok and g0 == sorted(want[0]) and g1 == sorted(want[1]),
