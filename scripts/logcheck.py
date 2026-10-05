@@ -45,7 +45,9 @@ EVENT_FORMAT = 2                      # the format of the events log this versio
 EVENT_KINDS = (1, 2, 3, 6, 7, 8, 9, 14, 16, 17)   # delivered, failed, dead, replay, replay failed / delivered / dead, why an attempt failed (14), a replay cancelled (16), a dead letter of a snapshot (17): `event` is an event id
 REASONS = {0: "none", 1: "connect_refused", 2: "connect_timeout", 3: "connect_error", 4: "send_timeout", 5: "send_error", 6: "no_response",
            7: "reset", 8: "closed_early", 9: "bad_response", 10: "status_3xx", 11: "status_4xx", 12: "status_5xx", 13: "gone",
-           14: "status_other", 15: "busy", 16: "too_large"}   # src/reason.ls; kind 14 holds one in its fifth field, plus 256 for a replay's attempt
+           14: "status_other", 15: "busy", 16: "too_large",
+           17: "dns_failed", 18: "dns_timeout", 19: "ssrf_refused", 20: "tls_handshake", 21: "cert_untrusted", 22: "cert_expired", 23: "cert_hostname", 24: "cert_invalid",
+           25: "tls_timeout", 26: "tls_error"}   # src/reason.ls; kind 14 holds one in its fifth field, plus 256 for a replay's attempt
 CREATED = 10                          # `attempts` is the endpoint's starting cursor: an event id (or 0)
 
 try:  # a C implementation if one happens to be installed; the table below is the fallback and the same function

@@ -86,7 +86,22 @@ std = true
 
 [[test]]
 name = "config"
-sources = ["tests/config_test.ls", "src/config.ls"]
+sources = ["tests/config_test.ls", "src/config.ls", "src/destination.ls"]
+std = true
+
+[[test]]
+name = "dns"
+sources = ["tests/dns_test.ls", "src/dns.ls"]
+std = true
+
+[[test]]
+name = "resolve"
+sources = ["tests/resolve_test.ls", "src/resolve.ls", "src/destination.ls"]
+std = true
+
+[[test]]
+name = "manage"
+sources = ["tests/manage_test.ls", "src/manage.ls", "src/destination.ls"]
 std = true
 
 [[test]]

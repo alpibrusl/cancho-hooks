@@ -16,7 +16,7 @@ It is chosen because the properties that make it hard are exactly the properties
 | the signature is checkable by anyone | an independent implementation verifies every delivery | `std.crypto` (plus HMAC, which is missing) |
 | the authority is small and visible | the service touches one data directory, one listening port, and outbound network | `lex-sys authority`, `lex-os` grants |
 
-The claim, in one sentence: **a single-node webhook service in lex-sys, with one foreign symbol (libc's `statx`, pinned in CI: sections 33.5 and 36; it was five functions until section 36 replaced the four signal functions with a lex-sys capability), that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one. **Corrected in sections 33.5 and 34.4:** "with no `Ffi`" held until the service had to learn that it was asked to stop (four libc signal functions, `src/ops.ls`) and, for the production profile, to read the mode of a file (`statx`, `src/perm.ls`), neither of which lex-sys can do; its authority report now opens with `UNBOUNDED`.
+The claim, in one sentence: **a single-node webhook service in lex-sys, with foreign symbols that are libc's `statx` and, since section 40, 32 functions of OpenSSL for `https` (pinned in CI: sections 33.5, 36 and 40.7; the libc part was five functions until section 36 replaced the four signal functions with a lex-sys capability), that loses no accepted event across arbitrary crashes, and whose authority report fits on one screen.** It is not a hosted product, it does not scale horizontally, and it has no multi-tenant isolation beyond API keys. A single node that does not lose events is a smaller claim than Svix's and a testable one. **Corrected in sections 33.5 and 34.4:** "with no `Ffi`" held until the service had to learn that it was asked to stop (four libc signal functions, `src/ops.ls`) and, for the production profile, to read the mode of a file (`statx`, `src/perm.ls`), neither of which lex-sys can do; its authority report now opens with `UNBOUNDED`.
 
 ## 2. What is built from what
 
@@ -652,11 +652,15 @@ Code: `assign_slots` is two functions, `match_slots` (the table's endpoints take
 
 ## 26. Where a delivery may go (SSRF)
 
+> **Changed by [section 40](#40-https-endpoints-names-and-the-destination-rule-at-every-attempt-docsproductionmd-p17).** This section is the rule as it was first built, for addresses. Where it says a name is refused, section 40 replaces that: a name is accepted at
+> the write as a name, resolved by the service at every attempt, every address of the answer judged by the ranges below, and the connection made to the address that was judged. The ranges, the places the rule applies, the redirects and the
+> default are as written here; the paragraphs that said what names could not do are corrected in place.
+
 **The risk.** An endpoint is an address the service will `POST` to from inside the operator's network. Whoever can name an address, through `POST /endpoints` (admin token), a row in the table, or a line in `endpoints.conf`, can make the service call something only it can reach: a database on `10.0.0.5`, the cloud metadata service on `169.254.169.254`, an admin port on `127.0.0.1`. What comes back is not read by the caller, but a `POST` to an internal service is an action, the status is kept in the history, and a `2xx` versus a `4xx` is a probe of what is there.
 
 **The rule (`src/destination.ls`).** Unless `allow-private-hosts` is `1`, the host of an endpoint must be:
 
-1. an **IPv4 literal**: four decimal numbers of 0 to 255, no leading zero, nothing else. A name is refused because the service cannot know what it resolves to: `tcp_connect_start` calls `getaddrinfo`, so a check before the call and the connection after it can disagree (a name can change in between: DNS rebinding), and the call blocks the loop (design section 16). The spellings a resolver accepts and a person does not expect (`127.1`, `2130706433`, `0x7f.0.0.1`, `0177.0.0.1`, `127.0.0.01`) are refused for the same reason, and IPv6 is refused because the rule is written for IPv4 (what the check does not understand it does not allow; an IPv6 literal could name `::1` or an IPv4-mapped loopback). A connection to an IP literal is made without a lookup, so **there is no gap between what was checked and what is connected to**;
+1. an **IPv4 literal**: four decimal numbers of 0 to 255, no leading zero, nothing else. A name was refused (until section 40) because the service could not know what it resolves to: `tcp_connect_start` calls `getaddrinfo`, so a check before the call and the connection after it can disagree (a name can change in between: DNS rebinding), and the call blocks the loop (design section 16). It is accepted now as a name (`destination.name_ok`), resolved by the service itself on the poller and judged at every attempt, which closes both gaps (40.5). The spellings a resolver accepts and a person does not expect (`127.1`, `2130706433`, `0x7f.0.0.1`, `0177.0.0.1`, `127.0.0.01`) are refused for the same reason, and IPv6 is refused because the rule is written for IPv4 (what the check does not understand it does not allow; an IPv6 literal could name `::1` or an IPv4-mapped loopback). A connection to an IP literal is made without a lookup, so **there is no gap between what was checked and what is connected to**;
 2. **public**: outside 0/8, 10/8, 100.64/10 (carrier-grade NAT), 127/8, 169.254/16 (link-local, which holds the metadata address), 172.16/12, 192.0.0/24, 192.0.2/24, 192.88.99/24, 192.168/16, 198.18/15, 198.51.100/24, 203.0.113/24, 224/4 (multicast) and 240/4 (reserved, which holds the broadcast address).
 
 It applies at **every place an endpoint comes from**, with the same function (`endpoints.parse` for the file and the table, `manage.parse_create` for `POST /endpoints`): a request is a `400` that says why and **stores nothing** (no row, no record), and a file or a table that has a bad host **stops the start** with status 13 and the line (`--import-endpoints 1` refuses it too, and imports nothing). "Refuse, don't downgrade": a row that is not allowed is not skipped, because an endpoint that silently does not receive is a worse failure than a service that does not start.
@@ -665,9 +669,9 @@ It applies at **every place an endpoint comes from**, with the same function (`e
 
 **The default is the safe one, and that changed what the demos need.** `allow-private-hosts` is `0`, so a receiver on `127.0.0.1` needs `--allow-private-hosts 1` (the README's demo and every test pass it). An existing deployment whose endpoints are on a private network stops at start with a message that names the setting; that is the intended failure. `GET /config` reports the setting.
 
-**What this does not do.** It is a deny-list of ranges and a ban on names, not an allow-list of the customer's hosts: any public address is allowed. It does not limit the **port** (a public host's port 22 or 6379 can be named), it does not pin an endpoint to a pre-approved host, and a public address that is itself a proxy to the inside is outside what a service can know. Names are not supported at all while the policy is on, which is a real cost: a customer's endpoint at `hooks.example.com` has to be given as its address, and breaks when the address changes. That is the price of not having a resolver of our own, which is the next piece to build if names matter (a resolver would resolve, check the answer against the same ranges, and connect to the address it checked).
+**What this does not do.** It is a deny-list of ranges, not an allow-list of the customer's hosts: any public address is allowed, and so is any name that resolves only to one. It does not limit the **port** (a public host's port 22 or 6379 can be named), it does not pin an endpoint to a pre-approved host, and a public address that is itself a proxy to the inside is outside what a service can know. Names were not supported at all while the policy was on, which was a real cost: a customer's endpoint at `hooks.example.com` had to be given as its address, and broke when the address changed. Section 40 built what this paragraph named as the next piece: a resolver of our own, which resolves, checks the answer against the same ranges, and connects to the address it checked.
 
-**Tests.** `tests/destination_test.ls` (unit): the dotted-quad reader on 4 good and 22 bad texts, each range at both of its edges (25 inside, 25 outside), names never allowed, and the file parser's `open` flag. `tests/ssrf_test.py` (end to end, against PostgreSQL): 41 refused hosts each stop an `endpoints.conf` start with status 13 and the line, 23 public hosts that are the edges of every range are accepted and listed, `allow-private-hosts 1` accepts private addresses and names, the same 41 are each a `400` from `POST /endpoints` with nothing stored (the message says "public IPv4"), a public host is a `201`, a table row with a private host stops the start and `--import-endpoints` refuses, and a `302` is retried as a failure and never followed. `tests/config_test.py` reads the setting back from the file and from the flag, refuses `yes`, and checks that a private host in the file with the default stops the start.
+**Tests.** (As first built; the changes of section 40 are marked CHANGED in the files and listed in 40.8.) `tests/destination_test.ls` (unit): the dotted-quad reader on 4 good and 22 bad texts, each range at both of its edges (25 inside, 25 outside), names never *literal*-allowed, and the file parser's `open` flag. `tests/ssrf_test.py` (end to end, against PostgreSQL): 41 refused hosts each stop an `endpoints.conf` start with status 13 and the line, 23 public hosts that are the edges of every range are accepted and listed, `allow-private-hosts 1` accepts private addresses and names, the same 41 are each a `400` from `POST /endpoints` with nothing stored (the message says "public IPv4"), a public host is a `201`, a table row with a private host stops the start and `--import-endpoints` refuses, and a `302` is retried as a failure and never followed. `tests/config_test.py` reads the setting back from the file and from the flag, refuses `yes`, and checks that a private host in the file with the default stops the start.
 
 **Mutants of the new code: 10 run, 10 killed.** Leading zeros accepted; the 169.254 range moved; 172.16/12 losing 31; 100.64/10 off by one; 224/4 losing 224; names allowed; `POST /endpoints` skipping the rule; the file and the table skipping it; the file's message path judged open; the flag ignored. One (leading zeros accepted) is killed by the unit test only, because every end-to-end case that has a leading zero is also a private address and would be refused anyway; the unit test is where the property is pinned.
 
@@ -1021,7 +1025,7 @@ borrow fs as &f in { mode = fs_stat(f, "/tmp"); }
 
 Three consequences, stated plainly because the first is a loss:
 
-1. **The authority report is `UNBOUNDED`** (`lex-sys authority` prints "this program calls foreign code", lists `ffi("libc")` among the labels as unbounded and `statx` among the foreign symbols). Before the production profile and the graceful stop, the report named every capability the service has (the README said "No `Ffi`"); now it does not bound them. The service then held `Ffi("libc")` for **five** functions: this one, and the four signal functions of section 34.4, which made the report `UNBOUNDED` on their own, so removing `statx` alone would not have bound it again; since section 36 `statx` is the only one, and it is now the whole of the reason for `UNBOUNDED`. The README, the page and this document say so. `src/perm.ls` is one small file, and when lex-sys has a file-mode builtin it is a few lines; with a signal builtin as well (section 34.9) the `Ffi` is gone and the report is bounded again. If the check is not worth the foreign call, the whole of it is `src/perm.ls`, one `perm.files` call site in `main` (two, counting the check after the logs are opened) and `statx`'s share of the `libc` handle: removing them leaves statuses 33 and 35 unreachable and nothing else changed. (`docs/production.md` P1 item 7 already expects `https` to bring OpenSSL, which makes the report `UNBOUNDED` too.)
+1. **The authority report is `UNBOUNDED`** (`lex-sys authority` prints "this program calls foreign code", lists `ffi("libc")` among the labels as unbounded and `statx` among the foreign symbols). Before the production profile and the graceful stop, the report named every capability the service has (the README said "No `Ffi`"); now it does not bound them. The service then held `Ffi("libc")` for **five** functions: this one, and the four signal functions of section 34.4, which made the report `UNBOUNDED` on their own, so removing `statx` alone would not have bound it again; since section 36 `statx` is the only one, and it is now the whole of the reason for `UNBOUNDED`. The README, the page and this document say so. `src/perm.ls` is one small file, and when lex-sys has a file-mode builtin it is a few lines; with a signal builtin as well (section 34.9) the `Ffi` is gone and the report is bounded again. If the check is not worth the foreign call, the whole of it is `src/perm.ls`, one `perm.files` call site in `main` (two, counting the check after the logs are opened) and `statx`'s share of the `libc` handle: removing them leaves statuses 33 and 35 unreachable and nothing else changed. (`https` brought OpenSSL, as `docs/production.md` P1 item 7 expected: 32 functions of `libssl` and `libcrypto`, each under its own library, which keep the report `UNBOUNDED` and are pinned with `statx` in `docs/authority.json`; section 40.7.)
 2. **A slice crosses a foreign call as a pointer and a length, two arguments, and there is no way to pass a pointer alone.** `statx(dirfd, path, flags, mask, buf)` declared as the header has it gets `flags` = the path's length and `mask` = the real flags, and fails with `EINVAL` (reproducer below). The declaration in `perm.ls` is written for the shift: no `flags`, and the path passed as an empty slice at the start of its buffer, so the length that lands in `flags` is 0.
 
    ```
@@ -1165,7 +1169,7 @@ The Prometheus text exposition format 0.0.4 (`text/plain; version=0.0.4`), about
 
 ### 34.3 The reason an attempt failed
 
-`attempt.ls` ended an attempt with an HTTP status or one of four negative numbers (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). It now ends with one of seventeen codes, and `reason.ls` maps a code to a **reason**:
+`attempt.ls` ended an attempt with an HTTP status or one of four negative numbers (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). It ended with one of thirteen codes (twenty-three with section 40), and `reason.ls` maps a code to a **reason** (the first sixteen of them are the table below; reasons 17 to 26, for names and TLS, are in 40.4):
 
 | reason (number, name) | how an attempt gets it |
 |---|---|
@@ -1178,7 +1182,7 @@ The Prometheus text exposition format 0.0.4 (`text/plain; version=0.0.4`), about
 | 10 `status_3xx`, 11 `status_4xx`, 12 `status_5xx`, 13 `gone`, 14 `status_other` | the HTTP status (410 is `gone`; 1xx and 6xx and up are `status_other`) |
 | 15 `busy`, 16 `too_large` | not made: all 64 connections were in use; the request does not fit its slot |
 
-The deadline case needed the state the attempt was in when the sweep ended it (`attempt.timeout_of`: connecting, sending or reading), which the sweep used to throw away. **There is no `ssrf-refused`:** the destination rule is applied when an endpoint is created or read (section 26), never to an attempt, so no attempt can end that way today; when names and the rule move to attempt time (production P1.7, T2) it takes number 17. `send_timeout` could not be reproduced in a test: a request is at most 64 KiB and loopback buffers swallow that, so it is covered by the unit test of the mapping only.
+The deadline case needed the state the attempt was in when the sweep ended it (`attempt.timeout_of`: connecting, sending or reading), which the sweep used to throw away. **`ssrf_refused`** was not a reason when this was written (the destination rule was applied when an endpoint was created or read, never to an attempt); names moved the rule to the attempt (production P1.7, T2), and it is number 19 (40.4), with `dns_failed` 17 and `dns_timeout` 18 before it. `send_timeout` could not be reproduced in a test: a request is at most 64 KiB and loopback buffers swallow that, so it is covered by the unit test of the mapping only.
 
 **Where it is recorded, and why in both places.** Production.md allowed a new `delivery.seg` kind or the history column. Both, because they answer different questions:
 
@@ -1707,3 +1711,262 @@ No cost is visible above the noise: a delivery gains one `admit` (no limit: a co
 * **Not verified:** a log of millions of events with dead letters (the costs above are measured at 20,000 and extrapolated linearly); a table of 62 endpoints each with 2,048 dead letters; the rate limit across a restart on a machine under load (the bound of one bucket is argued and measured at 20 a second); that a rate above what one core delivers (about 10,000 a second) is reached; `retry-jitter` against a receiver that counts delays over days (the recorded time is checked, the schedule is not run for hours); the hot-path and cost figures of 39.8, which were measured before this change was put on top of retention and the pool and not repeated; the compiler is the one `lex-sys.toml` pins (`4c27593`), built from that commit locally and not by CI; CI's PostgreSQL (a container with a port mapping and `scram-sha-256`) was not available, the tests ran against a local server with trust authentication.
 * **Open:** the table keeps 2,048 dead letters an endpoint and finding the rest reads a log; a ring would avoid the shift of a full table (about 8,000 integer moves for each death of an endpoint that is full), which costs 5 us a death in the measurement and was not worth the complexity; the places of the events (`resolve_offsets`) could be found by the start's own walk of the events log and are not; a list of dead letters has no filter by time or reason; `rate` cannot say "unlimited for this endpoint" under a limit for the rest except by 100,000; the throttle metric counts the first refusal after an admitted attempt, not events; a cancelled replay of an attempt that was on the wire is refused, not recorded for later; there is no way to cancel by event type.
 * **Merge hotspots** (other changes to `ops.ls`, to the signal handling in `run` and `main` and to the compiler pin will meet these): `src/hooks.ls` — the imports (three lines), the layout after `ex` (`off_lim`, `off_dead`, `dv_size`), `clear_slot` (two lines), `finish_attempt` and `finish_replay` (the jittered `next_at`, the death time, the dead-letter table), the branches of `replay` (`dead_note` calls), `settle_endpoints` (the completion loop after `place_new`, and `dead_expire_all`), `start_attempts` (limits and `admit`), `run` (the argument of `server.wait`: one expression), `main` (one `lim.init` line after `rotation_grace_ms`), `handle` (one `if id >= 20 && id <= 23` block, and ids 20 to 23 in the `503` gate of section 37.2) and `routes`; `src/state.ls`, `src/compact.ls` and `scripts/logcheck.py` (the kinds: 15 is retention's header of the outcomes log, 16 and 17 are this change's; the snapshot writes a final cell as `delivered` and the table of dead letters as kind 17; the state's reader and the restore's check accept 1 to 17); `src/config.ls` (the settings are `cfg[28]` to `cfg[30]`, after the pool's `cfg[23..27]` and retention's `cfg[40..46]`; `size()` stays 48; **two branches that add settings collide on the index, and `tests/config_test.ls` has a test that no two settings share one**); `src/metrics.ls` (`row()` 11) with `tests/ops_test.ls` and `tests/metrics_test.py` counts; `src/authz.ls`, `tests/authz_test.py`, `tests/authz_test.ls` (routes 20 to 23); `src/epx.ls` (stride 2,664); `src/queries.ls` is generated: on a conflict regenerate it with `pgen` from `sql/queries.sql`; `lex-sys.toml` (four `[[test]]` sets), `.github/workflows/ci.yml` (four steps), `tests/chaos.py` (`more` in `flags` and `Service`).
+
+## 40. `https` endpoints, names, and the destination rule at every attempt (`docs/production.md` P1.7)
+
+Three slices, one change: **T1** the TLS phase of an attempt, **T2** host names and the SSRF rule applied to the address of every attempt, **T3** TLS sessions kept per endpoint. The design is
+the lex-sys spike's (`docs/tls-nonblocking.md` in lex-sys, `examples/tls_nb/`: measured, with the gaps it found) built into the service; this section is what was decided here, what was
+changed from the spike and why, what was measured, and what is not verified.
+
+### 40.1 What was decided
+
+* **OpenSSL, in the process** (production.md P1.7, the default taken): `libssl` and `libcrypto` through `Ffi`, 32 functions, each declared under its own library (section 40.7). The TLS of lex-sys
+  itself (`packages/tls`, lex-sys epic #197) replaces it when it can verify a certificate chain (#206: today it accepts a leaf only if it is pinned byte for byte) and has been reviewed by
+  someone else (#209: "not independently reviewed"). Nothing in the service outside `src/tls.ls` knows it is OpenSSL.
+* **Names are resolved by the service itself, on the poller** (`src/dns.ls`, the DNS client's bytes; the exchange is a phase of `src/attempt.ls`), over TCP, to one name server. Not `getaddrinfo` (it
+  blocks the loop for as long as the answer takes: 302 ms for a 300 ms answer in the spike; and the connect resolves a second time, so a check before it is not a check of what is dialled). Not a thread:
+  the spike built that too, and what it cost in the language (a payload of one pointer, no way to wait for a thread on a poller, four named workers, a fixed loopback port) is more than a resolver of
+  our own costs. The resolver does not need a thread, so it does not meet the rule of lex-sys `Signals` (`docs/signals.md`: watch first, then `spawn`; a `signals_watch` while a spawned thread has not been joined answers
+  `EBUSY`): there is no thread in this service, and the resolver, like everything else, runs in the loop.
+* **The scheme is part of the stored host** (`https://hooks.example.com`), and the API takes it as `scheme` or in a `url`. See 40.2 for why.
+* **An `https` endpoint needs a host name**, not an address: the certificate is checked against the name, and a name is also what SNI carries. (An address with a certificate that has an IP address
+  in its alternative names is not supported: `X509_VERIFY_PARAM_set1_ip_asc` is not declared.)
+
+### 40.2 The endpoint
+
+`endpoints.conf` and the `endpoints` table's `host` column hold `https://name` for a TLS endpoint and what they always held for the others (an IPv4 address, or now a name). The port is the port. **No
+column was added**: `psql -f sql/schema.sql` is unchanged, a backup and a restore carry the scheme because they carry the host, and `--import-endpoints` copies it. The reason is a failure mode:
+a previous version reading a table with a new `scheme` column would ignore it and deliver, in clear, to port 443 of an endpoint that was written down as `https`. A previous version reading
+`https://hooks.example.com` in the host refuses the line (status 13), which is "refuse, don't downgrade".
+
+Over the API (`POST /endpoints`, `PATCH /endpoints/:id`, admin token):
+
+| | |
+|---|---|
+| `{"url": "https://hooks.example.com:8443"}` | scheme, host and port at once; no port means the scheme's own (443, 80); one final `/` is allowed and nothing else (no path, query or user); not with `host`, `port` or `scheme` (400) |
+| `{"host": "hooks.example.com", "port": 443, "scheme": "https"}` | the same in members; `scheme` is `"http"` or `"https"` (anything else is a 400), left out is `"http"` on a `POST` and **what the endpoint has** on a `PATCH` |
+| `PATCH {"host": "other.example.com"}` | keeps the scheme; `{"scheme": "http"}` alone changes only the scheme; an address under `https`, whichever of the two members brings it, is a 400 and the endpoint is as it was |
+| `GET /endpoints`, `GET /endpoints/:id` | `"scheme": "https"` or `"http"` beside the port; still not the host and not a secret. The answers of `POST` and `PATCH` name the host without the scheme, and the scheme |
+
+A `host` that starts with `https://` in a request is refused: the scheme is a member of its own, so there is one way to write it.
+
+### 40.3 The TLS phase
+
+`src/attempt.ls` gained states (the earlier three are unchanged for an address and `http`):
+
+```
+                                      +--(http)--------------------------------------------> sending -> reading
+resolving (the name server) -> redial +                                                            ^
+   |                                  +--(https)--> connecting -> handshake ----------------------+
+   +-- the host is an address ---------------------> connecting --(http)------------------------>
+```
+
+Each state waits for the poller under the same token (`token0 + slot`), with the one deadline of the attempt (`deadline-ms`) over all of it. TLS is OpenSSL as a state machine over **two memory BIOs**
+per connection: the bytes read from the socket go into one, the bytes OpenSSL wants sent come out of the other, and the sockets stay lex-sys `Conn`s in the attempt's `std.conns.Table`. So OpenSSL
+never touches a descriptor (`conn_write` is `MSG_NOSIGNAL`: a peer that closed is an error code and not a `SIGPIPE`), the one place that touches the kernel is the one the type system governs, and
+a slot is watched writable only while ciphertext waits for the kernel and readable otherwise. The verification, in `src/tls.ls`:
+
+* `SSL_CTX_set_verify(SSL_VERIFY_PEER)`, **no way to turn it off** (the spike had one for comparison; it is not here), the minimum protocol TLS 1.2, `SSL_MODE_ENABLE_PARTIAL_WRITE | RELEASE_BUFFERS`, the library's
+  own session cache off.
+* The trust store, loaded **once, at start**, never per attempt (about 25 ms for the system's, a few for a file): the system's default locations (OpenSSL's rules: the compiled-in directory, and
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` if they are set in the service's environment), or **exactly** the PEM file `tls-ca-file` names, not both. A store that cannot be loaded is a refusal to start
+  (**status 21**, one line on stderr), never a client that does not verify.
+* The host name: `X509_VERIFY_PARAM_set1_host` with the endpoint's name (no partial wildcards), and the same name in SNI. The `Host` header of the request is the name and the port (the port left out when
+  it is the scheme's own), for an `https` endpoint and for a plain one that has a name; an endpoint at an address says `Host: receiver` as it always did.
+* Revocation (CRL, OCSP, stapling) is **not checked**: OpenSSL does not unless it is given a source, and there is none. A certificate that is revoked and otherwise valid is accepted. No client certificate.
+
+What changed from the spike's `tls.ls` (lex-sys `examples/tls_nb/`): per-library scopes (the spike had `Ffi("tls")` for both libraries and libc's `signal`; the new `foreign-authority.md` of lex-sys makes a
+scope a set); no direct-socket transport and no `signal`; verification cannot be off; the connection's state is nine integers in the attempt's own array and its buffers are in the slot's bytes
+(request, host name, 4 KiB read, 20 KiB ciphertext: 95,488 bytes a slot, 6.1 MB at 64 slots, from 4.5); a failure at the socket is `-1000 - errno` in the detail so that it is not mistaken for a
+verification result (found by the first test of a receiver that closes: `ECONNRESET` is 104, and 104 would have read as an `X509_V_ERR`).
+
+### 40.4 Why an attempt failed: ten new reasons
+
+`reason.ls` numbers 17 to 26 (on disk, never renumbered), `attempt.ls` codes -14 to -23, the coarse `status` of the history as in the last column:
+
+| reason | how an attempt gets it | `status` |
+|---|---|---|
+| 17 `dns_failed` | no name server known or reachable, an error answer (no such name, server failure, refused), bytes that are not DNS, an answer to another question, or a name with no IPv4 address | -1 |
+| 18 `dns_timeout` | the deadline passed while the name was being resolved | -3 |
+| 19 `ssrf_refused` | the name (or `localhost`) resolves to an address in the ranges of section 26; no connection was made | -1 |
+| 20 `tls_handshake` | the peer closed or spoke badly during the handshake, offered nothing the client accepts (TLS before 1.2), or sent an alert | -1 |
+| 21 `cert_untrusted` | the chain does not lead to a trusted root: unknown issuer, self-signed, a leaf whose issuer was not sent (`X509_V_ERR` 2, 18, 19, 20, 21, 27) | -1 |
+| 22 `cert_expired` | expired or not yet valid (9, 10) | -1 |
+| 23 `cert_hostname` | the certificate does not name the host (62, 63, 64) | -1 |
+| 24 `cert_invalid` | any other verification failure: a purpose that does not fit, a bad signature, a CA that may not sign | -1 |
+| 25 `tls_timeout` | the deadline passed during the handshake | -3 |
+| 26 `tls_error` | TLS could not be started, or failed after the handshake | -2 |
+
+Each is retried on the schedule and dead after it, like any failed attempt (a `410` over TLS is `gone`, dead at once, and disables the endpoint). The counters of `/metrics` have a series for each
+(`hooks_attempt_failures_total{reason=...}`), `hooks_endpoint_last_failure` names the last, and the delivery log's kind 14 holds the number. The array of counters in `ops.ls` had room for 17: the
+reasons now come **last** in it (`o_reasons() = 110`, `size() = 110 + reason.count()`), found by the first test that counted a `cert_expired` and read it as the probe's round. `/metrics` also has
+`hooks_tls_handshakes_total{result="full"|"resumed"}`.
+
+### 40.5 Names, and the destination rule at every attempt
+
+**At the write** (`destination.host_ok`; the file, the table, `POST` and `PATCH` all call it): an IPv4 literal that is public (unless `allow-private-hosts 1`), or a **name** (`destination.name_ok`:
+labels of letters, digits, `-` and `_`, 1 to 63 bytes each, 253 in all, no leading or trailing dot, and a last label that is not all digits). The last rule is what keeps `127.1`, `2130706433`, `0x7f.0.0.1`
+and `1.2.3.4.5` out: a person reads them as addresses, a C library as other addresses, and the service as nothing. `allow-private-hosts 1` no longer accepts what is neither an address nor a name
+(it used to accept any printable text, because the connect resolved whatever it was given; the changed assertions of `tests/ssrf_test.py` are marked CHANGED). A name's address cannot be known at the write,
+so the write is a weaker guarantee than it was; the attempt is where the guarantee is.
+
+**At every attempt** (`attempt.begin`, `advance`, `redial`):
+
+1. an address (or `localhost` and `x.localhost`, which are the loopback by RFC 6761 and are not asked of a name server) is judged by `destination.is_public` and dialled; refused it is `ssrf_refused`;
+2. a name is asked of the name server over TCP (the query is built by `dns.build_query`, the answer read as it arrives into the slot's buffer, `dns.parse` total on any bytes: a million damaged answers
+   in `tests/dns_test.ls`), on the attempt's own connection: **the slot's connection is the one to the name server until the answer is in**, so the token, the deadline and the buffers are the attempt's
+   throughout; `redial` then closes it and puts the connection to the endpoint in the same slot (the table gives back the slot it just freed; `redial` checks);
+3. **every** A record of the answer is judged, and one private address refuses the whole answer, wherever it is (a name that has a private address in its answer is one resolver change from being
+   sent there); an answer with no A record is `dns_failed`;
+4. the connection is made to the first address as a literal, with the name used afterwards for SNI and the certificate and for nothing else. **No lookup happens between the check and the
+   connection** (there is no second `getaddrinfo`; `tcp_connect_start` is given a dotted quad), so there is nothing for a rebinding name to change; and the name is asked again at the next attempt
+   (no cache: the answer's TTL is ignored; the cost is about 0.1 ms of CPU and one round trip to the server, 40.9).
+
+Which name server: `dns-server` (`ip` or `ip:port`) or the first IPv4 `nameserver` of `/etc/resolv.conf` (read once, at start; `resolve.ls`). **What this does not do**: no `/etc/hosts` (except `localhost`), no search
+list (a name is used as written), no second server if the first is down, no UDP, no IPv6 name server, **no IPv6 at all**: AAAA records are not asked for, so a name that only has an IPv6 address is
+`dns_failed`, and the destination rules are for IPv4. The name server must answer over TCP, which every recursive resolver does (systemd-resolved's stub, Docker's embedded server, dnsmasq, unbound,
+the cloud resolvers) and a stub that is UDP-only does not (a resolver that does not is `dns_failed` and the reason says so). The query id is a counter mixed with the deadline: not unpredictable, which
+matters to an off-path attacker against UDP and little against a TCP connection to a resolver on the same host or network. The service trusts the name server for names and **not for addresses**: whatever it
+answers, an address that is not public is refused, so a hostile resolver can send the service to any public address and to no private one.
+
+The rule is all-or-nothing, as `allow-private-hosts` always was: an operator whose receivers are on a private network and are named in a private DNS sets it to 1 and gives up the protection for every
+endpoint (a per-name allow-list would be the next piece, and is not built). It does not limit the port, and a public address that is itself a proxy to the inside is outside what a service can know.
+
+### 40.6 Sessions, and the keep-alive question
+
+**The service does not keep connections.** Every attempt dials, sends the request with `Connection: close`, reads the status line, and closes: 1 connection a delivery, today as before this change (the
+receiver of the tests counts them). With `https` that is a TLS handshake a delivery: 0.65 ms of CPU in the spike's measurement, about 0.9 ms here. Keeping the connection open per endpoint
+(a request on an established session costs 0.01 ms) would remove it and is a larger change than this one (a pool in the table, deadlines for an idle connection, what a retry means when the connection
+was closed by the receiver, and the retry accounting): not built.
+
+**What is built is resumption.** After the status line of an attempt over TLS, the connection's session (the ticket of TLS 1.3, or the session of 1.2) is kept for the endpoint (`attempt.keep_session`);
+the next attempt to the endpoint offers it, and the handshake is an abbreviated one if the receiver still accepts it (a receiver that does not, because it restarted or the ticket expired, gets a full handshake
+and the delivery is made: no failure). One session per endpoint slot, **in memory only**, 62 at most, each replaced by the newest, so the memory is bounded by the endpoints and not by the deliveries
+(the test of 3,200 deliveries over TLS grows no faster than one without TLS). A session is kept under the **name and port** it was made for and is offered only to them, and is **dropped** whenever the
+endpoint changes: a `PATCH` (of anything: host, port, scheme, secret) and a `DELETE` call `attempt.drop_session` for the slot, so the next attempt makes a full handshake and verifies the chain again.
+`tls-resume 0` keeps none. A resumed handshake does not verify the certificate again (that is what makes it cheap, and what TLS means by resuming): it resumes a session whose peer was verified,
+for this name, in this process.
+
+### 40.7 The authority: what the service may now call
+
+`lex-sys authority` was `UNBOUNDED` already, by one libc symbol (`statx`; the four signal functions went in section 36). It is, and the list is now:
+
+```
+before   unbounded_by: libc:statx                                                                                                  (1 pair; labels: ffi("libc"), signals INT,TERM)
+after    unbounded_by: libc:statx, and
+           libcrypto: BIO_new  BIO_read  BIO_s_mem  BIO_write  ERR_clear_error  ERR_get_error  X509_VERIFY_PARAM_set1_host  X509_VERIFY_PARAM_set_hostflags
+           libssl:    SSL_CTX_ctrl  SSL_CTX_free  SSL_CTX_load_verify_file  SSL_CTX_new  SSL_CTX_set_default_verify_paths  SSL_CTX_set_verify  SSL_SESSION_free  SSL_SESSION_is_resumable  SSL_ctrl  SSL_do_handshake  SSL_free  SSL_get0_param  SSL_get1_session  SSL_get_error  SSL_get_verify_result  SSL_new  SSL_read  SSL_session_reused  SSL_set_bio  SSL_set_connect_state  SSL_set_session  SSL_shutdown  SSL_write  TLS_client_method
+                                                                                                                                (33 pairs; labels: ffi("libc"), ffi("libcrypto"), ffi("libssl"), signals INT,TERM)
+```
+
+(The diff of `docs/authority.json` against the report before this change is exactly these 32 lines in `unbounded_by`, the same 32 in `foreign_symbols`, and the two new `ffi` labels, `libcrypto` and `libssl`, beside `libc`; the effects (`args`, `clock`, `conn_*`, `file_*`, `fs_*`, `heap`, `net_*`, `poll`, `err_write`) and the signals claim are unchanged.) `bounded` stays `false`, as it was. The 32 are the
+whole of what the service may call in OpenSSL: the context (`TLS_client_method`, `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl` for the minimum protocol, the partial-write mode and the cache mode,
+`SSL_CTX_set_verify`, `SSL_CTX_set_default_verify_paths`, `SSL_CTX_load_verify_file`); one connection (`SSL_new`, `SSL_free`, `SSL_set_bio`, `BIO_s_mem`, `BIO_new`, `SSL_set_connect_state`,
+`SSL_ctrl` for SNI, `SSL_get0_param`, `X509_VERIFY_PARAM_set1_host`, `X509_VERIFY_PARAM_set_hostflags`); its steps (`SSL_do_handshake`, `SSL_read`, `SSL_write`, `SSL_shutdown`, `BIO_read`,
+`BIO_write`, `SSL_get_error`, `ERR_clear_error`, `ERR_get_error`, `SSL_get_verify_result`); and the session (`SSL_session_reused`, `SSL_get1_session`, `SSL_set_session`,
+`SSL_SESSION_is_resumable`, `SSL_SESSION_free`).
+
+`scripts/check-authority.sh` regenerates the report from the sources and the pinned libraries and fails CI on any difference from `docs/authority.json`; a new foreign symbol is one added line, and
+committing the file is the approval. Each function takes only the part of the capability it uses (`Ffi("libssl")` for the context and the sessions, `Ffi("libcrypto")` for the BIOs, both for a handshake;
+`main` narrows once, `narrow(ffi, "libc,libcrypto,libssl")`, and lends down). The scope is a claim and the symbol is the fact (lex-sys `docs/foreign-authority.md` section 3): nothing checks that `SSL_new` is in
+`libssl`; `-lssl -lcrypto` is on the link line only. **OpenSSL is C code in the process**; what the report cannot say is what it does with its memory and with the bytes it is given. The functions
+declared are those a TLS client needs and no more (no function that opens a file other than the trust store, none that reads the environment: OpenSSL does that itself in
+`SSL_CTX_set_default_verify_paths`).
+
+Building: the project file has no linking options for a program, so `scripts/cc-ssl.sh` (a `cc` that adds `-lssl -lcrypto`) is the `CC` of `lex-sys build` (`scripts/build.sh`, `scripts/release.sh`, the
+Dockerfile). OpenSSL **3.0 or later** is needed (`SSL_CTX_load_verify_file` is its one-string form of the call that loads a file; the two-string form cannot be declared: lex-sys gap 4), at run time
+(`libssl3` on Debian and Ubuntu) and with its development files to build (`libssl-dev`).
+
+### 40.8 Tests
+
+Every test starts the service for real; the TLS receiver is Python's `ssl` behind a throwaway authority made with the `openssl` command, and the name server is the test's own (DNS over TCP), so what
+a name resolves to and how often it was asked is known.
+
+| file | what it shows | checks |
+|---|---|---|
+| `tests/https_test.py` | a good chain is delivered and its signature verifies with the reference library; SNI, `Host`, TLS 1.2 or 1.3; each certificate that is not good has its reason and **nothing is delivered** (expired, not yet valid, another name, another authority, a self-signed one, a purpose that does not fit), with and without `tls-ca-file`, and the controls that show the check and not the setup failed (a self-signed certificate that *is* the file is trusted; the same certificate for another name is delivered to when the endpoint has that name; the file replaces the system's store even where `SSL_CERT_FILE` trusts the authority); the handshake: a receiver that closes (FIN), resets (RST), speaks something that is not TLS, offers TLS 1.1 only (and a control that it does offer it, and that the service's own minimum is what refuses it: the OpenSSL configuration of the test allows TLS 1.0 at security level 0), never answers (at the deadline, `tls_timeout`); after it: silent, 500, 302 (not followed), 410 (dead, endpoint disabled); a status line in two records, a 60,000-byte event to a receiver reading 2 KiB at a time, **partial and refused I/O** (`tests/io_shim.c`: `send` at most 700 bytes, `recv` at most 300, every third call `EAGAIN`, on the receiver's and the name server's connections); the retry schedule (a certificate mended between attempts is delivered by the retry, one that never is makes three failures and a dead letter); the trust store (`SSL_CERT_FILE`; an unreadable `tls-ca-file`, or a file with no certificate, is status 21); **`kill -9` in the middle of a handshake and the event is delivered after the restart**; **64 handshakes the receiver never answers hold nothing** (the longest wait of a request to the service while they are pending: 0.6 to 1.3 ms, idle 0.9 to 3.2 ms) and all end at the deadline; a dead letter of a reason above 16 is named by `scripts/logcheck.py`, kept by a snapshot of the outcomes log (`--compact-now 1`) and listed with its reason after it (retention, 40.12) | 94 |
+| `tests/names_test.py` | 21 unsafe addresses behind names (loopback, 10/8, 172.16/12, 192.168/16, 169.254/16 with the metadata address, 100.64/10, 0/8, multicast, reserved, broadcast, documentation, benchmarking, protocol assignments) are each `ssrf_refused`, with a receiver on loopback **never connected to** (by a count of TCP connections, not of requests) and each name asked once; four mixed answers (a public and a private address in either order, and four addresses) are refused whole; `localhost`, `app.localhost`, `LocalHost` are refused and not asked of the name server; under `allow-private-hosts 1` the same kinds of name are delivered to, with the name and the port in `Host`, and an `https` endpoint behind a name that resolves to loopback is delivered to there and refused under the default (the receiver's connection count shows no handshake started); a public address is dialled; **rebinding**: a name that answers a public address and then 127.0.0.1 is refused from the second attempt on, the loopback receiver is never connected to and the name is asked once per attempt; a name that alternates between 127.0.0.1 and 127.0.0.2 is delivered to each receiver in turn, one lookup per delivery; NXDOMAIN, SERVFAIL, REFUSED, an answer with no A record, bytes that are not DNS, an answer to another question, and no name server listening are each `dns_failed`; a name server that takes 3 s: `dns_timeout` at the deadline; **64 lookups waiting on a 2 s name server hold nothing** (longest wait 1.1 to 2.2 ms) and 64 lookups of 300 ms are delivered in 0.34 s; the lookup under partial and refused I/O (the query out five bytes at a time, the answer in three) | 37 |
+| `tests/sessions_test.py` | resumption seen from the receiver (TLS 1.3 and 1.2: six deliveries, six handshakes, the first full and five resumed; `tls-resume 0`: none); two endpoints behind one receiver each have their own; a `PATCH` of the host, of the secret and of the port, and a `DELETE` then a new endpoint behind the same name and port, each make the next delivery a full handshake; a receiver that restarted (new ticket keys) refuses the session and the delivery is made with no failure; **no leaks**: against a control that does everything but TLS, 500 more events with three failing handshakes an event and 3,000 more deliveries over TLS cost no more memory (within 1.5 MiB; measured 0.6 and 0.1 MiB more) and leave the same descriptors | 32 |
+| `tests/https_api_test.py` | `POST` with a `url` (with and without a port, `http`, a final slash), with `host`, `port` and `scheme`; the table holds the stored form; `GET` says the scheme and no host; 21 requests that are not an endpoint are each a 400 and store nothing; `PATCH` of the scheme alone, the host alone (keeps the scheme), a `url`, an address under `https` in each order (400, the row as it was); the file (an `https://` line is read and delivered to, an address under `https`, another scheme, a bare scheme and an upper-case one stop the start with 13 naming line 1); `--import-endpoints` copies the scheme; **a backup and a restore** keep it and the restored service delivers over TLS again; the history of attempts (the API and the table) says `cert_untrusted`, `cert_expired`, `cert_hostname`, `ssrf_refused`, `dns_failed` and `dns_timeout` with the coarse status each always had | 57 |
+| unit | `tests/dns_test.ls` (6: a known answer, the errors by name, a name with no address, the query builder, dotted decimal, **a million damaged answers**), `resolve_test.ls` (2), `manage_test.ls` (3: the `url`, the stored host), `destination_test.ls` (11: 5 new: names, 63 and 253 bytes, the host in the form it is stored, `localhost`, the scheme), `reason_test.ls` (the ten reasons, their numbers and coarse statuses), `config_test.ls` (the three settings), `ops_test.ls` (every reason in a cell of its own: the test that found the overlap) | 6, 2, 3, 11, 6, 20, 13 |
+
+Existing tests whose assertions changed, each marked CHANGED or explained in the file: `tests/ssrf_test.py` (names moved from refused to accepted at the write, the hosts that are neither an address nor a name are refused even under `allow-private-hosts`),
+`tests/destination_test.ls` (a name in a file is accepted; `127.1` is refused open or not), `tests/patch_test.py` (a `PATCH` to a name is a 200, a number form is a 400), `tests/config_test.ls` (the blob has the trust store's path after the tokens), `tests/reason_test.py` and
+`tests/metrics_test.py` (26 series of failures, not 16), and the exact answers of `GET /endpoints/:id` and `PATCH` in `tests/manage_test.py`, `tests/patch_test.py` and `tests/delete_test.py` (they have a `scheme`). Nothing was weakened: each
+assertion was either made about the new rule or kept.
+
+### 40.9 Measured
+
+`scripts/bench/https_cost.py`: the CPU time the service itself uses (user + system, from `/proc`) per delivery, over 600 deliveries, the median of 5 runs with the least and the most; the service on core 3 of a shared 4-core VM
+(Intel Xeon 2.10 GHz, the same family as the spike's; other work was running on it), the receivers (Python) and the name server on cores 1 and 2. The ingest of the event, the logs and everything else is in every row.
+
+| | 1 endpoint (an event a delivery) | 10 endpoints |
+|---|---|---|
+| plain HTTP, an address | 267 us (183 to 300) | 100 us (67 to 117) |
+| plain HTTP, a name (one lookup a delivery) | 283 us (267 to 317) | 167 us (150 to 217) |
+| `https`, a full handshake every time (`tls-resume 0`) | 1,433 us (1,400 to 1,533) | 1,033 us (983 to 1,317) |
+| `https`, the session resumed | 833 us (767 to 983) | 683 us (650 to 817) |
+
+* **A name costs about 70 us** (the lookup: a TCP connection to the name server, a query, an answer, `dns.parse`; the spike measured 100 us) and a round trip to the name server, and no cache spares it.
+* **A full verified handshake costs about 0.9 ms of the service's CPU (0.87 ms at 10 endpoints, 1.15 ms at 1), a resumed one about 0.5 ms**, a third less per delivery. The spike measured 0.65 ms and 0.31 ms for the handshake alone in a client that did
+  nothing else, 64 in flight; here the same work shares a core with the loop, the logs and the ingest, and with a machine that others were using. One core therefore does about 970 `https` deliveries a second with full handshakes and
+  1,460 resumed, against 10,000 plain (at 10 endpoints).
+* **Plain HTTP did not get slower**: `scripts/bench/run.py` on the commit before and after (the CPU a delivery, 4 alternated runs each): 10 endpoints 62 to 83 us before (median 76), 66 to 77 after (73); 1 endpoint 72 to 92 before (79), 64 to 97 after (85). The difference is inside the noise of the runs.
+* **The loop is not held.** A request to the service while 64 handshakes are pending (the receiver never answers): the longest wait over 100 requests 0.6 to 1.3 ms, against 0.9 to 3.2 ms with nothing pending; while 64 lookups wait on a name server that takes 2 s: 1.1 to 2.2 ms (idle 0.7 to 5 ms). A lookup that blocks would hold the loop for the 2,000 ms.
+  64 lookups of 300 ms each are delivered in 0.34 s in all.
+* **Memory**: the slots' buffers grew from 4.5 MB to 6.1 MB (95,488 bytes a slot, of which 70,656 are the request); OpenSSL's own state is 26 to 48 KiB a connection while it lasts (the spike's measurement; the memory test above bounds it in use);
+  the process is about 5.7 MB larger with OpenSSL mapped and the system's trust store loaded (9.7 MB against 4.0 MB after 100 deliveries to one endpoint on the commit before; the slope per event is the same).
+* **The connection is not kept** (40.6): the receiver of the tests counts one connection per delivery before and after, and one handshake per delivery without sessions.
+
+### 40.10 Mutants
+
+47 mutants of the new code were killed and 2 were not: **49 in all, run on a copy of the tree, each built and run against the test files it names, the file restored and compared with `cmp` after each** (`scripts/mutate.py`, the list in `tests/mutants/https.py`; it has 49 entries). The first run killed 40 of 45; the four that survived were each a hole in a test, and were closed by tests, not excused (marked below). One does not compile (the checker's row check: a function that
+declares `ffi("libssl")` and no longer performs it is refused), which is the foreign-authority rows doing their job; its replacement is a mutant of `tls.drop` itself. One survives and is redundant by design.
+
+| area | mutants (killed by) |
+|---|---|
+| the address policy | judged addresses never refused (names); only the first address judged (names); an answer with no address taken as an address (names); the literal check at the attempt removed (names); `localhost` sent to the name server (names) |
+| the pin | the connection made to the name server's address, not the answer's (names); the "resolving" flag kept after the redial (names) |
+| failure codes | not-yet-valid not told from expired, the host-name codes, the unknown-issuer code, the "other verification failure" code, the handshake deadline's code, the lookup deadline's code, a refused connection to the name server read as a connection failure (https, names) |
+| TLS | verification off; host name not set; SNI not set; trust file ignored; system store added to the file's; **minimum protocol TLS 1.0 (survived the first run: the system's configuration refuses TLS 1.1 as well; killed by a test that runs the service under a configuration that allows it)**; **a write that would block reported as done (survived: loopback never blocks; killed by the partial-I/O test)**; **the peer's end of stream in the handshake taken as "wait" (survived: the test reset the connection and never ended it; killed by a receiver that closes with a FIN)**; a write that waits reported as a failure (killed by the partial-I/O test); a lookup that stops sending after a partial write, one that parses half an answer (killed by the same, on the name server's connection) |
+| sessions | never saved; the old session not freed on replacement (3,000 deliveries); `drop_session` a no-op; the drop on `PATCH`/`DELETE` not called (a secret change then resumes); `tls.drop` replaced (the SSL objects leak: 134 MiB more); **the key (name and port) not compared: survives** (a `PATCH` of the host or port drops the session as well, so the second check is never the only one; it is there for the day that is forgotten) |
+| names and hosts | the last label may be all digits; an address under `https` allowed; any address allowed when open; the guard against a scheme prefix in `host`; the stored host's length; the scheme lost on a `PATCH` of the host; the scheme of a `PATCH` ignored; `Host` always `receiver`; the scheme of the table always 0 (the unit tests and the API test) |
+| reasons, settings, bytes | the SSRF reason mapped to another; the deadline statuses; the counters' offset in `ops.ls` back to 24 (the overlap this work found); a damaged answer's length not checked (traps in the fuzz); a name server of `0.0.0.0` taken (twice); `tls-resume`'s default |
+
+### 40.11 Not verified, open, and what lex-sys lacked
+
+* **Not verified.** Nothing was connected to a public host: this environment reaches the internet only through a proxy, so a real public chain (an intermediate sent by the server, a root of the system's store, a wildcard, an SNI-routed host) was
+  not exercised; the system's store was exercised through `SSL_CERT_FILE`, and the default locations were opened under `strace` (below) but not matched against a real certificate. The container image was not built here (no Docker), and the unit was not run under
+  systemd: `strace` over an `https` workload (names, a good and an untrusted receiver, with and without `tls-ca-file`) shows 42 distinct system calls, **all inside the unit's `@system-service` less `@privileged` and `@resources`** (checked with
+  `systemd-analyze syscall-filter`), `AF_INET` only, no mapping that is writable and executable, OpenSSL reading `/usr/lib/ssl/openssl.cnf` and, without `tls-ca-file`, the directory of trusted certificates. The Debian/Ubuntu OpenSSL 3.0 of the test machine only; OpenSSL 3.2 or later (where
+  `SSL_CTX_load_verify_file` and the rest are as here) and LibreSSL, which has no `SSL_CTX_load_verify_file`, were not tried. The tests ran on the LLVM backend only.
+* **Open.** No keep-alive (40.6). No revocation. No client certificate. No IPv6, no `/etc/hosts`, one name server over TCP only, no cache of lookups (a name server that is slow slows every attempt to its names). A per-name allow-list for private
+  addresses (today `allow-private-hosts` is all or nothing). An `https` endpoint at an address with a certificate for that address. `GET /config` does not show the three new settings. A query id that is not unpredictable.
+  The last unverified claim of the spike that this repeats: handshake CPU depends on how busy the core is kept, so a figure is only good with the concurrency it was measured at.
+* **What lex-sys lacked or got wrong (reproducers in the report of this change):** (1) a project cannot say what a program links with (`[[bin]]` has no `links`): `scripts/cc-ssl.sh` is a `CC` that adds `-lssl -lcrypto`; the same gap as the spike's 11. (2) A
+  local binding named like a function of an imported module breaks the qualified call: with `let bare = ...` in scope, `destination.bare(x)` is "`bare` is a local binding, not a function". (3) `std.conns` has no way to put a connection in a slot that is free
+  on purpose: `redial` closes one and puts the next, and relies on the table giving back the slot it just freed ("newest freed first" is in the comment of the module and in no test of it); a `replace(table, slot, conn)` would say what is meant. (4) The
+  declared scope of a foreign function is not checked against what is linked (the follow-up 5 of lex-sys `foreign-authority.md`): `libssl` can be claimed with no `-lssl`, and this change's CI pin is of the claim and the symbol, not of the library. (5) Nothing
+  catches an array region that overlaps another by arithmetic: the 17 reasons' counters and the probe's round were one cell apart, and 27 reasons wrote over the round and the last-reason cells; only a test that counted caught it (a hazard of the hand-laid arrays of
+  `hooks.ls`, not of the compiler, but a layout check like `lex-sys layout` for `[int]` regions would have). (6) `c_ptr` still cannot be named in a signature, so a handle is an `int`, and a foreign function with a string that is not last still cannot be
+  declared (the spike's 1 and 4): `SSL_CTX_load_verify_file` and `X509_VERIFY_PARAM_set1_host` are the one-string forms for that reason.
+
+### 40.12 Put on top of the signals, the pool, the retention and the delivery controls
+
+This section was written and tested on the base of section 35. It was then moved onto sections 36 to 39 (the signals claim, the pool that reconnects, retention, dead letters and per-endpoint limits), and what that changed is recorded here.
+
+* **Nothing of the others was changed to make room**; what collided moved on this side. The settings `dns-server`, `tls-ca-file` and `tls-resume` are `cfg[31]` to `cfg[34]` (the pool's are 23 to 27, the delivery controls' 28 to 30,
+  retention's 40 to 46; the table is still 48 wide), and `tests/config_test.ls` sets all of them to values of their own and reads each back, so two settings on one index fail it. The counters of the handshakes are `g[44]` and `g[45]` of the metrics
+  (`g_size` is 46); the cells of `ops` (24 and 25, and the reasons at 110) did not move. The reasons 17 to 26 are on disk and are as they were.
+* **The signals claim and the TLS context.** `main` narrows `ffi` once, to `libc,libcrypto,libssl`, and `run` is lent only `libcrypto,libssl`; `statx` is lent `libc` alone. The context is freed by `attempt.close_tls` at the end of `run`: a first version of
+  this merge freed it in `main` as well, which is a double free that aborts the process at every stop (`free(): double free detected`), found at once by the one test that reads the whole of stderr after a stop (`tests/authz_test.py`, stage 4: it
+  wants `listening` and the two lines of the drain, and nothing else). The context is freed in `main` only when `run` was never entered (the listener could not be opened).
+* **The table is read after the service listens (section 37)**, so an `https` endpoint of the table is not delivered to before `hooks: endpoints loaded`, as no endpoint of the table is; the tests that start a service with a database wait for that line (`opslib.Service.start`).
+  A row of the table that is not a valid endpoint (an address under `https`, for one) is now the exit status 13 *after* `listening`, with the message naming the row; before, the service did not start at all. The test changed to say that (`tests/https_api_test.py`, stage 4).
+* **The limits of an endpoint (section 39.4) are those of an `https` endpoint too**: an attempt holds its slot, and so counts against the endpoint's concurrency, from the lookup through the handshake to the end of the response. A rate limit holds an attempt back before
+  its lookup. (This is how the code reads and the existing tests of the limits pass; there is no test of the limits over TLS.)
+* **Retention (section 38).** A reason is stored in a record of kind 14 and, packed with the attempts, in a dead letter (`attempts * 65536 + reason + 1`: a reason up to 65,534 fits). A snapshot of the outcomes log does not write kind 14 (it writes the state, not its history),
+  but it does write every dead letter the table holds, with its reason; so after a snapshot the reason of a *dead letter* of names or TLS is kept, and the reason of an event that is waiting for its next attempt is not (as for every reason). `scripts/logcheck.py` knows the names
+  of 17 to 26 (it printed `unknown` for them) and `tests/https_test.py` stage 9 checks both: the checker's histogram of reasons names `cert_untrusted` three times before the snapshot, accepts the directory after it with the dead letter as a record of kind 17, and the listing of
+  the dead letters after a restart still says `cert_untrusted`, three attempts.
+* **Authority.** The pinned report is the base's (`bounded: false`, `unbounded_by: ["libc:statx"]`, signals `INT,TERM`) plus exactly 32 pairs and two labels: the diff of `docs/authority.json` is the 8 `libcrypto:` and 24 `libssl:` symbols of 40.7, the same 32 in `foreign_symbols`, and the two `ffi` labels.

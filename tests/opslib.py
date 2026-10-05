@@ -1,6 +1,7 @@
 """Helpers shared by the operations tests (tests/metrics_test.py, ready_test.py, reason_test.py, stop_test.py, corrupt_test.py): a service
 whose stderr is kept, receivers that fail in a chosen way, an independent reader of the logs, and a strict parser of the Prometheus text
 format. Nothing here is imported by the service's own tests, and nothing in it is the thing under test."""
+import atexit
 import base64
 import http.client
 import json
@@ -109,6 +110,8 @@ class Service:
                                      stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         self.reader = threading.Thread(target=self._read, args=(self.proc,), daemon=True)
         self.reader.start()
+        # A test that raises (or is told to stop) must not leave a service running against the database: one that does fires the schedules of the next test into its own log.
+        atexit.register(lambda proc=self.proc: proc.poll() is None and proc.kill())
         wait_for(lambda: "listening" in self.lines or self.proc.poll() is not None, timeout)
         if loaded and "listening" in self.lines and any(a == "--pg-host" for a in self.args):
             # the socket is open; the endpoints are read from the table a moment later (docs/design.md section 37)
@@ -346,7 +349,9 @@ def put_event(ms, body):
 KINDS = {1: "delivered", 2: "failed", 3: "dead", 4: "disabled", 5: "enabled", 6: "replay", 7: "replay_failed", 8: "replay_delivered", 9: "replay_dead",
          10: "created", 11: "removed", 12: "streak", 13: "paused", 14: "reason"}
 REASONS = {1: "connect_refused", 2: "connect_timeout", 3: "connect_error", 4: "send_timeout", 5: "send_error", 6: "no_response", 7: "reset",
-           8: "closed_early", 9: "bad_response", 10: "status_3xx", 11: "status_4xx", 12: "status_5xx", 13: "gone", 14: "status_other", 15: "busy", 16: "too_large"}
+           8: "closed_early", 9: "bad_response", 10: "status_3xx", 11: "status_4xx", 12: "status_5xx", 13: "gone", 14: "status_other", 15: "busy", 16: "too_large",
+           17: "dns_failed", 18: "dns_timeout", 19: "ssrf_refused", 20: "tls_handshake", 21: "cert_untrusted", 22: "cert_expired", 23: "cert_hostname", 24: "cert_invalid",
+           25: "tls_timeout", 26: "tls_error"}
 
 
 def log_counts(d):

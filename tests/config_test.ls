@@ -296,12 +296,14 @@ fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
         test.assert_eq(config.set(cfg, blob, "admin-token", long[0..255]), 0);
         test.assert_eq(config.token_len(cfg), 255);
         test.assert_eq(config.set(cfg, blob, "admin-token", long[0..256]), config.why_value());
-        // the largest token ends inside its own place: the last byte of the blob is the token's
+        // the largest token ends inside its own place
         test.assert_eq(int_of(blob[config.token_at() + 254]), int_of(long[254]));
-        // the three tokens' places are side by side and the read token's is the last of the blob
+        // the three tokens' places are side by side, and the path of the trust store file follows them
         test.assert_eq(config.token_at() + 256, config.ingest_token_at());
         test.assert_eq(config.ingest_token_at() + 256, config.read_token_at());
-        test.assert_eq(len(blob), config.read_token_at() + 256);
+        test.assert_eq(config.read_token_at() + 256, config.ca_file_at());
+        // and the path of the trust store file is the last of the blob
+        test.assert_eq(len(blob), config.ca_file_at() + 256);
     }
     return 0;
 }
@@ -503,6 +505,54 @@ fn test_rotation_grace_default_and_limits() -> [] int {
     return 0;
 }
 
+// `dns-server`, `tls-ca-file` and `tls-resume` (`docs/design.md` section 40): the name server is an IPv4 address with an optional port (any address: it is the operator's own),
+// the trust store is a path, resumption is on unless turned off, and a refusal changes nothing.
+fn test_name_server_trust_store_and_resumption() -> [] int {
+    region a {
+        let cfg = alloc_slice[a](config.size(), 0);
+        let blob = alloc_slice[a](config.blob_size(), byte_of(0));
+        config.defaults(cfg);
+        test.assert_eq(config.dns_server(cfg), 0);
+        test.assert_eq(config.dns_port(cfg), 53);
+        test.assert_eq(config.ca_file_len(cfg), 0);
+        test.assert(config.tls_resume(cfg));
+        test.assert_eq(config.set(cfg, blob, "dns-server", "10.0.0.2"), 0);
+        test.assert_eq(config.dns_server(cfg), 167772162);
+        test.assert_eq(config.dns_port(cfg), 53);
+        test.assert_eq(config.set(cfg, blob, "dns-server", "127.0.0.1:5353"), 0);
+        test.assert_eq(config.dns_server(cfg), 2130706433);
+        test.assert_eq(config.dns_port(cfg), 5353);
+        test.assert_eq(config.set(cfg, blob, "dns-server", "127.0.0.1"), 0);
+        test.assert_eq(config.dns_port(cfg), 53);
+        test.assert_eq(config.set(cfg, blob, "dns-server", "127.0.0.1:5353"), 0);
+        // refused: a name, an IPv6 address, no address, a bad port; and the server that was set stays
+        test.assert(config.set(cfg, blob, "dns-server", "dns.example.com") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "::1") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "0.0.0.0") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "127.0.0.1:0") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "127.0.0.1:65536") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "127.0.0.1:") != 0);
+        test.assert(config.set(cfg, blob, "dns-server", "") != 0);
+        test.assert_eq(config.dns_server(cfg), 2130706433);
+        test.assert_eq(config.dns_port(cfg), 5353);
+        test.assert_eq(config.set(cfg, blob, "tls-ca-file", "/etc/hooks/ca.pem"), 0);
+        test.assert_eq(config.ca_file_len(cfg), 17);
+        test.assert_eq(int_of(blob[config.ca_file_at()]), '/');
+        test.assert(config.set(cfg, blob, "tls-ca-file", "") != 0);
+        test.assert_eq(config.ca_file_len(cfg), 17);
+        test.assert_eq(config.set(cfg, blob, "tls-resume", "0"), 0);
+        test.assert(!config.tls_resume(cfg));
+        test.assert_eq(config.set(cfg, blob, "tls-resume", "1"), 0);
+        test.assert(config.tls_resume(cfg));
+        test.assert(config.set(cfg, blob, "tls-resume", "yes") != 0);
+        test.assert(config.tls_resume(cfg));
+        test.assert_eq(config.parse_file("dns-server = 192.168.1.1:5300\ntls-resume = 0\n", cfg, blob), 0);
+        test.assert_eq(config.dns_port(cfg), 5300);
+        test.assert(!config.tls_resume(cfg));
+    }
+    return 0;
+}
+
 // The retention settings (`docs/retention.md` section 3): their defaults, each at the edges of what it takes, and that a refusal changes nothing.
 fn test_retention_settings_defaults_and_edges() -> [] int {
     region a {
@@ -658,7 +708,7 @@ fn test_retry_jitter_and_the_limits_default_and_limits() -> [] int {
     return 0;
 }
 
-// No two settings share an index of the table (cfg[23..27] are the database's, cfg[28..30] the pace's, cfg[40..46] retention's): every numeric setting is given a value
+// No two settings share an index of the table (cfg[23..27] are the database's, cfg[28..30] the pace's, cfg[31..34] the names' and TLS's, cfg[40..46] retention's): every numeric setting is given a value
 // of its own and each is read back, so one that landed on another's index would have overwritten it or been overwritten.
 fn test_no_two_settings_share_an_index() -> [] int {
     region a {
@@ -684,6 +734,9 @@ fn test_no_two_settings_share_an_index() -> [] int {
         test.assert_eq(config.set(cfg, blob, "rotation-grace-ms", "86400005"), 0);
         test.assert_eq(config.set(cfg, blob, "stop-deadline-ms", "5006"), 0);
         test.assert_eq(config.set(cfg, blob, "deadline-ms", "2007"), 0);
+        test.assert_eq(config.set(cfg, blob, "dns-server", "10.1.2.3:5354"), 0);
+        test.assert_eq(config.set(cfg, blob, "tls-ca-file", "/x/ca.pem"), 0);
+        test.assert_eq(config.set(cfg, blob, "tls-resume", "0"), 0);
         test.assert_eq(config.retry_jitter(cfg), 11);
         test.assert_eq(config.endpoint_concurrency(cfg), 3);
         test.assert_eq(config.endpoint_rate(cfg), 777);
@@ -703,6 +756,10 @@ fn test_no_two_settings_share_an_index() -> [] int {
         test.assert_eq(config.rotation_grace_ms(cfg), 86400005);
         test.assert_eq(config.stop_deadline_ms(cfg), 5006);
         test.assert_eq(config.deadline_ms(cfg), 2007);
+        test.assert_eq(config.dns_server(cfg), 167838211);
+        test.assert_eq(config.dns_port(cfg), 5354);
+        test.assert_eq(config.ca_file_len(cfg), 9);
+        test.assert(!config.tls_resume(cfg));
         // and the table is wide enough for the highest of them
         test.assert(config.size() > 46);
     }

@@ -2,21 +2,26 @@ edition 5;
 
 module destination;
 
-// `destination` -- where a delivery may go (`docs/design.md` section 26).
+import std.bytes;
+
+// `destination` -- where a delivery may go (`docs/design.md` sections 26 and 40).
 //
 // An endpoint is an address the service will `POST` to from inside the operator's network, so whoever can name an address can
 // make the service call something only it can reach: a database on `10.0.0.5`, a cloud metadata service on `169.254.169.254`, an
-// admin port on `127.0.0.1`. (Server-side request forgery.) The rule here is the narrowest one that is checkable:
+// admin port on `127.0.0.1`. (Server-side request forgery.) The rule is in two places, because a host is written once and used many times:
 //
-//   * the host must be an IPv4 **literal**, four decimal numbers of 0 to 255 with no leading zeros and nothing else. A name is
-//     refused because the service cannot know what it resolves to: the lookup is `getaddrinfo` inside the connect, so a check
-//     before it and the connection after it could disagree (a name can change in between, DNS rebinding), and it blocks the
-//     loop besides. The forms `inet_aton` accepts and a person does not expect (`127.1`, `2130706433`, `0x7f.0.0.1`,
-//     `0177.0.0.1`) are refused for the same reason: they are not a literal in the sense above, and what this module does not
-//     understand it does not allow;
-//   * and the address must be public: none of the ranges below.
+//   * **when the endpoint is written** (`host_ok`): the host is an IPv4 **literal**, four decimal numbers of 0 to 255 with no leading zeros
+//     and nothing else, and public (none of the ranges below); or it is a **name** (`name_ok`: labels of letters, digits, `-` and `_`, the
+//     last of them not all digits), which is all that can be judged then, because what a name resolves to is not known until it is asked
+//     and can change. The forms `inet_aton` accepts and a person does not expect (`127.1`, `2130706433`, `0x7f.0.0.1`, `0177.0.0.1`) are
+//     neither: they are refused, as is anything else this module does not understand. A host that starts with `https://` is a name for the
+//     TLS client (`is_https`, `bare`); an address is not accepted there, because the certificate is checked against the name;
+//   * **at every attempt** (`attempt.ls`): a name is resolved by the service itself (never by `getaddrinfo`, which blocks the loop and
+//     answers differently to the check and to the connection), every address in the answer must be public, and the connection goes to that address
+//     and no other (`is_public` is the test). A name that resolves to a private, loopback or link-local address is a failed attempt, `ssrf_refused`.
 //
-// `allow-private-hosts 1` turns the rule off, for a service whose receivers are on its own network (and the demos and the tests).
+// `allow-private-hosts 1` turns the range rule off, for a service whose receivers are on its own network (and the demos and the tests). It does not
+// make an unparseable host acceptable.
 
 // The four numbers of `text` packed as `a * 2^24 + b * 2^16 + c * 2^8 + d`, or -1 if `text` is not exactly a dotted quad of them.
 pub fn address[&t](text: &t [byte]) -> [] int {
@@ -100,4 +105,98 @@ pub fn is_public(a: int) -> [] bool {
 pub fn allowed[&t](host: &t [byte]) -> [] bool {
     let a = address(host);
     return a >= 0 && is_public(a);
+}
+
+// Does the host start with `https://`? (The stored form of an `https` endpoint: the scheme is part of the host, so that a program that does not know it
+// refuses the line instead of delivering over plain HTTP to port 443.)
+pub fn is_https[&t](host: &t [byte]) -> [] bool {
+    return bytes.starts_with(host, "https://");
+}
+
+// The host without its scheme.
+pub fn bare[&t](host: &t [byte]) -> [] &t [byte] {
+    if is_https(host) {
+        return host[8..len(host)];
+    }
+    return host;
+}
+
+fn is_alnum(c: int) -> [] bool {
+    return bytes.is_alpha(c) || bytes.is_digit(c);
+}
+
+// Is `text` a host name a resolver can be asked for: 1 to 253 bytes, labels of 1 to 63 letters, digits, `-` and `_` separated by single dots, a label that
+// neither starts nor ends with `-`, and a last label that is not all digits (so that `127.1`, `2130706433` and `1.2.3.4.5` are not names: a person reads
+// them as addresses). No trailing dot, no wildcard, no non-ASCII.
+pub fn name_ok[&t](text: &t [byte]) -> [] bool {
+    if len(text) < 1 || len(text) > 253 {
+        return false;
+    }
+    var label = 0;
+    var all_digits = true;
+    var i = 0;
+    while i <= len(text) {
+        var c = 0 - 1;
+        if i < len(text) {
+            c = int_of(text[i]);
+        }
+        if c == '.' || i == len(text) {
+            if label < 1 || label > 63 || int_of(text[i - 1]) == '-' {
+                return false;
+            }
+            if i == len(text) && all_digits {
+                return false;
+            }
+            label = 0;
+            all_digits = true;
+        } else if is_alnum(c) || c == '_' || c == '-' {
+            if c == '-' && label == 0 {
+                return false;
+            }
+            if !bytes.is_digit(c) {
+                all_digits = false;
+            }
+            label = label + 1;
+        } else {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Is `host` (as stored: an optional `https://`, then a literal or a name) one an endpoint may have? An address must be public unless `open`; a name is a name
+// (`name_ok`) whatever `open` says, and `https://` takes a name only.
+pub fn host_ok[&t](host: &t [byte], open: bool) -> [] bool {
+    let name = bare(host);
+    let a = address(name);
+    if a >= 0 {
+        return !is_https(host) && (open || is_public(a));
+    }
+    return name_ok(name);
+}
+
+// Does `name[from..]` spell `localhost`, in any case?
+fn spells_localhost[&t](name: &t [byte], from: int) -> [] bool {
+    let want = "localhost";
+    if len(name) - from != len(want) {
+        return false;
+    }
+    var i = 0;
+    while i < len(want) {
+        if bytes.to_lower(int_of(name[from + i])) != int_of(want[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Is `name` `localhost` or a name under it? Those are the loopback by RFC 6761 section 6.3 and are not asked of the name server (the address policy
+// still applies to the answer: it is loopback, refused unless `allow-private-hosts`).
+pub fn is_localhost[&t](name: &t [byte]) -> [] bool {
+    if spells_localhost(name, 0) {
+        return true;
+    }
+    return len(name) > 10 && int_of(name[len(name) - 10]) == '.' && spells_localhost(name, len(name) - 9);
 }

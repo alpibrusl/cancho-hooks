@@ -10,7 +10,7 @@ module reason;
 // send, -3 timed out, -4 no answer), so that column keeps its meaning for everyone who reads it.
 //
 // The numbers of the reasons are stored on disk: a reason is never renumbered or reused, and a new one goes at the end. The names are what
-// the API and `/metrics` print, and are fixed for the same reason. There are `count()` of them, which bounds the label of a metric.
+// the API and `/metrics` print, and are fixed for the same reason. (Reasons 17 to 26 are the ones of names and TLS: `attempt.ls` codes -14 to -23.) There are `count()` of them, which bounds the label of a metric.
 
 // 0: not a failure (a `2xx`).
 pub fn none() -> [] int {
@@ -87,9 +87,61 @@ pub fn too_large() -> [] int {
     return 16;
 }
 
+// The name of the host did not resolve: no name server is known or it cannot be reached, it answered an error (no such name, server failure, refused) or
+// garbage, or the name has no IPv4 address (`docs/design.md` section 40).
+pub fn dns_failed() -> [] int {
+    return 17;
+}
+
+// The deadline passed while the name was being resolved.
+pub fn dns_timeout() -> [] int {
+    return 18;
+}
+
+// The name (or the address) of the endpoint is one the service will not connect to: it resolves to a private, loopback, link-local or reserved address
+// (`docs/design.md` sections 26 and 40). No connection was made.
+pub fn ssrf_refused() -> [] int {
+    return 19;
+}
+
+// The TLS handshake failed for a reason that is not the certificate's: the peer closed, spoke badly, offered nothing the client accepts (TLS before 1.2), or sent an alert.
+pub fn tls_handshake() -> [] int {
+    return 20;
+}
+
+// The certificate chain does not lead to a root the service trusts (unknown issuer, self-signed, a chain that does not verify).
+pub fn cert_untrusted() -> [] int {
+    return 21;
+}
+
+// The certificate has expired, or is not yet valid.
+pub fn cert_expired() -> [] int {
+    return 22;
+}
+
+// The certificate does not name the host the endpoint has.
+pub fn cert_hostname() -> [] int {
+    return 23;
+}
+
+// Any other reason a certificate was refused (a bad signature, a CA that may not sign, a purpose that does not fit).
+pub fn cert_invalid() -> [] int {
+    return 24;
+}
+
+// The deadline passed during the TLS handshake.
+pub fn tls_timeout() -> [] int {
+    return 25;
+}
+
+// TLS could not be started, or failed after the handshake.
+pub fn tls_error() -> [] int {
+    return 26;
+}
+
 // How many reasons there are, counting 0.
 pub fn count() -> [] int {
-    return 17;
+    return 27;
 }
 
 // The reason an attempt's code means: 0 for a `2xx`.
@@ -140,6 +192,36 @@ pub fn of(code: int) -> [] int {
     if code == 0 - 13 {
         return too_large();
     }
+    if code == 0 - 14 {
+        return dns_failed();
+    }
+    if code == 0 - 15 {
+        return dns_timeout();
+    }
+    if code == 0 - 16 {
+        return ssrf_refused();
+    }
+    if code == 0 - 17 {
+        return tls_handshake();
+    }
+    if code == 0 - 18 {
+        return cert_untrusted();
+    }
+    if code == 0 - 19 {
+        return cert_expired();
+    }
+    if code == 0 - 20 {
+        return cert_hostname();
+    }
+    if code == 0 - 21 {
+        return cert_invalid();
+    }
+    if code == 0 - 22 {
+        return tls_timeout();
+    }
+    if code == 0 - 23 {
+        return tls_error();
+    }
     if code == 0 - 2 {
         return send_error();
     }
@@ -159,6 +241,16 @@ pub fn legacy_status(code: int) -> [] int {
     }
     if code == 0 - 5 || code == 0 - 12 {
         return 0 - 1;
+    }
+    // A name that did not resolve, a destination refused, a handshake that failed: the connection could not be made.
+    if code <= 0 - 14 && code != 0 - 15 && code != 0 - 22 && code != 0 - 23 {
+        return 0 - 1;
+    }
+    if code == 0 - 15 || code == 0 - 22 {
+        return 0 - 3;
+    }
+    if code == 0 - 23 {
+        return 0 - 2;
     }
     if code == 0 - 6 || code == 0 - 7 || code == 0 - 8 {
         return 0 - 3;
@@ -224,6 +316,36 @@ pub fn name(r: int) -> [] &static [byte] {
     }
     if r == 16 {
         return "too_large";
+    }
+    if r == 17 {
+        return "dns_failed";
+    }
+    if r == 18 {
+        return "dns_timeout";
+    }
+    if r == 19 {
+        return "ssrf_refused";
+    }
+    if r == 20 {
+        return "tls_handshake";
+    }
+    if r == 21 {
+        return "cert_untrusted";
+    }
+    if r == 22 {
+        return "cert_expired";
+    }
+    if r == 23 {
+        return "cert_hostname";
+    }
+    if r == 24 {
+        return "cert_invalid";
+    }
+    if r == 25 {
+        return "tls_timeout";
+    }
+    if r == 26 {
+        return "tls_error";
     }
     return "unknown";
 }

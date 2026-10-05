@@ -47,6 +47,17 @@ fn test_each_way_an_attempt_ends_without_a_status_has_its_reason() -> [] int {
     test.assert_eq(reason.of(0 - 11), reason.bad_response());
     test.assert_eq(reason.of(0 - 12), reason.busy());
     test.assert_eq(reason.of(0 - 13), reason.too_large());
+    // names and TLS (`docs/design.md` section 40)
+    test.assert_eq(reason.of(0 - 14), reason.dns_failed());
+    test.assert_eq(reason.of(0 - 15), reason.dns_timeout());
+    test.assert_eq(reason.of(0 - 16), reason.ssrf_refused());
+    test.assert_eq(reason.of(0 - 17), reason.tls_handshake());
+    test.assert_eq(reason.of(0 - 18), reason.cert_untrusted());
+    test.assert_eq(reason.of(0 - 19), reason.cert_expired());
+    test.assert_eq(reason.of(0 - 20), reason.cert_hostname());
+    test.assert_eq(reason.of(0 - 21), reason.cert_invalid());
+    test.assert_eq(reason.of(0 - 22), reason.tls_timeout());
+    test.assert_eq(reason.of(0 - 23), reason.tls_error());
     return 0;
 }
 
@@ -66,6 +77,18 @@ fn test_the_history_status_keeps_its_coarse_values() -> [] int {
     test.assert_eq(reason.legacy_status(0 - 6), 0 - 3);
     test.assert_eq(reason.legacy_status(0 - 7), 0 - 3);
     test.assert_eq(reason.legacy_status(0 - 8), 0 - 3);
+    // a name that did not resolve, a destination refused and a handshake or certificate that failed: the connection could not be made (-1); their deadlines are -3;
+    // TLS failing after it was started is -2
+    test.assert_eq(reason.legacy_status(0 - 14), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 15), 0 - 3);
+    test.assert_eq(reason.legacy_status(0 - 16), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 17), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 18), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 19), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 20), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 21), 0 - 1);
+    test.assert_eq(reason.legacy_status(0 - 22), 0 - 3);
+    test.assert_eq(reason.legacy_status(0 - 23), 0 - 2);
     // a reset, a close and a bad status line were all -4 (no answer)
     test.assert_eq(reason.legacy_status(0 - 9), 0 - 4);
     test.assert_eq(reason.legacy_status(0 - 10), 0 - 4);
@@ -94,7 +117,17 @@ fn test_the_numbers_are_stable() -> [] int {
     test.assert_eq(reason.status_other(), 14);
     test.assert_eq(reason.busy(), 15);
     test.assert_eq(reason.too_large(), 16);
-    test.assert_eq(reason.count(), 17);
+    test.assert_eq(reason.dns_failed(), 17);
+    test.assert_eq(reason.dns_timeout(), 18);
+    test.assert_eq(reason.ssrf_refused(), 19);
+    test.assert_eq(reason.tls_handshake(), 20);
+    test.assert_eq(reason.cert_untrusted(), 21);
+    test.assert_eq(reason.cert_expired(), 22);
+    test.assert_eq(reason.cert_hostname(), 23);
+    test.assert_eq(reason.cert_invalid(), 24);
+    test.assert_eq(reason.tls_timeout(), 25);
+    test.assert_eq(reason.tls_error(), 26);
+    test.assert_eq(reason.count(), 27);
     return 0;
 }
 

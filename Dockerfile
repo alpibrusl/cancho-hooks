@@ -24,7 +24,7 @@ FROM ${BASE} AS compiler
 ARG RUSTUP_VERSION=1.28.2
 ENV DEBIAN_FRONTEND=noninteractive RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
  && curl -fsSL -o /tmp/rustup-init.sha256 "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init.sha256" \
@@ -54,9 +54,11 @@ WORKDIR /src/hooks
 COPY src ./src
 COPY tests ./tests
 COPY sql ./sql
+COPY scripts/cc-ssl.sh ./scripts/cc-ssl.sh
 # The binary is normalized as scripts/release.sh does (no symbols, no build-id: the only bytes that differ between two builds of
 # the same sources), so the image holds the same bytes as bin/hooks in the release tarball when the toolchain is the same.
-RUN lex-sys build \
+# CC adds -lssl -lcrypto to the link (the project file has no linking options for a program): the service calls OpenSSL (src/tls.ls).
+RUN CC=/src/hooks/scripts/cc-ssl.sh lex-sys build \
  && test -x build/hooks \
  && ldd build/hooks > /ldd.txt \
  && strip --strip-all --remove-section=.note.gnu.build-id -o /hooks build/hooks \
@@ -67,8 +69,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # tini: the service is PID 1 in a container, and a PID 1 without a SIGTERM handler ignores SIGTERM (measured here with
 # `unshare --pid`: it survives), so `docker stop` would wait ten seconds and SIGKILL. With tini the signal reaches the service,
 # which then ends at once, as it does under systemd.
+# libssl3 and ca-certificates: the service is linked against OpenSSL and verifies the certificate of an https endpoint against the system's store (or against
+# the file `tls-ca-file` names). The same base as the build, so the same libssl.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini \
+ && apt-get install -y --no-install-recommends tini libssl3 ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --user-group --home-dir /var/lib/hooks --no-create-home --shell /usr/sbin/nologin hooks \
  && install -d -o hooks -g hooks -m 0700 /var/lib/hooks \

@@ -8,7 +8,9 @@
 -- 2 failed (it will be tried again), 3 dead (it will not). `status` is the receiver's HTTP status, or a negative reason
 -- (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). `reason` says why an attempt failed, finer than that: the numbers of
 -- `src/reason.ls` (0 none, 1 connect refused, 2 connect timeout, 3 other connect error, 4 send timeout, 5 send error, 6 no response before the
--- deadline, 7 reset, 8 closed early, 9 bad response, 10 to 12 status 3xx 4xx 5xx, 13 gone, 14 other status, 15 busy, 16 too large).
+-- deadline, 7 reset, 8 closed early, 9 bad response, 10 to 12 status 3xx 4xx 5xx, 13 gone, 14 other status, 15 busy, 16 too large, 17 name did not resolve,
+-- 18 name lookup timed out, 19 destination refused (the name resolves to a private address), 20 TLS handshake failed, 21 certificate untrusted, 22 certificate expired,
+-- 23 certificate does not name the host, 24 certificate invalid, 25 handshake timed out, 26 TLS error).
 -- `at_ms` is when it ended (Unix ms). The key is the attempt's own identity, so a repeat is harmless.
 create table if not exists attempts (
     endpoint bigint not null,
@@ -34,7 +36,8 @@ alter table attempts add column if not exists reason smallint not null default 0
 
 -- The endpoints the service delivers to, when it is given a database (docs/design.md section 24, C3c). `id` is the endpoint's
 -- identity (what the API and the history call it), so it is written, never counted, and never reused: at most six digits; `secret` is the Standard
--- Webhooks one (`whsec_` and base64), exactly as it is given to the receiver. It has to be kept in a form the service can sign
+-- Webhooks one (`whsec_` and base64), exactly as it is given to the receiver. `host` is an IPv4 address or a host name, with `https://` in front of it for an endpoint
+-- delivered to over TLS (docs/design.md section 40): the scheme is part of the stored host, so there is no column for it and nothing here changed for it. It has to be kept in a form the service can sign
 -- with, so anyone who can read this table can sign as the service: give the table the permissions of a secret.
 create table if not exists endpoints (
     id integer primary key check (id between 0 and 999999),

@@ -42,7 +42,7 @@ TimeoutStopSec=15
 # section 4.7), 30 to 35 the production profile refusing an unsafe setting or mode. (docs/runbook.md section 1 lists every status.)
 Restart=on-failure
 RestartSec=3
-RestartPreventExitStatus=2 10 12 13 14 15 16 17 18 19 30 31 32 33 34 35
+RestartPreventExitStatus=2 10 12 13 14 15 16 17 18 19 21 30 31 32 33 34 35
 
 # The data directory: /var/lib/hooks, created and owned by User, mode 0700 (`production = 1` refuses a directory or a log that the group or
 # others can read or write). The two logs and endpoints.conf live there, made under the umask below.

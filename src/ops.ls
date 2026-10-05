@@ -4,6 +4,7 @@ module ops;
 
 import std.io;
 import std.signals as sg;
+import reason;
 
 // `ops` -- what an operator needs to watch the service and to stop it (`docs/design.md` section 34).
 //
@@ -97,9 +98,15 @@ fn o_probe_round() -> [] int {
     return 41;
 }
 
-// A failed attempt for each reason (`reason.ls`): `reason.count()` integers.
-fn o_reasons() -> [] int {
+// Two integers (24 and 25, free since the reasons moved): TLS handshakes made, and how many of them resumed a session (`attempt.handshakes`, `attempt.resumed`).
+fn o_tls() -> [] int {
     return 24;
+}
+
+// A failed attempt for each reason (`reason.ls`): `reason.count()` integers, after everything else, so that a new reason grows the end of the array and moves nothing
+// (the first 17 were at 24, and there was no room for more: 41 is the probe round and 48 the last reasons). 24 to 40 are free.
+fn o_reasons() -> [] int {
+    return 110;
 }
 
 // The reason of the last failed attempt of the endpoint in each slot, 0 if its last attempt delivered or none has failed: 62 integers.
@@ -112,7 +119,7 @@ fn slots() -> [] int {
 }
 
 pub fn size() -> [] int {
-    return 112;
+    return 110 + reason.count();
 }
 
 pub fn init[&o](o: &!o [int]) -> [] int {
@@ -249,13 +256,28 @@ pub fn commits[&o](o: &o [int], which: int) -> [] int {
 
 // An attempt for endpoint slot `e` ended with reason `r` (0 for a delivery).
 pub fn attempt_ended[&o](o: &!o [int], e: int, r: int) -> [] int {
-    if r > 0 && r < 17 {
+    if r > 0 && r < reason.count() {
         o[o_reasons() + r] = o[o_reasons() + r] + 1;
     }
     if e >= 0 && e < slots() {
         o[o_last() + e] = r;
     }
     return 0;
+}
+
+// The TLS handshakes made since this start, and the ones that resumed a session (the loop copies the attempts' counts here after each turn).
+pub fn set_tls[&o](o: &!o [int], handshakes: int, resumed: int) -> [] int {
+    o[o_tls()] = handshakes;
+    o[o_tls() + 1] = resumed;
+    return 0;
+}
+
+pub fn tls_handshakes[&o](o: &o [int]) -> [] int {
+    return o[o_tls()];
+}
+
+pub fn tls_resumed[&o](o: &o [int]) -> [] int {
+    return o[o_tls() + 1];
 }
 
 // What recovery learned: the last reason recorded for the endpoint in slot `e`.
