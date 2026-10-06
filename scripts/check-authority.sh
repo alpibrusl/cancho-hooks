@@ -30,7 +30,8 @@ for arg in "$@"; do
     --update) mode=update ;;
     --pure) variant=pure ;;
     --mcp) variant=mcp ;;
-    *) echo "usage: $0 [--update] [--pure | --mcp]" >&2; exit 2 ;;
+    --logcheck) variant=logcheck ;;
+    *) echo "usage: $0 [--update] [--pure | --mcp | --logcheck]" >&2; exit 2 ;;
   esac
 done
 
@@ -44,6 +45,10 @@ elif [ "$variant" = mcp ]; then
   project=$here
   bin=hooks-mcp
   pinned=$here/docs/authority-mcp.json
+elif [ "$variant" = logcheck ]; then
+  project=$here
+  bin=hooks-logcheck
+  pinned=$here/docs/authority-logcheck.json
 else
   project=$here
   bin=hooks
@@ -99,7 +104,7 @@ if [ "$mode" = update ]; then
 fi
 
 if [ ! -f "$pinned" ]; then
-  echo "check-authority: ${pinned#"$here"/} does not exist; run scripts/check-authority.sh --update${variant:+ }$([ "$variant" = pure ] && echo --pure)$([ "$variant" = mcp ] && echo --mcp) and commit it" >&2
+  echo "check-authority: ${pinned#"$here"/} does not exist; run scripts/check-authority.sh --update${variant:+ }$([ "$variant" = pure ] && echo --pure)$([ "$variant" = mcp ] && echo --mcp)$([ "$variant" = logcheck ] && echo --logcheck) and commit it" >&2
   exit 1
 fi
 if diff -u "$pinned" "$work/report.json" > "$work/diff"; then
@@ -109,6 +114,6 @@ fi
 cat "$work/diff"
 echo >&2
 echo "check-authority: the authority report changed. If the new foreign call or capability is intended, read the diff above, run" >&2
-echo "  scripts/check-authority.sh --update$([ "$variant" = pure ] && echo " --pure")$([ "$variant" = mcp ] && echo " --mcp")" >&2
+echo "  scripts/check-authority.sh --update$([ "$variant" = pure ] && echo " --pure")$([ "$variant" = mcp ] && echo " --mcp")$([ "$variant" = logcheck ] && echo " --logcheck")" >&2
 echo "and commit ${pinned#"$here"/}: that commit is the approval." >&2
 exit 1

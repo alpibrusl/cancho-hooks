@@ -74,6 +74,11 @@ jobs:
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh
 
       # `hooks-mcp` (docs/agents.md) holds no foreign function and no `Ffi`: its report is pinned in docs/authority-mcp.json (the same way, `--mcp`).
+      # `hooks-logcheck` (tools/logcheck.ls) reads the logs and, for `trim`, cuts a torn tail: its report is pinned in docs/authority-logcheck.json too.
+      - name: The authority report of hooks-logcheck is the committed one (no foreign function; it reads the data directory, and only trim writes it)
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh --logcheck
+
       - name: The authority report of hooks-mcp is the committed one (no foreign function; the console, the network, the clock, the token file)
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh --mcp

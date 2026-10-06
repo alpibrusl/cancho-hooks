@@ -1,0 +1,57 @@
+{
+  "bounded": true,
+  "unbounded_by": [],
+  "effects": [
+    "args",
+    "err_write",
+    "file_read",
+    "file_write",
+    "fs_read",
+    "fs_write",
+    "heap",
+    "io_write"
+  ],
+  "labels": [
+    {
+      "name": "args",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "err_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "file_read",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "file_write",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "fs_read",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "fs_write",
+      "argument": "",
+      "bounded": true
+    },
+    {
+      "name": "heap",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "io_write",
+      "argument": null,
+      "bounded": true
+    }
+  ],
+  "foreign_symbols": []
+}
