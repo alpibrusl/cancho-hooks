@@ -70,19 +70,22 @@ trap 'rm -rf "$stage"' EXIT
 root="$stage/$name"
 mkdir -p "$root/bin" "$root/deploy" "$root/scripts" "$root/sql" "$root/docs"
 cp "$here/build/hooks" "$root/bin/hooks"
+# The native log checker (tools/logcheck.ls) is shipped when it was built: backup.sh and restore.sh find it beside bin/ and fall back to scripts/logcheck.py.
+if [ -x "$here/build/hooks-logcheck" ]; then cp "$here/build/hooks-logcheck" "$root/bin/hooks-logcheck"; fi
 # What the compiler leaves in the binary that differs between two builds of the same sources is a temporary file's name with a process id
 # (a FILE symbol, `lex-sys-llvm-<pid>-0.ll`) and, in turn, the build-id note that hashes it. Without them the binary is bit-for-bit the same
 # from build to build (measured: docs/runbook.md "Releases"), so that is what is shipped. --keep-symbols ships what the compiler wrote.
 if [ "$strip_it" = 1 ]; then
   command -v strip >/dev/null || die 2 "strip is needed (binutils), or --keep-symbols"
   strip --strip-all --remove-section=.note.gnu.build-id "$root/bin/hooks"
+  if [ -f "$root/bin/hooks-logcheck" ]; then strip --strip-all --remove-section=.note.gnu.build-id "$root/bin/hooks-logcheck"; fi
 fi
 cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy/hooks.docker.conf "$here"/deploy/hooks-healthcheck.sh "$here"/deploy/hooks-entrypoint.sh "$root/deploy/"
 cp "$here"/scripts/backup.sh "$here"/scripts/restore.sh "$here"/scripts/logcheck.py "$here"/scripts/release.sh "$root/scripts/"
 cp "$here"/sql/schema.sql "$here"/sql/queries.sql "$root/sql/"
 cp "$here"/docs/runbook.md "$here"/docs/design.md "$here"/docs/production.md "$root/docs/"
 cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/lex-sys.toml "$root/"
-chmod 0755 "$root/bin/hooks" "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
+chmod 0755 "$root"/bin/* "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
 
 # The SBOM stub: read from the tools, and honest about what it does not list.
 python3 - "$here" "$root" "$name" "$version" "$commit" "$dirty" "${LEX_SYS:-}" "$strip_it" <<'PY' > "$out/$name.sbom.json"

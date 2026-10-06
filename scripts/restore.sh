@@ -26,9 +26,20 @@ set -euo pipefail
 umask 077
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-logcheck="$here/logcheck.py"
 
 die() { local code=$1; shift; echo "restore: $*" >&2; exit "$code"; }
+# The log checker: `hooks-logcheck` (lex-sys, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
+# reference and takes four and a half minutes of CPU for 400 MB of logs). `LOGCHECK=python` forces the Python one.
+logcheck=()
+if [ "${LOGCHECK:-}" != python ]; then
+  for c in "$here/hooks-logcheck" "$here/../build/hooks-logcheck" "$here/../bin/hooks-logcheck" "$(command -v hooks-logcheck || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then logcheck=("$c"); break; fi
+  done
+fi
+if [ "${#logcheck[@]}" = 0 ]; then
+  command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py), or build hooks-logcheck"
+  logcheck=(python3 "$here/logcheck.py")
+fi
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 backup="" dir="" force=0
@@ -49,7 +60,6 @@ done
 if [ -z "$backup" ] || [ -z "$dir" ]; then usage; fi
 [ -d "$backup" ] || die 2 "$backup is not a directory"
 backup=$(cd "$backup" && pwd)
-command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py)"
 command -v sha256sum >/dev/null || die 2 "sha256sum is needed"
 if [ -n "$pg_db" ]; then command -v pg_restore >/dev/null || die 2 "pg_restore is needed for --pg-database"; fi
 
@@ -69,7 +79,7 @@ for f in $events_files delivery.seg; do
   case $f in *[!A-Za-z0-9._-]*|"") die 4 "a file name in the MANIFEST is not one this script makes: $f" ;; esac
   grep -q " $f\$" "$backup/SHA256SUMS" || die 4 "$f is not listed in SHA256SUMS"
 done
-kv=$(python3 "$logcheck" check "$backup" --kv) || die 4 "the logs of the backup are not a consistent pair (see above); nothing was restored"
+kv=$("${logcheck[@]}" check "$backup" --kv) || die 4 "the logs of the backup are not a consistent pair (see above); nothing was restored"
 if echo "$kv" | grep -E '^(events|delivery)_torn_bytes=' | grep -qv '=0$'; then
   die 4 "a log in the backup ends in a partial record: backup.sh trims those, so this backup was altered"
 fi
@@ -112,7 +122,7 @@ for f in delivery.seg $events_files events.first endpoints.conf; do
 done
 # An empty delivery.seg is what a service that never delivered has; the service creates the file itself.
 sync "$dir" 2>/dev/null || sync
-python3 "$logcheck" check "$dir" >/dev/null || die 4 "the restored files do not verify: $dir is not trustworthy (the old files, if any, are in ${aside:-nowhere: it was empty})"
+"${logcheck[@]}" check "$dir" >/dev/null || die 4 "the restored files do not verify: $dir is not trustworthy (the old files, if any, are in ${aside:-nowhere: it was empty})"
 
 # 4. The tables.
 if [ -f "$backup/hooks.pgdump" ]; then
