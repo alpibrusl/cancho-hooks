@@ -64,12 +64,13 @@ def attempt(text):
     text = exact(text, 'pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab:',
                  "pub fn advance[&f, &t, &p, &a, &r, &s](engine: &!f tls.Engine, now_ms: int, tab:", 1, "attempt.ls: advance")
     text = exact(text, "tlsx.open(ffi, at[env_at() + e_ctx()], at, tb, ", "tlsx.open(engine, slot, now_ms, at, tb, ", 1, "attempt.ls: open")
-    text = exact(text, ", session) != 0 {", ") != 0 {", 1, "attempt.ls: open's session argument")
     text = exact(text, "tlsx.drop(ffi, at, slot * stride() + f_tls());", "tlsx.drop(engine, slot, at, slot * stride() + f_tls());", 1, "attempt.ls: drop")
+    # A session is the engine's ticket: saved from the attempt's slot.
+    text = exact(text, "tlsx.save_session(ffi, at, b + f_tls());", "tlsx.save_session(engine, slot, at, b + f_tls());", 1, "attempt.ls: save_session")
     # The OpenSSL context is not there; the engine is closed by `main`.
     text = exact(text, "    tlsx.free_context(ffi, at[env_at() + e_ctx()]);\n", "    // (no context to free: `main` closes the engine)\n", 1, "attempt.ls: free_context")
     text = rows_and_types(text, "attempt.ls", sole=4, tail=0, lead=2, typed_both=0, typed_ssl=4)
-    text = regex(text, r"\bffi\b", "engine", 9, "attempt.ls: the remaining `ffi` arguments")
+    text = regex(text, r"\bffi\b", "engine", 8, "attempt.ls: the remaining `ffi` arguments")
     return text
 
 
@@ -88,7 +89,8 @@ def hooks(text):
     text = exact(text, 'ffi: &f Ffi("libssl")', "engine: &!f tls.Engine", 2, "hooks.ls: libssl parameters")
     # `main`: the scope, the engine, the trust store.
     text = exact(text, 'narrow(ffi, "libc,libcrypto,libssl")', 'narrow(ffi, "libc")', 1, "hooks.ls: the scope")
-    text = exact(text, "borrow mut heap as &!h in {\n", "borrow mut heap as &!h in { var engine = tls.open(h, attempt.slots());\n", 1, "hooks.ls: the engine is opened")
+    # A ticket per endpoint at most, as the OpenSSL build keeps a session per endpoint.
+    text = exact(text, "borrow mut heap as &!h in {\n", "borrow mut heap as &!h in { var engine = tls.open_with_tickets(h, attempt.slots(), state.max_endpoints());\n", 1, "hooks.ls: the engine is opened")
     text = close_engine(text)
     text = regex(text, r"borrow libc as &lt in \{\n(\s*)tls_ctx = start_tls\(lt, (.*)\n(\s*)\}",
                  r"borrow mut engine as &!en in {\n\1tls_ctx = tlsx.setup(en, h, evlog.lend(lw), \2\n\3}", 1, "hooks.ls: the trust store")
@@ -109,7 +111,7 @@ def start_tls(text):
 def close_engine(text):
     """`tls.close(h, engine)` goes on the line of the brace that ends the block `engine` is opened in."""
     lines = text.split("\n")
-    opens = [i for i, l in enumerate(lines) if l.rstrip().endswith("borrow mut heap as &!h in { var engine = tls.open(h, attempt.slots());")]
+    opens = [i for i, l in enumerate(lines) if l.rstrip().endswith("borrow mut heap as &!h in { var engine = tls.open_with_tickets(h, attempt.slots(), state.max_endpoints());")]
     if len(opens) != 1:
         raise Mismatch("hooks.ls: the engine's block")
     i = opens[0]

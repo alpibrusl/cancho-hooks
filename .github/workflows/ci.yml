@@ -367,3 +367,7 @@ jobs:
       - name: The https tests on both services, the outcomes compared
         working-directory: hooks
         run: python3 scripts/https_both.py
+
+      - name: What only the pure service does (a trust store too large, no environment, close_notify, resumption, the ClientHello's psk_key_exchange_modes)
+        working-directory: hooks
+        run: python3 tests/pure_test.py pure/build/hooks-pure

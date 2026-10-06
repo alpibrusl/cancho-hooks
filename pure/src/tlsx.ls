@@ -17,7 +17,7 @@ import tls_record;
 // meaning:
 //
 //     [live, ciphertext received and not yet taken: from, to (in the connection's `net` bytes), ciphertext sent of the pending chunk, ciphertext in the pending chunk,
-//      what the socket is watched for, stage, detail, 1 if the session was resumed (never: there is no resumption)]
+//      what the socket is watched for, stage, detail, 1 if the session was resumed]
 
 // Answers of a step.
 pub fn done() -> [] int {
@@ -83,7 +83,7 @@ pub fn live[&a](tt: &a [int], b: int) -> [] bool {
     return tt[b] != 0;
 }
 
-// There is no resumption (`docs/pure-tls.md`): a connection never resumes.
+// Did this connection resume a session (lex-sys `docs/tls-resumption.md`)? Known once the handshake is done.
 pub fn resumed[&a](tt: &a [int], b: int) -> [] bool {
     return tt[b + 8] == 1;
 }
@@ -146,13 +146,15 @@ fn detail_for(code: int) -> [] int {
 // ---------------------------------------------------------------------
 
 // Start TLS on a connection (the caller owns the socket) in the engine's slot `slot`: the server name for SNI and for the certificate check, and `now_ms` (Unix
-// milliseconds) for the certificates' dates. `host` is a DNS name without a NUL. Answers 0, or `failed()` with the stage set to `stage_setup()` (nothing is left
-// allocated).
-pub fn open[&e, &a, &h](engine: &!e tls.Engine, slot: int, now_ms: int, tt: &!a [int], b: int, host: &h [byte]) -> [] int {
+// milliseconds) for the certificates' dates. `host` is a DNS name without a NUL. `session` is 0 or a ticket saved from an earlier connection (`save_session`):
+// it is offered only if lex-sys's rules allow it for this name now (`docs/tls-resumption.md` §3 there: the same name, the same trust store, the leaf not
+// expired, and at most an hour since the full handshake that verified the server), and used once; a server that does not take it makes a full handshake,
+// verified. Answers 0, or `failed()` with the stage set to `stage_setup()` (nothing is left allocated).
+pub fn open[&e, &a, &h](engine: &!e tls.Engine, slot: int, now_ms: int, tt: &!a [int], b: int, host: &h [byte], session: int) -> [] int {
     if tt[b] != 0 || len(host) == 0 {
         return fail(tt, b, stage_setup(), 1);
     }
-    let code = tls.start(engine, slot, host, now_ms);
+    let code = tls.start_with(engine, slot, host, now_ms, session);
     if code != 0 {
         return fail(tt, b, stage_setup(), detail_for(code));
     }
@@ -282,6 +284,9 @@ pub fn handshake[&e, &t, &p, &a, &o, &s](engine: &!e tls.Engine, tab: &!t conns.
         }
         let ev = tls.event(engine, slot);
         if ev == tls.event_established() {
+            if tls.resumed(engine, slot) {
+                tt[b + 8] = 1;
+            }
             return done();
         }
         if ev == tls.event_failed() {
@@ -405,14 +410,19 @@ pub fn shutdown[&e, &t, &a, &o](engine: &!e tls.Engine, tab: &!t conns.Table, tt
 }
 
 // ---------------------------------------------------------------------
-// Sessions: there are none (`docs/pure-tls.md`)
+// Sessions: tickets the engine keeps (lex-sys `docs/tls-resumption.md`)
 // ---------------------------------------------------------------------
 
-pub fn save_session[&e, &a](engine: &!e tls.Engine, tt: &a [int], b: int) -> [] int {
-    return 0;
+// The ticket of the connection in `slot`, to give `open` for a later connection to the same server: a handle, or 0 if the server sent none. The engine keeps
+// the ticket and its secret; the caller holds only the handle, and gives it back with `free_session`.
+pub fn save_session[&e, &a](engine: &!e tls.Engine, slot: int, tt: &a [int], b: int) -> [] int {
+    return tls.save(engine, slot);
 }
 
 pub fn free_session[&e](engine: &!e tls.Engine, session: int) -> [] int {
+    if session != 0 {
+        tls.forget(engine, session);
+    }
     return 0;
 }
 
@@ -451,6 +461,8 @@ pub fn setup[&e, &h, &f, &c](engine: &!e tls.Engine, heap: &!h Heap, fs: &f Fs("
         let got = fs_read(fs, "/dev/urandom", entropy);
         if got == 32 {
             if tls.seed(engine, entropy) == 0 {
+                // Every ClientHello says the service can resume, without which Go's and rustls's servers send no ticket (RFC 8446 §4.2.9).
+                tls.set_resumption(engine, true);
                 seeded = true;
             }
         }
