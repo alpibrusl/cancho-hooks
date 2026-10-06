@@ -151,6 +151,30 @@ class Watcher(threading.Thread):
         self.last_trim = 0.0
         self.last = {"t": time.time(), "cpu": time.process_time(), "recv_cpu": None, "probe_cpu": None}
         self.rows = []
+        self.last_threads = ({}, time.time())
+
+    def thread_cpu(self):
+        """The three threads of the harness that used the most CPU since the last sample, as `{name: percent of a core}`: a thread that spins holds the interpreter lock
+        and starves the rest (the second 24 h run could not say which one it was). Linux only; empty elsewhere."""
+        out = {}
+        try:
+            names = {t.native_id: t.name for t in threading.enumerate()}
+            now = time.time()
+            ticks = {}
+            for tid in os.listdir("/proc/self/task"):
+                with open(f"/proc/self/task/{tid}/stat") as f:
+                    fields = f.read().rsplit(")", 1)[1].split()
+                ticks[int(tid)] = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+            last, last_t = self.last_threads
+            dt = max(1e-3, now - last_t)
+            deltas = {tid: (c - last.get(tid, c)) / dt * 100 for tid, c in ticks.items()}
+            for tid, pct in sorted(deltas.items(), key=lambda kv: -kv[1])[:3]:
+                if pct >= 1.0:
+                    out[names.get(tid, f"tid{tid}")] = round(pct, 1)
+            self.last_threads = (ticks, now)
+        except (OSError, IndexError, ValueError):
+            pass
+        return out
 
     def probe_windows(self):
         out = []
@@ -203,7 +227,7 @@ class Watcher(threading.Thread):
                 r.psql_rows("delete from attempts where at_ms < (extract(epoch from now()) * 1000)::bigint - 1800000")
             except Exception:  # noqa: BLE001
                 pass
-        detail = {"t": row["t"], "lag": {}, "dead": {}}
+        detail = {"t": row["t"], "lag": {}, "dead": {}, "threads": self.thread_cpu()}
         s, st = r.read("/stats", timeout=3)
         if s == 200 and isinstance(st, dict):
             for col, key in (("events_first", "events_first_id"), ("events_last", "events_last_id"), ("segments", "events_segments"), ("sealed", "segments_sealed"),
