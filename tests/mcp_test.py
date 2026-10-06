@@ -93,10 +93,13 @@ class Mcp:
         CLIENTS.append(self)
 
     def _out(self):
-        for line in iter(self.p.stdout.readline, b""):
-            self.raw.append(line)
-            self.q.put(line)
-            self._protocol(line)
+        try:
+            for line in iter(self.p.stdout.readline, b""):
+                self.raw.append(line)
+                self.q.put(line)
+                self._protocol(line)
+        except (ValueError, OSError):
+            pass            # the test closed the pipe itself (standard output closed by the client)
         self.q.put(None)
 
     def _err(self):
@@ -666,6 +669,10 @@ def stage3():
         seen("hooks_list_endpoints", {"offset": 0}, "GET", "/endpoints?offset=0")
         seen("hooks_list_endpoints", {"limit": 256}, "GET", "/endpoints?limit=256")
         seen("hooks_list_dead_letters", {"endpoint_id": 7}, "GET", "/endpoints/7/dead")
+        seen("hooks_list_dead_letters", {"endpoint_id": 0}, "GET", "/endpoints/0/dead")
+        seen("hooks_replay_event", {"event_id": 3, "endpoint_id": 0}, "POST", "/events/3/replay/0", None, post=True)
+        seen("hooks_cancel_replay", {"event_id": 3, "endpoint_id": 0}, "DELETE", "/events/3/replay/0")
+        seen("hooks_replay_dead_letters", {"endpoint_id": 0, "after": 0}, "POST", "/endpoints/0/replay-dead", {"after": 0})
         seen("hooks_list_dead_letters", {"endpoint_id": 7, "limit": 10, "order": "asc", "after": 0}, "GET", "/endpoints/7/dead?limit=10&order=asc&after=0")
         seen("hooks_list_dead_letters", {"endpoint_id": 7, "order": "desc"}, "GET", "/endpoints/7/dead?order=desc")
         seen("hooks_list_dead_letters", {"endpoint_id": 7, "after": 12}, "GET", "/endpoints/7/dead?after=12")
@@ -703,7 +710,7 @@ def stage3():
     for v in (-1, 1.5, "1", None, big, "0; DROP"):
         cases.append(("hooks_list_endpoints", {"offset": v}))
     cases.append(("hooks_list_endpoints", {"limit": 1, "ofset": 1}))
-    for v in (None, 0, -2, "7", 7.5, big, "7/dead"):
+    for v in (None, -1, -2, "7", 7.5, big, "7/dead", True, [0]):
         cases.append(("hooks_list_dead_letters", {"endpoint_id": v}))
     cases.append(("hooks_list_dead_letters", {}))
     for k, vs in (("limit", (0, 1001, "5", -1, None)), ("order", ("ASC", "up", "", 1, None, "asc ", "asc&limit=1000")), ("after", (-1, "1", 1.5, None, big))):
@@ -713,12 +720,12 @@ def stage3():
         cases.append(("hooks_replay_dead_letters", {"endpoint_id": 1, k: v}))
     cases.append(("hooks_replay_dead_letters", {"limit": 1}))
     cases.append(("hooks_replay_dead_letters", {"endpoint_id": 1, "sneaky": 1}))
-    for v in (0, None, "1", 1.5, big):
+    for v in (-1, None, "1", 1.5, big):
         cases.append(("hooks_replay_event", {"event_id": 1, "endpoint_id": v}))
     cases.append(("hooks_replay_event", {"endpoint_id": 1}))
     cases.append(("hooks_cancel_replay", {"event_id": 1}))
     cases.append(("hooks_cancel_replay", {"endpoint_id": 1}))
-    cases.append(("hooks_cancel_replay", {"event_id": 1, "endpoint_id": 0}))
+    cases.append(("hooks_cancel_replay", {"event_id": 1, "endpoint_id": -1}))
     deep = 1
     for _ in range(17):
         deep = [deep]
@@ -1167,6 +1174,7 @@ def stage7():
     sys.path.insert(0, HERE)
     import endpoint_kit as K
     K.reset_db()
+    K.psql("alter sequence endpoint_ids restart with 0")      # a new database: the first endpoint is 0
     d = K.tmp()
     mode = {"code": 500}
     svc = K.start(d, schedule="40")
@@ -1199,6 +1207,7 @@ def stage7():
         return st, text
     st, text = same2("hooks_list_endpoints", {}, "GET", "/endpoints")
     eps = json.loads(text)
+    check("7. (the first endpoint is 0, the second 1: the id 0 is a valid endpoint_id)", (a, b) == (0, 1), str((a, b)))
     check("7. the list of endpoints has both, with no host and no secret anywhere in it", [e["id"] for e in eps] == [a, b] and '"secret"' not in text and "whsec_" not in text and "127.0.0.1" not in text and '"host"' not in text, text[:200])
     same2("hooks_list_endpoints", {"limit": 1}, "GET", "/endpoints?limit=1")
     same2("hooks_list_endpoints", {"limit": 1, "offset": 1}, "GET", "/endpoints?limit=1&offset=1")
