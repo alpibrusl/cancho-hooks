@@ -405,7 +405,7 @@ Every expectation is derived from the backup's own files with the independent re
 
 ### 4.6 Speed, and what grows
 
-`logcheck.py` reads a log at about 8.6 MB/s (table-driven CRC-32C in Python, measured on 20 MB), and a backup reads each log about twice and a restore twice: **a 1 GB `events.seg` is about four minutes of checking per backup**. The logs are bounded by retention now (section 3.5), so the checking time is bounded too: a backup of a directory at its defaults reads at most the retention's events plus about 100 MB. `hooks-logcheck` (used by `backup.sh` and `restore.sh` when found, section 49 of the design) is the fast path. For the Python one, `pip install crc32c` makes it much faster (the script uses it if present) but that was not measured here.
+`logcheck.py` reads a log at about 8.6 MB/s (table-driven CRC-32C in Python, measured on 20 MB), and a backup reads each log about twice and a restore twice: **a 1 GB `events.seg` is about four minutes of checking per backup**. The logs are bounded by retention now (section 3.5), so the checking time is bounded too: a backup of a directory at its defaults reads at most the retention's events plus about 100 MB. `hooks-logcheck` (used by `backup.sh` and `restore.sh` when found, section 54 of the design) is the fast path. For the Python one, `pip install crc32c` makes it much faster (the script uses it if present) but that was not measured here.
 
 ### 4.7 Refusing corruption: what the start does, and what to do (`docs/design.md` section 34.5)
 
