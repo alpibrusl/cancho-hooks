@@ -46,6 +46,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import opslib as L  # noqa: E402
 from pgproxy import PgProxy  # noqa: E402
 
+# What "the loop stalled" means here: a loop that waits on a frozen, black-holed or refusing database stalls for seconds (a dial gives up after 5 s, the black hole lasts 7 s).
+# The wait is measured from a Python thread on a machine that other work shares, and with the loop idle it showed 100 to 400 ms about one run in six, on the build before
+# the database waits were made asynchronous as well as on the build after: that is the probe's own scheduling, not the service. So the limit is well under a second and
+# well over a hiccup. (Check 13, which guards key derivation in slices, keeps 250 ms: it reads 4 to 9 ms.)
+STALL_MS = 600
+
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 STAGES = sys.argv[2:]
 check = L.Checks()
@@ -449,7 +455,7 @@ def stage5():
     probe.phase("black hole at the start, 5 s of attempts that run out of time")
     s = svc.stats()
     check("5b. ... attempts are made and run out of time (not blocked): %d failed attempts in 5 s" % s["database_failures"], 3 <= s["database_failures"] <= 30, str(s))
-    check("5b. ... the loop answered throughout: the longest wait for /healthz was %d ms (limit 250)" % round(probe.worst * 1000), probe.worst < 0.25 and probe.n > 100, str((probe.worst, probe.n)))
+    check("5b. ... the loop answered throughout: the longest wait for /healthz was %d ms (limit %d)" % (round(probe.worst * 1000), STALL_MS), probe.worst < STALL_MS / 1000 and probe.n > 100, str((probe.worst, probe.n)))
     proxy.restore()
     check("5b. restored: the endpoints load and /readyz is 200 (at most 'pg-attempt-ms + the wait' later)", L.wait_for(lambda: svc.has_line("endpoints loaded: 1") and ready(svc), 20))
     probe.phase("restored")
@@ -598,7 +604,7 @@ def stage7():
     s = svc.stats()
     worst = max(probe.marks.values())
     print(f"INFO 7. the longest wait for /healthz by phase (ms): {probe.marks}; {probe.n} probes, {probe.slow} over 50 ms; load average {os.getloadavg()[0]:.1f}", flush=True)
-    check("7. the loop never stalled: the longest wait for /healthz in any phase was %d ms (limit 250)" % worst, worst < 250 and probe.n > 500, str((probe.marks, probe.n)))
+    check("7. the loop never stalled: the longest wait for /healthz in any phase was %d ms (limit %d)" % (worst, STALL_MS), worst < STALL_MS and probe.n > 500, str((probe.marks, probe.n)))
     check("7. ... with events flowing all the while: each acknowledged event delivered once", L.wait_for(lambda: peer.distinct() >= set(sender.ids), 20) and peer.count() == len(set(peer.events())),
           f"{len(sender.ids)} {peer.count()} {len(peer.distinct())} {s}")
     check("7. ... the pool counted what happened: losses %d, reconnects %d, failed attempts %d" % (s["database_losses"], s["database_reconnects"], s["database_failures"]),
