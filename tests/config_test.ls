@@ -302,8 +302,10 @@ fn test_the_admin_token_is_eight_to_255_visible_characters() -> [] int {
         test.assert_eq(config.token_at() + 256, config.ingest_token_at());
         test.assert_eq(config.ingest_token_at() + 256, config.read_token_at());
         test.assert_eq(config.read_token_at() + 256, config.ca_file_at());
-        // and the path of the trust store file is the last of the blob
-        test.assert_eq(len(blob), config.ca_file_at() + 256);
+        // the paths of the two encryption key files follow it, and the last of them is the end of the blob
+        test.assert_eq(config.ca_file_at() + 256, config.key_file_at());
+        test.assert_eq(config.key_file_at() + 256, config.old_key_file_at());
+        test.assert_eq(len(blob), config.old_key_file_at() + 256);
     }
     return 0;
 }
