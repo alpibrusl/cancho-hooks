@@ -33,6 +33,12 @@ name = "cron_probe"
 sources = ["tests/cron_probe.ls", "src/cron.ls"]
 std = true
 
+# The MCP server for agents (docs/design.md section 51, docs/agents.md): its own sources, and none of the service's.
+[[bin]]
+name = "hooks-mcp"
+sources = ["tools/mcp.ls"]
+std = true
+
 # The unit tests (`lex-sys test`): each set is run against the installed libraries.
 [[test]]
 name = "state"
