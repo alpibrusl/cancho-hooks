@@ -4,7 +4,7 @@
 
 [package]
 name = "hooks-pure"
-lex-sys = "ab28046dbcd8cc3b7149522a52f2453ceb0d0f4a"
+lex-sys = "3258da82c87ee0279652fa34eb7650eeb309be2b"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/lexsys-log"
@@ -29,7 +29,7 @@ path = ".lex-sys-vcs-pool"
 # lex-sys's own TLS client and the certificate verifier it needs (lex-sys epic #197).
 [dependencies.tls]
 git = "https://github.com/alpibrusl/lex-sys"
-rev = "ab28046dbcd8cc3b7149522a52f2453ceb0d0f4a"
+rev = "3258da82c87ee0279652fa34eb7650eeb309be2b"
 path = "packages/tls/.lex-sys-vcs/tls"
 
 [[bin]]

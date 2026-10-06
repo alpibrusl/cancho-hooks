@@ -65,12 +65,32 @@ def attempt(text):
                  "pub fn advance[&f, &t, &p, &a, &r, &s](engine: &!f tls.Engine, now_ms: int, tab:", 1, "attempt.ls: advance")
     text = exact(text, "tlsx.open(ffi, at[env_at() + e_ctx()], at, tb, ", "tlsx.open(engine, slot, now_ms, at, tb, ", 1, "attempt.ls: open")
     text = exact(text, "tlsx.drop(ffi, at, slot * stride() + f_tls());", "tlsx.drop(engine, slot, at, slot * stride() + f_tls());", 1, "attempt.ls: drop")
-    # A session is the engine's ticket: saved from the attempt's slot.
-    text = exact(text, "tlsx.save_session(ffi, at, b + f_tls());", "tlsx.save_session(engine, slot, at, b + f_tls());", 1, "attempt.ls: save_session")
+    # A session is a pool of the engine's tickets (lex-sys `docs/tls-resumption.md` §12): the attempt's ticket joins its endpoint's pool, if that pool was
+    # saved for the same name and port, instead of replacing it, so that a burst to one endpoint finds a ticket for each connection.
+    text = exact(text, """    let saved = tlsx.save_session(ffi, at, b + f_tls());
+    if saved == 0 {
+        return 0;
+    }
+    drop_session(ffi, at, e);
+    let base = slot * slot_bytes();
+    at[env_at() + e_sessions() + e] = saved;
+    at[env_at() + e_keys() + e] = name_key(req[base + name_at()..base + name_at() + at[b + f_name()]], at[b + f_port()]);
+""", """    let base = slot * slot_bytes();
+    let key = name_key(req[base + name_at()..base + name_at() + at[b + f_name()]], at[b + f_port()]);
+    if at[env_at() + e_keys() + e] != key {
+        drop_session(engine, at, e);
+    }
+    let saved = tlsx.save_session(engine, slot, at, b + f_tls(), at[env_at() + e_sessions() + e]);
+    if saved == 0 {
+        return 0;
+    }
+    at[env_at() + e_sessions() + e] = saved;
+    at[env_at() + e_keys() + e] = key;
+""", 1, "attempt.ls: keep_session")
     # The OpenSSL context is not there; the engine is closed by `main`.
     text = exact(text, "    tlsx.free_context(ffi, at[env_at() + e_ctx()]);\n", "    // (no context to free: `main` closes the engine)\n", 1, "attempt.ls: free_context")
     text = rows_and_types(text, "attempt.ls", sole=4, tail=0, lead=2, typed_both=0, typed_ssl=4)
-    text = regex(text, r"\bffi\b", "engine", 8, "attempt.ls: the remaining `ffi` arguments")
+    text = regex(text, r"\bffi\b", "engine", 7, "attempt.ls: the remaining `ffi` arguments")
     return text
 
 
