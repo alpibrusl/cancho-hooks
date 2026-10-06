@@ -1057,7 +1057,10 @@ fn trim_json[&b, &s, &p](ob: &!b [byte], st: &!s [int], path: &p [byte], valid: 
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    release(ffi); release(net); release(clock); release(signals);
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
     var status = 2;
     var h = heap;
     var o = io;
@@ -1147,6 +1150,9 @@ fn main(world: World) -> [] int {
             }
         }
     }
-    release(args); release(fs); release(o); release(h);
+    release(args);
+    release(fs);
+    release(o);
+    release(h);
     return status;
 }
