@@ -103,7 +103,7 @@ A `Dockerfile` and a `systemd` unit; a tested **backup and restore** (the two lo
 
 ## P3: a hosted, multi-tenant service (not before P0 to P2)
 
-Tenants and their tokens, a customer portal, usage metering and billing, SDKs, per-tenant limits, an audit log, SOC 2 or ISO 27001. See the business sketch in the issue tracker; none of it is started.
+Tenants and their tokens, a customer portal, usage metering and billing, SDKs, per-tenant limits, SOC 2 or ISO 27001 (an audit log is built: design 47.1). See the business sketch in the issue tracker; none of it is started.
 
 ## Order and what runs in parallel
 

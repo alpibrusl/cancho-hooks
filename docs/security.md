@@ -47,7 +47,7 @@ read-token   = <32 random characters>   # the GETs: give it to dashboards and mo
   database role only what it needs (`select`, `insert`, `update` and `delete` on `endpoints`, `attempts` and `schedules`, and `usage` on the sequence), keep the database off
   any network the receivers can reach, and treat a backup like the secrets it holds (`runbook.md` section 2).
 * **What it does not do:** no TLS for the service's own port (put a reverse proxy in front for `https` towards your own clients; delivery **to** `https` receivers is built: [https.md](https.md)), no
-  per-token rotation without a restart, no rate limit on failed tokens, no audit log of who called what. A token is the whole of the authentication.
+  per-token rotation without a restart, no rate limit on failed tokens. A token is the whole of the authentication.
 
 ## Authority
 
@@ -70,3 +70,8 @@ The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/le
 
 The authority report (`lex-sys authority`) therefore says `bounded: false`, with the symbols above under `unbounded_by`, each with the library the program says it is in (a library
 is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in lex-sys), and names the two signals. The second build, `hooks-pure` (lex-sys's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol and its report says `bounded: true`**; it is not the default until that TLS has been independently reviewed.
+
+## The audit log
+
+`<dir>/audit.log` (on by default; `production = 1` refuses `audit-log = 0`, status 36) has one line of JSON for each request that reads an event's data, changes anything, or is refused for its credentials: `{"t","seq","scope","method","path","status","fwd"}`. `scope` is the token the request presented (`admin`, `read`, `ingest`, `none`, or `bad` for one that is none of them), `path` carries the ids, `fwd` is `X-Forwarded-For` as it was sent (not trusted: the service does not see the client's address). A change held for the database is written when it is taken (`status` 0) and again, `{"t","seq","status"}`, with its outcome. **No body, no header value and no token is ever written.** Not written: an event that was taken (the events log is its record), `/healthz`, `/readyz`, `/metrics`, `/stats`. The lines of a turn are synced with its group commit, so a line is on disk before the answers of the next turn go out. At `audit-log-bytes` (64 MiB) the file becomes `audit.log.1`; `audit-log-files` (8) are kept. A write that fails is counted (`/stats audit_failures`) and `/readyz` says `audit_log` until one succeeds. The lines can be edited by anyone who can write the data directory: ship them to a store of their own (a log collector reading the file) if they are evidence. `docs/design.md` section 47.1.
+
