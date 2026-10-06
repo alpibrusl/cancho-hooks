@@ -33,7 +33,7 @@ path = ".lex-sys-vcs"
 
 [dependencies.web]
 git = "https://github.com/alpibrusl/lexsys-web"
-rev = "94fe0cd510ca95e8088cb2d975fc8bcce11379b1"
+rev = "0deab12a4000d3b6f2be893ea0439bcc34e0dbdf"
 path = ".lex-sys-vcs"
 
 # lex-sys's own TLS client and the certificate verifier it needs (lex-sys epic #197).
