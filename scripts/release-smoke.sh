@@ -23,11 +23,12 @@ fail() { echo "release-smoke: FAIL: $*" >&2; exit 1; }
 # 2. the tarball holds what it says
 tar -xzf "$tarball" -C "$work"
 root=$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-for f in bin/hooks bin/hooks-mcp deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
+for f in bin/hooks bin/hooks-mcp bin/hooks-logcheck deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
   [ -e "$root/$f" ] || fail "the tarball has no $f"
 done
 [ -x "$root/bin/hooks" ] || fail "bin/hooks is not executable"
 [ -x "$root/bin/hooks-mcp" ] || fail "bin/hooks-mcp is not executable"
+[ -x "$root/bin/hooks-logcheck" ] || fail "bin/hooks-logcheck is not executable"
 
 # 3. it runs: start, post, read back
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
@@ -65,4 +66,7 @@ kill -TERM "$pid"
 for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || { pid=""; break; }; sleep 0.1; done
 [ -z "$pid" ] || fail "the service did not stop on SIGTERM within 10 s"
 
-echo "release-smoke: ok: $base verifies, unpacks, starts, takes an event and stops"
+# 5. the log checker that backup.sh and restore.sh use finds the directory the service left whole
+"$root/bin/hooks-logcheck" check "$work/data" >"$work/logcheck.out" 2>&1 || { cat "$work/logcheck.out" >&2; fail "hooks-logcheck says the directory the service left is not whole"; }
+
+echo "release-smoke: ok: $base verifies, unpacks, starts, takes an event and stops; hooks-mcp reads it; hooks-logcheck finds the directory whole"

@@ -37,9 +37,20 @@ set -euo pipefail
 umask 077
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-logcheck="$here/logcheck.py"
 
 die() { local code=$1; shift; echo "backup: $*" >&2; exit "$code"; }
+# The log checker: `hooks-logcheck` (lex-sys, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
+# reference and takes four and a half minutes of CPU for 400 MB of logs). `LOGCHECK=python` forces the Python one.
+logcheck=()
+if [ "${LOGCHECK:-}" != python ]; then
+  for c in "$here/hooks-logcheck" "$here/../build/hooks-logcheck" "$here/../bin/hooks-logcheck" "$(command -v hooks-logcheck || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then logcheck=("$c"); break; fi
+  done
+fi
+if [ "${#logcheck[@]}" = 0 ]; then
+  command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py), or build hooks-logcheck"
+  logcheck=(python3 "$here/logcheck.py")
+fi
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dir="" out="" mode="" stop_cmd="" start_cmd=""
@@ -75,7 +86,6 @@ for f in "$dir"/events.seg "$dir"/events-[0-9]*.seg "$dir"/events.first; do
   if [ -e "$f" ]; then have_events=1; fi
 done
 [ "$have_events" = 1 ] || die 2 "$dir has no events log (events.seg, events-N.seg): is that the --dir the service runs with?"
-command -v python3 >/dev/null || die 2 "python3 is needed (scripts/logcheck.py)"
 command -v sha256sum >/dev/null || die 2 "sha256sum is needed"
 command -v flock >/dev/null || die 2 "flock (util-linux) is needed: the service defers compaction while this script holds compact.lock"
 if [ -n "$pg_db" ]; then command -v pg_dump >/dev/null || die 2 "pg_dump is needed for --pg-database"; fi
@@ -160,15 +170,15 @@ if [ -f "$dir/endpoints.conf" ]; then cp "$dir/endpoints.conf" "$work/endpoints.
 
 # A copy taken while the service ran may end in a torn record: cut it, as the service would at start.
 cut_of() { sed -n 's/.*"cut": \([0-9]*\).*/\1/p'; }
-cut_delivery=$(python3 "$logcheck" trim "$work/delivery.seg" | cut_of) || die 4 "delivery.seg: the copy is damaged"
+cut_delivery=$("${logcheck[@]}" trim "$work/delivery.seg" | cut_of) || die 4 "delivery.seg: the copy is damaged"
 # Only the last segment can end in a torn record. One that holds nothing whole (a roll caught between creating the file and its header) is left out.
 last=${segs[${#segs[@]} - 1]}
-cut_events=$(python3 "$logcheck" trim "$work/$last" | cut_of) || die 4 "$last: the copy is damaged"
+cut_events=$("${logcheck[@]}" trim "$work/$last" | cut_of) || die 4 "$last: the copy is damaged"
 if [ "$(wc -c < "$work/$last")" -eq 0 ] && [ "${#segs[@]}" -gt 1 ]; then
   rm "$work/$last"
   unset 'segs[${#segs[@]}-1]'
 fi
-kv=$(python3 "$logcheck" check "$work" --kv) || die 4 "the copied pair is not consistent (see above); nothing was kept"
+kv=$("${logcheck[@]}" check "$work" --kv) || die 4 "the copied pair is not consistent (see above); nothing was kept"
 
 {
   echo "format=lexsys-hooks-backup/2"
