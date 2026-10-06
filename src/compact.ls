@@ -838,7 +838,7 @@ fn compact_read_table[&h, &l, &g, &w, &d, &b, &n, &k, &o, &e](heap: &!h Heap, lg
                             if tag == dbup.load_tag() {
                                 if pool.status(qw) == 8 {
                                     // the answer does not fit the pool's input slab (1 MiB)
-                                    say_unreadable(io, 20, 6);
+                                    say_unreadable(io, 20, 6, "");
                                     result = 20;
                                     going = false;
                                 } else if pool.status(qw) != 0 {
@@ -852,7 +852,7 @@ fn compact_read_table[&h, &l, &g, &w, &d, &b, &n, &k, &o, &e](heap: &!h Heap, lg
                                         ops.say_number(io, dt);
                                         say(io, "\n");
                                     } else {
-                                        say_unreadable(io, st, dt);
+                                        say_unreadable(io, st, dt, "");
                                         result = st;
                                     }
                                     going = false;
@@ -877,7 +877,7 @@ fn compact_read_table[&h, &l, &g, &w, &d, &b, &n, &k, &o, &e](heap: &!h Heap, lg
                                 let known = pool.sqlstate(qw, state5);
                                 let why = dbup.verdict(pool.last_failure(qw), state5[0..known], clock_ms(clock) - began, history.start_wait_ms(dv[off_hq()..off_hq() + history.size()]));
                                 if why != 0 {
-                                    say_unreadable(io, 20, why);
+                                    say_unreadable(io, 20, why, state5[0..known]);
                                     result = 20;
                                     going = false;
                                 }

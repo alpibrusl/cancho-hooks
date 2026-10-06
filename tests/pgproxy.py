@@ -79,7 +79,13 @@ class PgProxy:
                 b.sendall(data)
         except OSError:
             pass
+        # shutdown before close: the other direction's thread is blocked in recv on one of these, and a close from this thread neither wakes it
+        # nor sends a FIN (the blocked call holds the socket), so the server would keep its end, and the backend, for ever
         for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 s.close()
             except OSError:

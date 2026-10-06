@@ -162,39 +162,39 @@ fn test_the_request_names_the_limits_or_refuses_them[&h](heap: &!h Heap) -> [hea
     borrow mut xgb as &!xw in {
         let xg = contents(xw);
         // both, in a POST and in a PATCH
-        test.assert_eq(epx.parse(heap, "{\"host\":\"8.8.8.8\",\"concurrency\":3,\"rate\":250}", xg, false, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"host\":\"8.8.8.8\",\"concurrency\":3,\"rate\":250}", xg, false, 1000), 0);
         test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
         test.assert_eq(epx.pending_conc(xg), 3);
         test.assert_eq(epx.pending_rate(xg), 250);
-        test.assert_eq(epx.parse(heap, "{\"rate\":7}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"rate\":7}", xg, true, 1000), 0);
         test.assert_eq(epx.pending_mask(xg), epx.m_rate());
         test.assert_eq(epx.pending_rate(xg), 7);
         test.assert_eq(epx.pending_conc(xg), 0);
         // null and 0 follow the service: named, and 0
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":null,\"rate\":0}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":null,\"rate\":0}", xg, true, 1000), 0);
         test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
         test.assert_eq(epx.pending_conc(xg), 0);
         test.assert_eq(epx.pending_rate(xg), 0);
         // the edges
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":8,\"rate\":100000}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":8,\"rate\":100000}", xg, true, 1000), 0);
         test.assert_eq(epx.pending_conc(xg), 8);
         test.assert_eq(epx.pending_rate(xg), 100000);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":1,\"rate\":1}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":1,\"rate\":1}", xg, true, 1000), 0);
         // not named: not in the mask
-        test.assert_eq(epx.parse(heap, "{\"types\":[\"a\"]}", xg, true, 1000, 5), 0);
+        test.assert_eq(epx.parse(heap, "{\"types\":[\"a\"]}", xg, true, 1000), 0);
         test.assert_eq(epx.pending_mask(xg) & (epx.m_conc() | epx.m_rate()), 0);
         // refusals leave nothing pending
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":9}", xg, true, 1000, 5), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":9}", xg, true, 1000), 306);
         test.assert_eq(epx.pending_mask(xg), 0);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":-1}", xg, true, 1000, 5), 306);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":2.5}", xg, true, 1000, 5), 306);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":\"2\"}", xg, true, 1000, 5), 306);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":true}", xg, true, 1000, 5), 306);
-        test.assert_eq(epx.parse(heap, "{\"rate\":100001}", xg, true, 1000, 5), 307);
-        test.assert_eq(epx.parse(heap, "{\"rate\":-1}", xg, true, 1000, 5), 307);
-        test.assert_eq(epx.parse(heap, "{\"rate\":\"x\"}", xg, true, 1000, 5), 307);
-        test.assert_eq(epx.parse(heap, "{\"rate\":99999999999999999999}", xg, true, 1000, 5), 307);
-        test.assert_eq(epx.parse(heap, "{\"concurrency\":3,\"rate\":[]}", xg, true, 1000, 5), 307);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":-1}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":2.5}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":\"2\"}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":true}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"rate\":100001}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":-1}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":\"x\"}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":99999999999999999999}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":3,\"rate\":[]}", xg, true, 1000), 307);
         test.assert_eq(epx.pending_conc(xg), 0);
         test.assert_eq(epx.pending_rate(xg), 0);
     }

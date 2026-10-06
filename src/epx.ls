@@ -29,7 +29,7 @@ import hdrs;
 // The change a `POST` or `PATCH` asks for waits for the database in the `xg` block (like `manage.ls`'s `mg`): which members it names, the
 // subscription, the headers as a spec (`hdrs.ls`: the form the database holds), and the time the previous secret stays valid until.
 //
-//     [0] members named: 1 types, 2 headers, 4 keep, 8 concurrency, 16 rate   [1] types length   [2] spec length   [3] keep until (Unix ms; 0: end the overlap now)
+//     [0] members named: 1 types, 2 headers, 4 keep, 8 concurrency, 16 rate   [1] types length   [2] spec length   [3] keep for (ms from the commit; 0: end the overlap now)
 //     [4] concurrency   [5] rate
 //     [8 .. 520)     the subscription        [520 .. 4616)  the spec
 
@@ -441,14 +441,14 @@ pub fn put_members[&h, &x](heap: &!h Heap, w: json.Writer, xt: &x [int], i: int,
 
 // Fill `xg` with the members of the body `body` of a `POST /endpoints` (`patch` false) or `PATCH /endpoints/:id` (`patch` true) that this module
 // owns: `types`, `headers`, and for a patch `keep_old_ms` or `keep_old` (the previous secret stays valid that long; `keep_old: true` is `grace_ms`), and `concurrency` and `rate` (`lim.ls`: 0 or null follows the service).
-// `now` is the Unix time in ms. Answers 0, or the code of the refusal (`why`). What the body does not name is not in `xg`'s mask. The body has been
+// `keep_old_ms` is kept as a length: the overlap is counted from the commit (`pending_keep_ms`). Answers 0, or the code of the refusal (`why`). What the body does not name is not in `xg`'s mask. The body has been
 // judged to be a JSON object by the caller.
-pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: bool, grace_ms: int, now: int) -> [heap] int {
+pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: bool, grace_ms: int) -> [heap] int {
     var code = 0;
     var mask = 0;
     var tn = 0;
     var sn = 0;
-    var keep_until = 0;
+    var keep_ms = 0;
     var conc_n = 0;
     var rate_n = 0;
     let tape = box_slice(heap, json.tape_len(body), 0);
@@ -637,9 +637,7 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
                                 code = 303;
                             } else {
                                 mask = mask | m_keep();
-                                if ms > 0 {
-                                    keep_until = now + ms;
-                                }
+                                keep_ms = ms;
                             }
                         }
                     } else if kb >= 0 {
@@ -648,7 +646,7 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
                         } else {
                             mask = mask | m_keep();
                             if json.to_bool(t, kb) {
-                                keep_until = now + grace_ms;
+                                keep_ms = grace_ms;
                             }
                         }
                     }
@@ -657,7 +655,7 @@ pub fn parse[&h, &b, &g](heap: &!h Heap, body: &b [byte], xg: &!g [int], patch: 
                     xg[0] = mask;
                     xg[1] = tn;
                     xg[2] = sn;
-                    xg[3] = keep_until;
+                    xg[3] = keep_ms;
                     xg[4] = conc_n;
                     xg[5] = rate_n;
                     var k = 0;
@@ -711,7 +709,9 @@ pub fn pending_mask[&g](xg: &g [int]) -> [] int {
     return xg[0];
 }
 
-pub fn pending_keep_until[&g](xg: &g [int]) -> [] int {
+// How long the previous secret stays valid, in ms **from the commit** (0: the overlap ends): a change that waits for the database does not use up its
+// overlap waiting. The database is given the end as of the moment the change is sent, the table in memory as of the commit.
+pub fn pending_keep_ms[&g](xg: &g [int]) -> [] int {
     return xg[3];
 }
 

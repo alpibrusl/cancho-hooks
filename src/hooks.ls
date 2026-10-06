@@ -41,6 +41,7 @@ import roster;
 import record;
 import attempt;
 import thp;
+import dbname;
 import crc;
 import idem;
 import std.conns;
@@ -733,6 +734,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "database_lookups");
+        w = json.put_int(heap, w, dbname.lookups(stats[off_dbn()..off_dbn() + dbname.size()]));
+        w = json.put_key(heap, w, "database_lookup_failures");
+        w = json.put_int(heap, w, dbname.failures(stats[off_dbn()..off_dbn() + dbname.size()]));
         w = json.put_key(heap, w, "endpoints_loaded");
         w = json.put_bool(heap, w, history.endpoints_known(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "database_reconnects");
@@ -981,7 +986,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
             return server.failure(heap, out, 400, manage.why(4), keep);
         }
         // The subscription and the headers (`epx.ls`): judged here, kept in the delivery state until the database answers.
-        let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], false, stats[off_ex() + ex_grace()], now);
+        let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], false, stats[off_ex() + ex_grace()]);
         if named != 0 {
             return server.failure(heap, out, 400, epx.why(named), keep);
         }
@@ -1025,12 +1030,12 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         // The subscription, the headers, and how long the previous secret stays valid (`epx.ls`).
         epx.clear_pending(stats[off_xg()..off_xg() + epx.xg_size()]);
         if parsed.1 & 16 != 0 {
-            let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], true, stats[off_ex() + ex_grace()], now);
+            let named = epx.parse(heap, body, stats[off_xg()..off_xg() + epx.xg_size()], true, stats[off_ex() + ex_grace()]);
             if named != 0 {
                 return server.failure(heap, out, 400, epx.why(named), keep);
             }
             // Keeping a previous secret without making a new one needs one to keep (to end the overlap there need not be).
-            if epx.pending_mask(stats[off_xg()..off_xg() + epx.xg_size()]) & epx.m_keep() != 0 && parsed.1 & 12 == 0 && epx.pending_keep_until(stats[off_xg()..off_xg() + epx.xg_size()]) > 0 && !epx.old_active(stats[off_xt()..off_xt() + epx.xt_size()], index_of_id(stats, want), now) {
+            if epx.pending_mask(stats[off_xg()..off_xg() + epx.xg_size()]) & epx.m_keep() != 0 && parsed.1 & 12 == 0 && epx.pending_keep_ms(stats[off_xg()..off_xg() + epx.xg_size()]) > 0 && !epx.old_active(stats[off_xt()..off_xt() + epx.xt_size()], index_of_id(stats, want), now) {
                 return server.failure(heap, out, 400, epx.why(305), keep);
             }
         }
@@ -1984,8 +1989,13 @@ fn off_lag() -> [] int {
     return off_adv() + state.max_endpoints();
 }
 
-fn off_token() -> [] int {
+// The database's host, when it is a name, resolved by the service (`dbname.ls`, `docs/design.md` section 45).
+fn off_dbn() -> [] int {
     return off_lag() + state.max_endpoints();
+}
+
+fn off_token() -> [] int {
+    return off_dbn() + dbname.size();
 }
 
 fn off_mg() -> [] int {
@@ -3419,9 +3429,14 @@ fn signal_token() -> [] int {
     return attempt.slots() + 16;
 }
 
+// The poller token of the lookup of the database's host (`dbname.ls`), after the claim's.
+fn dbname_token() -> [] int {
+    return attempt.slots() + 17;
+}
+
 // Why the service ends because the endpoints could not be read from the database after the start (section 37.2), on stderr: `status` is 20 and `detail` a reason
-// of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log.
-fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int {
+// of `dbup`, or 13 and the number of the row the parser refused, or 15 and 17 for the log. `state` is the SQLSTATE of the server's last error, if there was one.
+fn say_unreadable[&i, &s](out: &!i Io, status: int, detail: int, state: &s [byte]) -> [err_write] int {
     if status == 13 {
         say(out, "hooks: the endpoints table: row ");
         ops.say_number(out, detail);
@@ -3431,6 +3446,12 @@ fn say_unreadable[&i](out: &!i Io, status: int, detail: int) -> [err_write] int 
     if status == 20 {
         say(out, "hooks: the database's endpoints cannot be read: ");
         say(out, dbup.message(detail));
+        if len(state) == 5 {
+            say(out, " (the server's last answer: SQLSTATE ");
+            say(out, state);
+            say(out, dbup.state_words(state));
+            say(out, ")");
+        }
         say(out, "\n");
         return 0;
     }
@@ -3480,6 +3501,10 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             let resp = box_slice(heap, attempt.resp_size(), byte_of(0));
             let events = box_slice(heap, 256, 0);
             var atab = conns.empty(heap, attempt.slots());
+            // The database's host, when it is a name, is resolved by the service (`dbname.ls`, section 45): the lookup's one connection, and its query and answer.
+            var dtab = conns.empty(heap, 1);
+            let dnb = box_slice(heap, dbname.buf_size(), byte_of(0));
+            dbname.init(dv[off_dbn()..off_dbn() + dbname.size()], dbhost, ns, ns_port);
             let tickets = box_slice(heap, most_held(), 0);
             let ids = box_slice(heap, most_held(), 0);
             let keeps = box_slice(heap, most_held(), 0);
@@ -3849,6 +3874,12 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 while j < nev {
                                     if pool.owns(qw, contents(er)[2 * j]) {
                                         pool.pump(qw, server.poller(sw), contents(er)[2 * j], contents(er)[2 * j + 1]);
+                                    } else if contents(er)[2 * j] == server.first_token(sw) + dbname_token() {
+                                        borrow mut dtab as &!dt in {
+                                            borrow mut dnb as &!dn in {
+                                                dbname.advance(dt, server.poller(sw), dv[off_dbn()..off_dbn() + dbname.size()], contents(dn), server.first_token(sw) + dbname_token(), clock_ms(clock));
+                                            }
+                                        }
                                     }
                                     j = j + 1;
                                 }
@@ -3856,7 +3887,55 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                         }
                         // The pool keeps itself full (section 37.1): the logins move on, what ran out of time is given up, and a connection that is due is dialed
                         // (without waiting) and handed over. It takes the pool by value, so it is between the borrows.
-                        pl = pool.revive(heap, pl, net, dbhost, dbport, server.poller(sw), clock_ms(clock));
+                        if dbname.active(dv[off_dbn()..off_dbn() + dbname.size()]) {
+                            // The host is a name (section 45): the service resolves it and dials the address; the pool is never given the name.
+                            let now_db = clock_ms(clock);
+                            borrow mut dtab as &!dt in {
+                                dbname.expire(dt, dv[off_dbn()..off_dbn() + dbname.size()], now_db);
+                            }
+                            var want = 0;
+                            borrow mut pl as &!qw in {
+                                dbname.note_losses(dv[off_dbn()..off_dbn() + dbname.size()], pool.losses(qw));
+                                want = pool.tick(heap, qw, server.poller(sw), now_db);
+                            }
+                            if want > 0 && !dbname.known(dv[off_dbn()..off_dbn() + dbname.size()]) {
+                                // no address yet: a lookup is begun (or is on the wire), and each connection that was due waits its backoff instead of being due every turn
+                                borrow mut dnb as &!dn in {
+                                    dtab = dbname.start(heap, net, dtab, server.poller(sw), dv[off_dbn()..off_dbn() + dbname.size()], contents(dn), dbhost, server.first_token(sw) + dbname_token(), now_db);
+                                }
+                                borrow mut pl as &!qw in {
+                                    while want > 0 {
+                                        pool.dial_failed(qw, now_db, 0 - 2);
+                                        want = want - 1;
+                                    }
+                                }
+                            }
+                            while want > 0 {
+                                var dialed = false;
+                                region dt {
+                                    let literal = alloc_slice[dt](16, byte_of(0));
+                                    let n_lit = dbname.dotted(dv[off_dbn()..off_dbn() + dbname.size()], literal);
+                                    match tcp_connect_start(net, literal[0..n_lit], dbport) {
+                                        Dialed::Ok(c) => {
+                                            let (grown, lane) = pool.adopt(heap, pl, server.poller(sw), now_db, c);
+                                            pl = grown;
+                                            dialed = true;
+                                        }
+                                        Dialed::Failed(e) => {
+                                        }
+                                    }
+                                }
+                                if !dialed {
+                                    borrow mut pl as &!qw in {
+                                        pool.dial_failed(qw, now_db, 0 - 3);
+                                    }
+                                    dbname.stale(dv[off_dbn()..off_dbn() + dbname.size()]);
+                                }
+                                want = want - 1;
+                            }
+                        } else {
+                            pl = pool.revive(heap, pl, net, dbhost, dbport, server.poller(sw), clock_ms(clock));
+                        }
                         borrow mut pl as &!qw in {
                             // every request the pool has an answer for: an insert is counted, a request for the API is answered
                             var tag = pool.next_done(qw);
@@ -3865,7 +3944,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     // the answer to the read of the endpoints table (section 37.2)
                                     if pool.status(qw) == 8 {
                                         // the answer does not fit the pool's input slab (1 MiB): a table far over the 540,672 bytes of text the service reads
-                                        say_unreadable(io, 20, 6);
+                                        say_unreadable(io, 20, 6, "");
                                         code = 20;
                                         running = false;
                                     } else if pool.status(qw) != 0 {
@@ -3885,7 +3964,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                             ops.say_number(io, detail);
                                             say(io, "\n");
                                         } else {
-                                            say_unreadable(io, loaded, detail);
+                                            say_unreadable(io, loaded, detail, "");
                                             code = loaded;
                                             running = false;
                                         }
@@ -3904,7 +3983,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     var created = buffer.empty(heap, 0);
                                     borrow mut done as &!dgw in {
                                         buffer.drop(heap, created);
-                                        created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1);
+                                        created = finish_change(heap, dv, blob, lg, dgw, pool.reply(qw), pool.status(qw), dv[off_mg() + manage.mg_keep()] == 1, clock_unix_ms(clock));
                                     }
                                     if changed >= 0 {
                                         borrow mut at as &!aw2 in {
@@ -4039,7 +4118,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     let known = pool.sqlstate(qw, state5);
                                     let why = dbup.verdict(pool.last_failure(qw), state5[0..known], now_ms - began_ms, history.start_wait_ms(dv[off_hq()..off_hq() + history.size()]));
                                     if why != 0 {
-                                        say_unreadable(io, 20, why);
+                                        say_unreadable(io, 20, why, state5[0..known]);
                                         code = 20;
                                         running = false;
                                     }
@@ -4114,6 +4193,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             }
             pool.close(heap, pl);
             conns.drop(heap, atab);
+            conns.drop(heap, dtab);
+            unbox_slice(heap, dnb);
             borrow mut at as &!aw1 in {
                 attempt.close_tls(ssl, contents(aw1));
             }
@@ -4505,7 +4586,7 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
             q = queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
         } else {
             let mask = epx.pending_mask(xg);
-            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_until(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
+            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_ms(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
     }
     return q;
@@ -4526,7 +4607,7 @@ fn schedule_answer[&h, &m](heap: &!h Heap, kind: int, target: int, rep: &m [byte
     return sched.answer(heap, kind, target, rep, status, keep, now, seconds);
 }
 
-fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool) -> [heap, file_write] buffer.Buffer {
+fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], lg: &!l evlog.Ev, done: &!g log.Log, rep: &m [byte], status: int, keep: bool, now: int) -> [heap, file_write] buffer.Buffer {
     if pool.lost(status) {
         // The connection went with the change on it (section 37.4): nothing in memory changes, and the row may or may not be in the table.
         return lost_answer(heap, keep);
@@ -4535,7 +4616,7 @@ fn finish_change[&h, &b, &l, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!
         return finish_delete(heap, dv, blob, done, rep, status, keep);
     }
     if dv[off_mg() + manage.mg_kind()] == 1 {
-        return finish_patch(heap, dv, blob, rep, status, keep);
+        return finish_patch(heap, dv, blob, rep, status, keep, now);
     }
     return finish_create(heap, dv, blob, lg, done, rep, status, keep);
 }
@@ -4658,7 +4739,7 @@ fn finish_delete[&h, &b, &g, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [b
 // The database has answered a `PATCH`: on commit the table in memory takes the new address (and key), so the next attempt, a retry of an event
 // first tried under the old secret included, uses them; an attempt on the wire finishes against what it began with. The answer carries the
 // secret if the change made or brought one, as `POST /endpoints` does.
-fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], rep: &m [byte], status: int, keep: bool) -> [heap] buffer.Buffer {
+fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte], rep: &m [byte], status: int, keep: bool, now: int) -> [heap] buffer.Buffer {
     let out = buffer.empty(heap, 512);
     if status != 0 || pg.failure(rep) >= 0 {
         return server.failure(heap, out, 503, "the database did not store the change", keep);
@@ -4720,7 +4801,11 @@ fn finish_patch[&h, &b, &d, &m](heap: &!h Heap, dv: &!d [int], blob: &!b [byte],
         if !failed {
             // The subscription, the headers and the previous secret (`epx.ls`): the database has them, now the delivery does.
             let mask = epx.pending_mask(dv[off_xg()..off_xg() + epx.xg_size()]);
-            let until = epx.pending_keep_until(dv[off_xg()..off_xg() + epx.xg_size()]);
+            // the overlap is counted from now, the commit: the time the change waited for the database is not taken from it
+            var until = 0;
+            if epx.pending_keep_ms(dv[off_xg()..off_xg() + epx.xg_size()]) > 0 {
+                until = now + epx.pending_keep_ms(dv[off_xg()..off_xg() + epx.xg_size()]);
+            }
             let ex_types = alloc_slice[a](filter.max_list() + 8, byte_of(0));
             let ex_spec = alloc_slice[a](hdrs.max_spec() + 8, byte_of(0));
             if mask & epx.m_types() != 0 {

@@ -321,8 +321,10 @@ pub fn create_endpoint_id[&m](m: &m [byte], row: int) -> [] int {
     return pg.int_text(m, from, to);
 }
 
-// patch_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below
-pub fn patch_endpoint_start[&h, &a2, &a4, &a5, &a6](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_until: int, keep_until_given: bool, concurrency: int, concurrency_given: bool, rate: int, rate_given: bool) -> [heap] buffer.Buffer {
+// patch_endpoint_start: the request, encoded, for `pg.pool.submit`; the reply is read with the accessors below. `keep_ms` is how long the previous secret is kept,
+// counted by the **database's clock when the statement runs** (the row's `secret_old_until` is that moment plus `keep_ms`), not from when the request was sent: a change
+// that waited for the database must not lose its overlap waiting, in the row any more than in memory (design 35.4); 0 ends the overlap.
+pub fn patch_endpoint_start[&h, &a2, &a4, &a5, &a6](heap: &!h Heap, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_ms: int, keep_ms_given: bool, concurrency: int, concurrency_given: bool, rate: int, rate_given: bool) -> [heap] buffer.Buffer {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
@@ -342,8 +344,8 @@ pub fn patch_endpoint_start[&h, &a2, &a4, &a5, &a6](heap: &!h Heap, id: int, hos
     } else {
         ps = pg.param_null(heap, ps);
     }
-    if keep_until_given {
-        ps = pg.param_int(heap, ps, keep_until);
+    if keep_ms_given {
+        ps = pg.param_int(heap, ps, keep_ms);
     } else {
         ps = pg.param_null(heap, ps);
     }
@@ -367,7 +369,7 @@ pub fn patch_endpoint_start[&h, &a2, &a4, &a5, &a6](heap: &!h Heap, id: int, hos
 }
 
 // patch_endpoint: the whole reply, and a status (0 ok); `pg.failure(reply)` is the server's error, if any
-pub fn patch_endpoint[&h, &c, &a2, &a4, &a5, &a6](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_until: int, keep_until_given: bool, concurrency: int, concurrency_given: bool, rate: int, rate_given: bool) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
+pub fn patch_endpoint[&h, &c, &a2, &a4, &a5, &a6](heap: &!h Heap, conn: &!c Conn, id: int, host: &a2 [byte], port: int, secret: &a4 [byte], secret_given: bool, types: &a5 [byte], types_given: bool, headers: &a6 [byte], headers_given: bool, keep_ms: int, keep_ms_given: bool, concurrency: int, concurrency_given: bool, rate: int, rate_given: bool) -> [heap, conn_read, conn_write] (buffer.Buffer, int) {
     var ps = pg.params(heap);
     ps = pg.param_int(heap, ps, id);
     ps = pg.param(heap, ps, host);
@@ -387,8 +389,8 @@ pub fn patch_endpoint[&h, &c, &a2, &a4, &a5, &a6](heap: &!h Heap, conn: &!c Conn
     } else {
         ps = pg.param_null(heap, ps);
     }
-    if keep_until_given {
-        ps = pg.param_int(heap, ps, keep_until);
+    if keep_ms_given {
+        ps = pg.param_int(heap, ps, keep_ms);
     } else {
         ps = pg.param_null(heap, ps);
     }
@@ -964,7 +966,7 @@ pub fn prepare_all[&h, &c](heap: &!h Heap, conn: &!c Conn) -> [heap, conn_read, 
     let (r5, s5) = pg.prepare_after(heap, conn, reply, status, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers, concurrency, rate) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text, $6::int, $7::int returning id");
     reply = r5;
     status = s5;
-    let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
+    let (r6, s6) = pg.prepare_after(heap, conn, reply, status, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then (extract(epoch from clock_timestamp()) * 1000)::bigint + $7::bigint else 0 end) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then (extract(epoch from clock_timestamp()) * 1000)::bigint + $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
     reply = r6;
     status = s6;
     let (r7, s7) = pg.prepare_after(heap, conn, reply, status, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
@@ -1008,7 +1010,7 @@ pub fn prepare_script[&h](heap: &!h Heap) -> [heap] (buffer.Buffer, int) {
     script = pg.parse_append(heap, script, "endpoints_all", "select id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate from endpoints order by id");
     script = pg.parse_append(heap, script, "add_endpoint", "insert into endpoints (id, host, port, secret, types, headers, secret_old, secret_old_until, concurrency, rate) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict do nothing");
     script = pg.parse_append(heap, script, "create_endpoint", "insert into endpoints (id, host, port, secret, types, headers, concurrency, rate) select greatest(nextval('endpoint_ids'), coalesce((select max(id) from endpoints), -1) + 1), $1::text, $2::int, $3::text, $4::text, $5::text, $6::int, $7::int returning id");
-    script = pg.parse_append(heap, script, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then coalesce($7::bigint, 0) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
+    script = pg.parse_append(heap, script, "patch_endpoint", "update endpoints set host = $2::text, port = $3::int, secret_old = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then secret else '' end) when $7::bigint is not null then (case when $7::bigint > 0 then secret_old else '' end) else secret_old end, secret_old_until = case when $4::text is not null then (case when coalesce($7::bigint, 0) > 0 then (extract(epoch from clock_timestamp()) * 1000)::bigint + $7::bigint else 0 end) when $7::bigint is not null then (case when $7::bigint > 0 and secret_old <> '' then (extract(epoch from clock_timestamp()) * 1000)::bigint + $7::bigint else 0 end) else secret_old_until end, secret = coalesce($4::text, secret), types = coalesce($5::text, types), headers = coalesce($6::text, headers), concurrency = coalesce($8::int, concurrency), rate = coalesce($9::int, rate) where id = $1::int returning id");
     script = pg.parse_append(heap, script, "patch_address", "update endpoints set host = $2::text, port = $3::int where id = $1::int returning id");
     script = pg.parse_append(heap, script, "delete_endpoint", "with gone as (delete from endpoints where id = $1::int returning id) select id, setval('endpoint_ids', greatest(nextval('endpoint_ids'), id), true) from gone");
     script = pg.parse_append(heap, script, "schedules_due", "select id, expr, event_type, body, base, next_fire from schedules where enabled and next_fire <= $1::bigint order by next_fire, id limit 32");

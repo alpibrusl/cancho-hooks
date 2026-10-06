@@ -13,7 +13,7 @@ Settings come from a file (`--config`), from flags, or both (`design.md` section
 | `schedule` | `5000,300000,...` (nine delays, to a day) | retry delays in ms, comma separated; after the last, a dead letter |
 | `deadline-ms` | `2000` | how long one delivery attempt may take |
 | `window-ms` | `86400000` | how long an idempotency key is remembered |
-| `pg-host` | (none) | a PostgreSQL: the endpoints are read from it and the attempt history written to it; without it the endpoints are `endpoints.conf` and there is no history (`design.md` section 24) |
+| `pg-host` | (none) | a PostgreSQL: the endpoints are read from it and the attempt history written to it; without it the endpoints are `endpoints.conf` and there is no history (`design.md` section 24). An address, or a name: a name is resolved by the service (over TCP, to the name server of `dns-server` or the first of /etc/resolv.conf), without holding the loop, and looked up again after a lost connection or a dial that failed; a private address is allowed for it (`design.md` section 45) |
 | `pg-port`, `pg-user`, `pg-database`, `pg-password` | `5432`, `hooks`, `hooks`, none | how to reach it. Put a password in the settings file, not on the command line |
 | `pg-backoff-min-ms`, `pg-backoff-max-ms` | `100`, `5000` | the wait after a failed attempt to connect starts at the first (1 to 600,000) and doubles up to the second (1 to 3,600,000, not below the first); per connection (`design.md` section 37) |
 | `pg-attempt-ms` | `5000` | the longest one attempt (dial, login, prepare the statements) may take (1 to 600,000); a server that accepts and says nothing costs this much |
