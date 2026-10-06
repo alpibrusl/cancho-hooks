@@ -157,6 +157,7 @@ class Svc:
         env = dict(os.environ)
         if self.shim and os.path.exists(SHIM):
             env["LD_PRELOAD"] = SHIM
+        self.preloaded = env.get("LD_PRELOAD") == SHIM  # what `kill` asks before a power cut
         return env
 
     def start(self):
@@ -181,6 +182,7 @@ class Svc:
             self.proc.send_signal(signal.SIGKILL)
             self.proc.wait()
         if power:
+            power_cut_needs_shim(getattr(self, "preloaded", False))
             power_cut(self.datadir)
 
     def stop(self):
@@ -239,6 +241,16 @@ def cut_file(path):
             start = max(synced, keep - RNG.randint(1, 64))
             f.seek(start)
             f.write(bytes(keep - start))
+
+
+def power_cut_needs_shim(preloaded):
+    """A power cut cuts each file back to what its last fsync covered, which only the shim records (`<file>.synced`). Without it there is no
+    sidecar, every file reads as never flushed, and the cut takes flushed and acknowledged records too: the restart then refuses the logs (status 18,
+    `events.seg` shorter than what `delivery.seg` refers to) for a reason the service did not cause. So the harness refuses a power cut of a service
+    the shim was not loaded into. (The pure build's binary is in `pure/build`, and its shim was not there until `scripts/build.sh --pure` built it.)"""
+    if not preloaded:
+        raise SystemExit(f"retention_test: a power cut needs the fsync shim loaded into the service, and {SHIM} was not "
+                         "(scripts/build.sh builds it beside build/hooks, and scripts/build.sh --pure beside pure/build/hooks-pure)")
 
 
 def power_cut(datadir):

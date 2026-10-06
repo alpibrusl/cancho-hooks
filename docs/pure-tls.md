@@ -12,6 +12,12 @@ LEX_SYS=<compiler of lex-sys.toml> scripts/build.sh                 # the defaul
 LEX_SYS_PURE=<compiler of pure/lex-sys.toml> scripts/build.sh --pure   # pure/build/hooks-pure (needs nothing but the compiler)
 ```
 
+`--pure` also builds the tests' shims (`fsync_shim.so` and the others) into `pure/build`, if `gcc` is there: the harnesses look for them beside the binary they are given.
+*Corrected:* it did not, so `tests/retention_test.py pure/build/hooks-pure` made its power cuts without the fsync shim. Without `<file>.synced` a file reads as never
+flushed, the cut took flushed records of `events-N.seg`, and the restart refused the pair (status 18) for a reason the service did not cause; the same binary with the shim
+beside it passes, and `build/hooks` without its shim fails the same way. `retention_test.py` and `schedules_test.py` now refuse a power cut of a service the shim is not loaded
+into, and CI runs the `bounded` stage on the pure build.
+
 The two builds pin **different compilers**: the pure one needs `std.gcm`, `std.ecdh` and the packages, which are newer than the default's pin. It takes the same flags and
 settings as the default one. (A first version added `tls` to the one project file; that collided, because a project's libraries are built into *every* program of it, and
 lex-sys's `tls` package and this service's own OpenSSL module are both called `tls`. The pure build is a project of its own, `pure/lex-sys.toml`.)
