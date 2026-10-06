@@ -1,17 +1,14 @@
 {
-  "bounded": false,
-  "unbounded_by": [
-    "libc:prctl",
-    "libc:statx"
-  ],
+  "bounded": true,
+  "unbounded_by": [],
   "effects": [
     "args",
     "clock",
     "conn_accept",
     "conn_read",
     "conn_write",
+    "dir_read",
     "err_write",
-    "ffi",
     "file_read",
     "file_write",
     "fs_read",
@@ -50,14 +47,14 @@
       "bounded": true
     },
     {
-      "name": "err_write",
+      "name": "dir_read",
       "argument": null,
       "bounded": true
     },
     {
-      "name": "ffi",
-      "argument": "libc",
-      "bounded": false
+      "name": "err_write",
+      "argument": null,
+      "bounded": true
     },
     {
       "name": "file_read",
@@ -110,8 +107,5 @@
       "bounded": true
     }
   ],
-  "foreign_symbols": [
-    "prctl",
-    "statx"
-  ]
+  "foreign_symbols": []
 }

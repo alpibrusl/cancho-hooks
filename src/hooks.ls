@@ -40,7 +40,6 @@ import pg;
 import roster;
 import record;
 import attempt;
-import thp;
 import dbname;
 import crc;
 import idem;
@@ -5051,15 +5050,11 @@ fn start_tls[&f, &c](libssl: &f Ffi("libssl"), cafile: &c [byte]) -> [ffi("libss
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    // The only foreign authority the service holds, by library: libc (two functions: `statx`, for the modes of the data directory, `src/perm.ls`, the
-    // production profile only; `prctl`, once, to ask for small pages, `src/thp.ls`), libssl and libcrypto (the TLS client of an `https` endpoint, `src/tls.ls`). `scripts/check-authority.sh` pins the exact
-    // list of symbols. How it learns that it was asked to stop is not foreign: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`), made just before the loop.
-    let libc = narrow(ffi, "libc,libcrypto,libssl");
+    // The only foreign authority the service holds: libssl and libcrypto, the TLS client of an `https` endpoint (`src/tls.ls`); the pure build has none
+    // (`scripts/make_pure.py`). `scripts/check-authority.sh` pins the exact list of symbols. The modes of the data directory are lex-sys builtins
+    // (`src/perm.ls`), and how the service learns that it was asked to stop is not foreign either: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`).
+    let ssl = narrow(ffi, "libcrypto,libssl");
     let stop = narrow(signals, "INT,TERM");
-    // Small pages for the whole process, before the large zero-filled blocks are made (`src/thp.ls`, `docs/design.md` section 46).
-    borrow libc as &lt in {
-        thp.small_pages(lt);
-    }
     var fs = fs;
     var port = 0 - 1;
     var status = 2;
@@ -5152,16 +5147,15 @@ fn main(world: World) -> [] int {
         var go = bad == 0 && dir_len > 0;
         // The production profile (`docs/design.md` section 33): refuse to start, with a status for each cause, unless the settings are safe on the
         // internet (`config.production_status`) and the data directory and its files are private (`perm.files`). Nothing is opened before this.
-        let probe = alloc_slice[a](2304, byte_of(0));
+        // The name of the entry the production profile refused, if it did (`perm.files`).
+        let probe = alloc_slice[a](256, byte_of(0));
         if go && config.production(cfg) {
             var why = config.production_status(cfg, cblob);
             var which = 0;
             if why == 0 {
                 var found = (0, 0);
-                borrow libc as &lh in {
-                    borrow fs as &fs1 in {
-                        found = perm.files(lh, fs1, cblob[0..dir_len], probe);
-                    }
+                borrow fs as &fs1 in {
+                    found = perm.files(fs1, cblob[0..dir_len], probe);
                 }
                 why = found.0;
                 which = found.1;
@@ -5170,7 +5164,7 @@ fn main(world: World) -> [] int {
                 go = false;
                 status = why;
                 borrow mut io as &!i in {
-                    say_unsafe(i, why, cblob[0..dir_len], perm.name_of(which));
+                    say_unsafe(i, why, cblob[0..dir_len], probe[0..which]);
                 }
             }
         }
@@ -5367,14 +5361,11 @@ fn main(world: World) -> [] int {
                                                     }
                                                     if status == 0 && config.production(cfg) {
                                                         // The logs exist now, if this start made them: judge their modes too (a umask of 022 makes them 0644).
-                                                        var found = (0, 0);
-                                                        borrow libc as &lh in {
-                                                            found = perm.files(lh, evlog.lend(lw), dir_buf[0..dir_len], probe);
-                                                        }
+                                                        let found = perm.files(evlog.lend(lw), dir_buf[0..dir_len], probe);
                                                         if found.0 != 0 {
                                                             status = found.0;
                                                             borrow mut io as &!i in {
-                                                                say_unsafe(i, found.0, dir_buf[0..dir_len], perm.name_of(found.1));
+                                                                say_unsafe(i, found.0, dir_buf[0..dir_len], probe[0..found.1]);
                                                             }
                                                         }
                                                     }
@@ -5388,7 +5379,7 @@ fn main(world: World) -> [] int {
                                                     var tls_ctx = 0;
                                                     var ns = config.dns_server(cfg);
                                                     if status == 0 && !config.compact_now(cfg) {
-                                                        borrow libc as &lt in {
+                                                        borrow ssl as &lt in {
                                                             tls_ctx = start_tls(lt, cblob[config.ca_file_at()..config.ca_file_at() + config.ca_file_len(cfg)]);
                                                         }
                                                         if tls_ctx == 0 {
@@ -5484,7 +5475,7 @@ fn main(world: World) -> [] int {
                                                                                         borrow stop as &sr in {
                                                                                             match signals_watch(sr) {
                                                                                                 Watching::Ok(claim) => {
-                                                                                                    borrow libc as &lb in {
+                                                                                                    borrow ssl as &lb in {
                                                                                                         status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), lb, tls_ctx, ns, config.dns_port(cfg), config.tls_resume(cfg));
                                                                                                     }
                                                                                                 }
@@ -5510,7 +5501,7 @@ fn main(world: World) -> [] int {
                                                                 Listening::Failed(e) => {
                                                                     status = 11;
                                                                     log.close(dl);
-                                                                    borrow libc as &lt in {
+                                                                    borrow ssl as &lt in {
                                                                         tls.free_context(lt, tls_ctx);
                                                                     }
                                                                 }
@@ -5547,7 +5538,7 @@ fn main(world: World) -> [] int {
             }
         }
     }
-    release(libc);
+    release(ssl);
     release(stop);
     release(fs);
     release(net);

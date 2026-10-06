@@ -40,8 +40,8 @@ is unchanged and the history means the same under either build.
 | Session resumption | yes (`tls-resume`, one session per endpoint), TLS 1.3 and 1.2, a session reused by every connection that wants it | **TLS 1.3 only** (lex-sys `docs/tls-resumption.md`): one ticket per endpoint, **used once**, offered only for the same name, the same trust store, before the leaf expires and within an hour of the full handshake that verified the server. `tls-resume` and `/metrics` as for OpenSSL. *Corrected: this row said "none" before lex-sys#286 built it* |
 | The trust store | the system's, `SSL_CERT_FILE` and `SSL_CERT_DIR` honoured, or exactly `tls-ca-file` | `tls-ca-file`, or else the first of `/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/cert.pem`, `/etc/ssl/ca-bundle.pem` that holds a certificate. **The environment is not read**: lex-sys reads no environment variable without a foreign call. A bundle that fills the 2 MiB buffer is refused, never truncated. If nothing loads the service does not start (status 21), as before |
 | TLS 1.2 | the extended master secret optional | **required**: a receiver without it fails as `tls_handshake` (lex-sys `docs/tls-assurance.md` §4.1 lists this and five other differences on purpose) |
-| Foreign functions | 34 (`libc` 2, `libssl` and `libcrypto` 32) | **2** (`libc:prctl`, `libc:statx`) |
-| Linked libraries | libc, libssl, libcrypto | libc |
+| Foreign functions | 32 (`libssl` and `libcrypto`) | **0** |
+| Linked libraries | libc, libssl, libcrypto | libc (every program links it; nothing is called through `Ffi`) |
 
 ## Results
 
@@ -59,9 +59,8 @@ held at once (the longest wait of a request meanwhile 0.2 ms to 2.3 ms, on both)
 **The rest of the harness.** Fifteen harnesses that do not need a database (`names`, `attempt`, `retry`, `reason`, `saturation`, `stop`, `ready`, `gone`, `replay`, `breaker`,
 `layout`, `config`, `authz`, `isolation`, `scan`) were run against both builds: exit 0 and no failed check on each. The ones that need PostgreSQL were not run against the pure build here (CI has it).
 
-**Authority** (`scripts/check-authority.sh --pure`, pinned in `docs/authority-pure.json`): the foreign symbols go from **34 to 2**, 32 removed and none added; the only `ffi` scope left
-is `libc` (`statx` for the data directory's modes, `prctl` for small pages), the same two entries as the default build's. The effects are otherwise the same. The binary links no TLS library
-(`ldd pure/build/hooks-pure` shows none). The gate "no `Ffi` capability at all" cannot hold for the service as a whole, because of those two `libc` functions; this is the property that can be checked.
+**Authority** (`scripts/check-authority.sh --pure`, pinned in `docs/authority-pure.json`): the foreign symbols go from **32 to 0**, and the report is **`bounded: true`**: the service holds no `Ffi` capability at all. (When this page was written the count was 34 to 2: the two left were `libc:statx`, for the data directory's modes, and `libc:prctl`, for small pages. lex-sys's `dir_mode` and `dir_own_mode` (lex-sys#243) replaced the first, and the second went when the service stopped asking for small pages itself: design.md section 46.) The effects are otherwise the same, plus `dir_read`. The binary links no TLS library
+(`ldd pure/build/hooks-pure` shows none).
 
 **Cost** (`scripts/bench/https_cost.py`, the service pinned to one vCPU, the receivers on two others; 600 deliveries a row, 5 runs; CPU of the service per delivery, the median, with
 the least and the most; ECDSA P-256 certificates, TLS 1.3). The CPU time is read from `/proc` in clock ticks of 10 ms, so a figure has a resolution of about 17 µs:

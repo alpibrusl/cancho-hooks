@@ -37,6 +37,23 @@ SHIM = os.environ.get("FSYNC_SHIM", "build/fsync_shim.so")
 POWER_LOSS = os.path.exists(SHIM) and os.environ.get("POWER_LOSS", "1") == "1"
 
 
+def small_pages():
+    """Small pages for this process and every process it starts (`prctl(PR_SET_THP_DISABLE)`, inherited across `fork` and kept across `exec`).
+
+    The delivery state is a large zero-filled block that is resident only where it is written; with transparent huge pages set to `always` (CI's
+    runners) a first write makes a whole 2 MiB page resident, and the tests that measure memory would measure the host's page size. The service
+    no longer asks for small pages itself (that was its one call of `prctl` through `Ffi`, docs/design.md section 46), so the harness asks for its
+    children. Linux only; elsewhere, or on a kernel without the option, nothing changes."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(41, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+small_pages()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

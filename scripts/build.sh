@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the service: `lex-sys build` (the programs and libraries are in lex-sys.toml), then the three small shims the tests preload: `fsync`
-# for the crash tests (tests/fsync_shim.c), `statx` for the production profile's tests (tests/statx_shim.c) and `send`/`recv` for the partial-I/O tests (tests/io_shim.c).
+# for the crash tests (tests/fsync_shim.c), `fstat` and `fstatat` for the production profile's tests (tests/stat_shim.c) and `send`/`recv` for the partial-I/O tests (tests/io_shim.c).
 #
 #   LEX_SYS        the lex-sys compiler binary        (default: lex-sys on PATH)
 #   LEX_SYS_PURE   the compiler for `--pure`          (default: LEX_SYS; the pure build pins a newer one than the default build, `pure/lex-sys.toml`)
@@ -21,5 +21,5 @@ fi
 # libssl and libcrypto are linked in by the C compiler driver, because the project file has no linking options (scripts/cc-ssl.sh).
 (cd "$here" && CC="$here/scripts/cc-ssl.sh" "$LEX_SYS" build)
 gcc -shared -fPIC -O2 -o "$here/build/fsync_shim.so" "$here/tests/fsync_shim.c" -ldl
-gcc -shared -fPIC -O2 -o "$here/build/statx_shim.so" "$here/tests/statx_shim.c" -ldl
+gcc -shared -fPIC -O2 -o "$here/build/stat_shim.so" "$here/tests/stat_shim.c" -ldl
 gcc -shared -fPIC -O2 -o "$here/build/io_shim.so" "$here/tests/io_shim.c" -ldl
