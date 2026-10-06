@@ -93,10 +93,12 @@ fn test_every_route_has_its_scope_and_an_unknown_one_has_none() -> [] int {
     test.assert_eq(authz.scope_of(21), authz.s_admin());
     test.assert_eq(authz.scope_of(22), authz.s_admin());
     test.assert_eq(authz.scope_of(23), authz.s_admin());
+    // erasing one event (section 47.3) is the admin's
+    test.assert_eq(authz.scope_of(24), authz.s_admin());
     test.assert_eq(authz.scope_of(40), authz.s_open());
     test.assert_eq(authz.scope_of(41), authz.s_read());
     // a route that nobody gave a line to
-    test.assert_eq(authz.scope_of(24), authz.s_unscoped());
+    test.assert_eq(authz.scope_of(25), authz.s_unscoped());
     test.assert_eq(authz.scope_of(1000), authz.s_unscoped());
     test.assert_eq(authz.scope_of(0), authz.s_unscoped());
     return 0;

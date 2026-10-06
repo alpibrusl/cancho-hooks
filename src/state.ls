@@ -154,6 +154,13 @@ pub fn advanced() -> [] int {
     return 19;
 }
 
+// An event was erased (`docs/design.md` section 47.3): `event` is its id, the other fields 0. From then on it is final at every endpoint and never sent, replayed
+// or served; its body in the events log is replaced (`evlog.redact`). Replayed, it makes the event final in every window that holds it. A build that does not know
+// it refuses the log (status 15).
+pub fn erased() -> [] int {
+    return 20;
+}
+
 // How long a day is, in ms. The breaker counts days of failure in these and not in calendar days: "five days" is 432,000,000 ms.
 pub fn day_ms() -> [] int {
     return 86400000;
@@ -323,7 +330,7 @@ pub fn outcome_at[&b](buf: &b [byte], at: int) -> [] (int, int, int, int, int) {
         return (0, 0, 0, 0, 0);
     }
     let kind = record.get_u64(buf, p.2);
-    if kind < 1 || kind > 19 {
+    if kind < 1 || kind > 20 {
         return (0, 0, 0, 0, 0);
     }
     return (kind, record.get_u64(buf, p.2 + 8), record.get_u64(buf, p.2 + 16), record.get_u64(buf, p.2 + 24), record.get_u64(buf, p.2 + 32));
