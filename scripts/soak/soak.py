@@ -2,7 +2,7 @@
 """The soak test of lexsys-hooks (docs/soak.md): a long run of the real service under a steady stream, a mix of endpoints, and a seeded schedule of faults, with memory,
 descriptors, disk and the loop watched, and every acknowledged event followed to every receiver that should have it by two ledgers the service has no hand in.
 
-    python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out [--rate 40 --burst-rate 120 --endpoints 12]
+    python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out [--rate 40 --burst-rate 60 --endpoints 12]
     python3 scripts/soak/soak.py --resume soak-out                  # continue after the machine or the container was restarted
     python3 scripts/soak/soak.py --selftest [--selftest-mutants all]  # the harness against itself: clean must pass, a faulty one must fail
     python3 scripts/soak/soak.py --calibrate --binary build/hooks    # the rate this endpoint mix sustains (what --rate is a fraction of)
@@ -48,6 +48,11 @@ SERVICE_SETTINGS = ["--allow-private-hosts", "1", "--schedule", "500,1000,2000,4
 PROBLEM_PREFIX = {"A": "A", "B": "B", "C": "C", "D": "D", "E": "E", "F": "F", "I": "I", "J": "J", "K": "K", "L": "L"}
 
 
+# How long the saved state keeps an endpoint after it was retired: a resume needs the live ones, and a state that kept every endpoint ever made grew to 5.7 MB in nine hours
+# (about 100 ms to write, with the interpreter lock held, at every step).
+RETIRED_KEEP_S = 600.0
+
+
 class EpInfo:
     def __init__(self, label, idx, cls, types, port, tls=False, secrets=None, params=None):
         self.label, self.idx, self.cls, self.types, self.port, self.tls = label, idx, cls, list(types), port, tls
@@ -56,6 +61,7 @@ class EpInfo:
         self.svc_id = None
         self.c0 = None
         self.active = True
+        self.retired_at = 0.0       # when it was retired: the saved state forgets a retired endpoint after RETIRED_KEEP_S
         self.cursor = 0
 
     def spec(self):
@@ -264,6 +270,7 @@ class Run:
 
     def drop_endpoint(self, ep, keep_receiver=False):
         ep.active = False
+        ep.retired_at = time.time()
         if not keep_receiver:
             self.recv({"op": "remove", "label": ep.label})
         with self.vlock:
@@ -275,8 +282,8 @@ class Run:
             st = {"t": time.time(), "elapsed": self.elapsed(), "inc": self.svc.inc if self.svc else 0, "service_pid": self.svc.pid if self.svc else None,
                   "receivers_pid": self.receivers.pid if self.receivers else None, "probe_pid": self.probe.pid if self.probe else None, "n_next": self.poster.n_next if self.poster else 1,
                   "next_idx": self.next_idx, "port": self.port, "ctl_port": self.ctl_port, "cron": self.cron_ids, "dns": self.dns,
-                  "eps": {k: v.state() for k, v in self.eps.items()}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
-                  "settled": {k: self.verifier.by_label[k].settled for k in self.eps if k in self.verifier.by_label}, "kills": self.verifier.kills[-50:]}
+                  "eps": {k: v.state() for k, v in self.eps.items() if v.active or time.time() - v.retired_at < RETIRED_KEEP_S}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
+                  "settled": {k: self.verifier.by_label[k].settled for k, v in self.eps.items() if k in self.verifier.by_label and (v.active or time.time() - v.retired_at < RETIRED_KEEP_S)}, "kills": self.verifier.kills[-50:]}
             if self.poster:
                 st["poster_counts"] = dict(self.poster.counts)
                 st["bytes_ingested"] = self.poster.bytes_ingested
@@ -701,7 +708,7 @@ class Run:
         rows = self.watcher.rows[-1:] if self.watcher and self.watcher.rows else []
         r = rows[0] if rows else {}
         print(f"[{self.elapsed():7.0f}s/{self.duration:.0f}s] inc {self.svc.inc} acked {self.poster.counts['acked']} rate {r.get('ingest_per_s', '')}/s lag_max {r.get('lag_max', '')} rss {r.get('rss_kb', '')} "
-              f"fds {r.get('fds', '')} kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}",
+              f"fds {r.get('fds', '')} rcv {r.get('receivers_cpu_pct', '')}% kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}",
               flush=True)
 
     # ---- the end
@@ -916,7 +923,14 @@ class Run:
             reasons.append(f"the harness used {sum(hcpu) / len(hcpu):.0f} % of a core on average")
         if over > 0.1:
             reasons.append(f"the load average was above the {cores} cores in {over * 100:.0f} % of the samples")
-        valid = {"valid": not reasons, "reasons": reasons, "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
+        rcv = [float(r["receivers_cpu_pct"]) for r in rows if r.get("receivers_cpu_pct") not in (None, "")]
+        lag = [float(r["recv_loop_lag_max_ms"]) for r in rows if r.get("recv_loop_lag_max_ms") not in (None, "")]
+        rcv_over = sum(1 for x in rcv if x > 85) / len(rcv) if rcv else 0.0
+        lag_over = sum(1 for x in lag if x > 250) / len(lag) if lag else 0.0
+        if rcv_over > 0.05 or lag_over > 0.05:
+            reasons.append(f"the receivers' process was above 85 % of a core in {rcv_over * 100:.0f} % of the samples and its loop was late by more than 250 ms in {lag_over * 100:.0f} %: "
+                           "a receiver that answers late is a failed attempt to the service, so the lag, the repeats and the late deliveries that follow are the harness's")
+        valid = {"valid": not reasons, "reasons": reasons, "receivers_over_85_fraction": round(rcv_over, 3), "receivers_loop_late_fraction": round(lag_over, 3), "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
                  "loadavg_over_cores_fraction": round(over, 3), "cores": cores}
         failed = [r["id"] for r in results if r["ok"] is False]
         status = "FAIL" if failed else "PASS"
@@ -938,7 +952,7 @@ def parse(argv):
     p.add_argument("--duration-s", type=float, default=0.0, help="seconds, for a short run (replaces --hours)")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--rate", type=float, default=40.0, help="events a second in the steady phases (what the service sustains between restarts is in docs/capacity.md; what it sustains across them, docs/soak.md section 8)")
-    p.add_argument("--burst-rate", type=float, default=120.0, help="events a second in a burst (about the capacity of the mix: see --calibrate)")
+    p.add_argument("--burst-rate", type=float, default=60.0, help="events a second in a burst (1.5 times the rate: the receivers are one process and need headroom, see --calibrate and docs/soak.md)")
     p.add_argument("--endpoints", type=int, default=12, help="long-lived endpoints, the classes of docs/soak.md in order (this and --churn together at most --endpoint-limit)")
     p.add_argument("--endpoint-limit", type=int, default=EP_MAX, help="the most endpoints the service takes (62 in the build the soak was designed on; give the limit of yours)")
     p.add_argument("--churn", type=int, default=3, help="threads that create, change and delete endpoints")
@@ -1017,6 +1031,9 @@ def run_main(a):
     atexit.register(lambda: [p.kill() for p in (run.receivers, run.probe, run.svc.proc if run.svc else None) if p and p.poll() is None])
     signal.signal(signal.SIGTERM, lambda *_: run.stop.set())
     run.setup()
+    # `kill -USR1 <pid>` writes the stack of every thread to <out>/stacks.txt: what a thread that spins is doing, without stopping the run.
+    import faulthandler
+    faulthandler.register(signal.SIGUSR1, file=open(os.path.join(run.out, "stacks.txt"), "a"), all_threads=True)
     run.start_workload()
     print(f"soak: {run.duration:.0f} s, seed {a.seed}, rate {a.rate}/s (burst {a.burst_rate}/s), {a.endpoints} endpoints, out {run.out}; service pinned to {sorted(run.service_cpus or [])}, "
           f"harness to {sorted(run.harness_cpus or [])}", flush=True)
