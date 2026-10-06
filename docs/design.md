@@ -1843,7 +1843,7 @@ endpoint (a per-name allow-list would be the next piece, and is not built). It d
 **The service does not keep connections.** Every attempt dials, sends the request with `Connection: close`, reads the status line, and closes: 1 connection a delivery, today as before this change (the
 receiver of the tests counts them). With `https` that is a TLS handshake a delivery: 0.65 ms of CPU in the spike's measurement, about 0.9 ms here. Keeping the connection open per endpoint
 (a request on an established session costs 0.01 ms) would remove it and is a larger change than this one (a pool in the table, deadlines for an idle connection, what a retry means when the connection
-was closed by the receiver, and the retry accounting): not built.
+was closed by the receiver, and the retry accounting): not built. *Since then: designed in section 53, with its open questions.*
 
 **What is built is resumption.** After the status line of an attempt over TLS, the connection's session (the ticket of TLS 1.3, or the session of 1.2) is kept for the endpoint (`attempt.keep_session`);
 the next attempt to the endpoint offers it, and the handshake is an abbreviated one if the receiver still accepts it (a receiver that does not, because it restarted or the ticket expired, gets a full handshake
@@ -2359,3 +2359,78 @@ Nothing here needed a foreign function, and no workaround for a gap was written 
 **What is not done.** The gate does not read the declaration: `authz.scope_of` is the table, and the declaration's `secure` is documentation that a test holds to it. Deriving the table from the declaration needs a way to ask it who may call an operation; `lexsys-web` has one in a change that is not merged (`web.requirements`, `web.requirement`, `web.is_open`, tested; lexsys-web#17) and hooks does not use it, because a gate that reads it makes the order of `api.declare` and every `require` call part of the service's security, and the table with its matrix is what has been tested to be right. It would be straightforward here (the scope is the first alternative's name, or open), and it is the next stage. There is no `GET /openapi.json`: a new open route would need a line in the table and its own tests, and the document is on the product's site next to the page; the checked-in file is the one place it is read from. The container image was not rebuilt (it needs `COPY tools`, which the Dockerfile now has).
 
 **What it cost.** The binary is 946 KB, 134 KB (16%) more than before (811 KB): the declaration layer, the schema nodes and the text of every description are in it, and `routes()` builds them at start. Resident memory after the retention test's 60,000 events is 9.1 MB against 8.8 MB. The per-request path is the same `std.route` lookup: five alternated rounds on the same machine (a 6-core arm64 Linux VM under Docker, `scripts/bench/run.py`, quiet) give the CPU per event of ingest on 64 connections of 4 us before and after (50,000 events), 6 us for one endpoint (20,000) with 26 to 28 us per delivery either way, and for ten endpoints 20 to 21 us per delivery either way; the ingest phase of the ten-endpoint run (5,000 events) is 14 us before and 16 us after, which is about 10 ms in an 80 ms window and appeared in none of the larger runs. It was not run down further.
+
+## 53. Keeping connections open to an endpoint (design, not built)
+
+*Status: a design; its open questions (53.9) answered as proposed (2026-10-06), not yet built. Its claims are measured where it says so and arithmetic from measured parts where it says that; the build measures each and corrects this section in place.*
+
+### 53.1 Why
+
+Every attempt dials, sends the request with `Connection: close`, reads the status line and closes (40.6). Over `https` that is a TLS handshake a delivery, and the handshake is now nearly all of a delivery's cost:
+
+| A delivery, the service's CPU (`scripts/bench/https_cost.py`, docs/pure-tls.md) | OpenSSL build | pure build |
+|---|---|---|
+| `http`, a name, a new TCP connection | 117 / 33 µs (1 / 10 endpoints) | the same |
+| `https`, a full handshake | 700 / 400 µs | 2,950 / 2,900 µs |
+| `https`, resumed (pure: a pool of tickets, lex-sys#310) | 250 / 200 µs | 1,400 / 1,350 µs |
+
+The pure build's resumed delivery is still six times OpenSSL's, and what is left of it is not the record cipher (lex-sys's AES-GCM is now on the CPU's instructions, lex-sys#334) but the handshake's public-key arithmetic: one X25519 exchange per resumption, about 0.55 ms on the Apple M4, and two ECDSA verifications per full handshake, about 0.8 ms each. Making those faster is arithmetic work in lex-sys. Not doing them is this section.
+
+**What a kept connection would cost, as arithmetic:** a plain-`http` delivery is 26 to 28 µs of the service's CPU for one endpoint with a new TCP connection each time (52, `scripts/bench/run.py`); on a kept TLS connection a delivery is that, less the connect and close, plus sealing one request record and opening one response record (a few µs for a few hundred bytes on the hardware path, lex-sys#334). That puts a kept `https` delivery at **about 30 to 40 µs on either build**, against 1,400 (pure, resumed) and 250 (OpenSSL, resumed). Not measured; 53.8's first gate measures it.
+
+It also removes, per delivery: a TCP handshake and a TLS round trip from the receiver's latency, a connection the receiver must accept, and the TIME_WAIT socket the service leaves behind.
+
+### 53.2 What changes on the wire
+
+- **The request** no longer says `Connection: close`. HTTP/1.1 connections persist unless one side says otherwise (RFC 9112 §9.3).
+- **The response is read to its end**, not only to the status line. Reading only the status line, as today, leaves the rest of the response in the socket, and a connection with unread bytes cannot carry the next request. The **outcome is still decided at the status line**, exactly as today (delivered on `2xx`, the reasons of 41 otherwise): what follows only decides whether the connection is kept.
+- **What makes a connection reusable**, read strictly, because the client must not be the weak side of the framing (the rule the MCP client already follows, 51): an `HTTP/1.1` status line; headers within 8 KiB; no `Connection: close`; and a body framed by **exactly one** of a `Content-Length` (one value, digits only) or `Transfer-Encoding: chunked` (exactly that; no extensions honoured, trailers skipped), of at most 64 KiB; or no body (`204`, `304`, `1xx` is not expected and closes). Anything else (HTTP/1.0, a body ended by closing, two lengths, a length and `chunked`, more than 64 KiB, a header block too long) **closes the connection after the outcome**, which is today's behaviour, so a receiver that does something unusual is delivered to exactly as now, only without reuse.
+- **The body is discarded as it is read**; nothing of it is kept or logged (`docs/privacy.md` is unchanged). Reading it is bounded by its own deadline (the attempt's deadline, 41's `deadline-ms`); a body that stalls closes the connection and does **not** change the outcome, which the status line already decided.
+
+### 53.3 The pool
+
+- **Keyed by endpoint slot, and by the name, port, scheme and address** the connection was made to (the key `attempt.keep_session` already uses for sessions, plus the address), so a connection is never given to another endpoint, or to the same endpoint after its host changed.
+- **Per endpoint, at most as many idle connections as it may have attempts in flight** (`epx.max_concurrency()`, 8, or the endpoint's own `concurrency`): a burst finds a connection for each attempt, as it finds a ticket for each since lex-sys#310.
+- **In the attempt table, not beside it.** An idle connection keeps its slot of `std.conns` and, over TLS, its TLS state: in the OpenSSL build an `SSL`, in the pure build its slot of the engine (a slot of the 64 the engine has, `attempt.slots()`). So **idle connections and attempts share the 64 slots**. A new attempt that finds no free slot closes the **least recently used idle** connection of *another* endpoint first, and only then waits as today: the pool may never refuse a delivery a slot that the service without a pool would have given it.
+- **Watched while idle** for readable on the server's poller, as attempts are: a receiver that closes an idle connection (FIN or RST), or sends bytes nobody asked for, has that connection closed at once.
+- **Bounded in time:** an idle connection is closed after **30 s** idle (below nginx's default keep-alive timeout of 75 s; Go's `net/http` server has none unless one is set; Node.js's default of 5 s is below it, and 53.4 is what makes that safe), and any connection after **5 minutes** or **1,000 requests**, whichever comes first. So a change of the name's address is honoured within 5 minutes, no connection lives for ever, and a TLS verification is relied on for at most 5 minutes after it was made (lex-sys's resumption relies on one for an hour, its `docs/tls-resumption.md` §3 rule 4). Closing at the certificate's `notAfter` as well would need a new libssl call in the OpenSSL build (its authority report would change), so the 5 minutes are the bound instead.
+
+### 53.4 A connection the receiver closed: the race
+
+A receiver may close an idle connection at the moment the service sends on it. The service then sees its write fail, or an end of the connection or a reset **before any byte of a response**. That is not the receiver failing a delivery: it is the connection being gone. So:
+
+- **On a reused connection only**, a failure before the first byte of the response is **retried at once on a new connection, once**, and not counted as an attempt (no retry delay, no breaker, no reason row). On a new connection the same failure is what it is today (`reset`, `closed_early`).
+- **This can deliver an event twice**: the receiver may have read the request and processed it, then closed without answering. Webhooks here are at-least-once already (the receiver dedupes on `webhook-id`; a `2xx` the service did not see is retried today), so this adds a case to an existing contract rather than a new one. RFC 9110 §9.2.2 allows a client to retry a non-idempotent request automatically when it knows the request is idempotent by other means; the `webhook-id` is that means. **53.9 question 2 asks whether this is acceptable**, and the other answer is in it.
+
+### 53.5 What drops the pool
+
+Everything that drops a session today (40.6) also closes that endpoint's connections: a `PATCH` of anything, a `DELETE`, disabling (a `410`, 34), and `tls-resume 0`'s counterpart, a new setting **`keep-alive 0`** (default on), which makes the service behave exactly as today. A change of the trust store (none happens at run time) would too. The pool is in memory only: a restart starts empty, and the `advanced` record (42) and the cursors are untouched.
+
+### 53.6 What does not change
+
+The outcome of an attempt and its reason; the order of deliveries; the retry schedule; the breaker; the per-endpoint concurrency and rate limits (a kept connection is a slot used, not a new allowance); the SSRF rule (checked when a connection is made; a kept connection is to an address that passed it, for at most 5 minutes); signatures (each request is signed, as now); the TLS verification of a new connection. Resumption stays, for the connections that are new.
+
+### 53.7 Both builds
+
+The change is in `src/attempt.ls` (states *draining* and *idle*, the pool, the eviction, the retry of 53.4) and the request in `hooks.ls`; the TLS module of each build gains nothing but a way to send a second request on an established connection, which both already have (`tls.send` after `established`). It applies to `http` endpoints too.
+
+### 53.8 Gates, stated before the numbers
+
+- **Cost:** new rows of `scripts/bench/https_cost.py`, `https, kept` and `http, kept`, for 1 and 10 endpoints on both builds; the 30 to 40 µs of 53.1 is checked and corrected here. **Connections:** the receiver of the tests counts connections; for 1,000 deliveries to one endpoint at a steady rate, at most 8 + 1,000 / 1,000 connections.
+- **Tests, a new `tests/keepalive_test.py`**, each with its control: deliveries reuse a connection (counted at the receiver); a receiver answering `Connection: close` is honoured, delivered to and not reused; each framing of 53.2 is reused and each other one closed, delivered to either way; a body over 64 KiB, and one that stalls, close the connection and keep the outcome; a receiver closing idle connections after 1 s (Node.js's shape) loses no delivery and counts no failure; **the race of 53.4**, a receiver that closes a kept connection just as a request arrives, delivered once (or twice, counted, if it read it), never failed; a `PATCH`, a `DELETE`, a `410` and `keep-alive 0` each make the next delivery a new connection; 64 idle connections never refuse a new endpoint a slot (53.3); `kill -9` with connections open loses nothing; the idle and lifetime bounds close what they say. The existing suites pass unchanged on both builds, `sessions_test.py` and `https_both.py` included.
+- **Mutants** of the new states (the reuse test, the framing checks, the eviction, the retry of 53.4, each bound), each killed or argued, as the attempt machinery's first eight were (16).
+- **Memory:** idle connections are within the 64 slots, so no new bound; `tests/leak_test.py` and `sessions_test.py`'s memory checks pass.
+- **The soak (`docs/soak.md`)** on both builds with keep-alive on, before it is the default.
+
+### 53.9 Open questions, for a person
+
+*Decided: all four as proposed (2026-10-06).*
+
+1. **On by default?** *Proposed: yes, with `keep-alive 0` to turn it off*, once 53.8's gates pass; the saving is a TLS handshake per delivery on every `https` endpoint.
+2. **The automatic retry of 53.4.** *Proposed: retry once, at once, on a new connection, only when the connection was reused and no byte of a response came*, accepting that a receiver which processed the request and closed without answering gets it twice (at-least-once, deduped on `webhook-id`). The other answer is to count it as a failed attempt and let the retry schedule redeliver, which delays that delivery by the first retry delay and adds a failure the receiver did not cause.
+3. **The bounds of 53.3** (30 s idle, 5 minutes, 1,000 requests, 8 idle per endpoint, 64 KiB of body, 8 KiB of headers). *Proposed as written*, each a setting only if an operator asks.
+4. **Pipelining.** *Proposed: no*, one request at a time on a connection, as RFC 9112 §9.3.2 allows; HTTP/2 is not considered.
+
+### 53.10 Not done here
+
+The code. The pin of the pure build's lex-sys to a commit with the hardware AES (lex-sys#334): a separate change, which lowers the record cost of 53.1 but not the handshake this section removes. Making X25519 and ECDSA faster in lex-sys (the other half of the gap to OpenSSL).
