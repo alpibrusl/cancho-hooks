@@ -8,6 +8,8 @@
 #   scripts/check-authority.sh             compare; exit 0 if the report is the committed one, 1 (and show the diff) if not
 #   scripts/check-authority.sh --update    write docs/authority.json (after reading what changed)
 #   scripts/check-authority.sh --pure      the same for the build with lex-sys's own TLS: docs/authority-pure.json (`--update` writes it)
+#   scripts/check-authority.sh --mcp       the same for `hooks-mcp` (tools/mcp.ls, no libraries): docs/authority-mcp.json. It has no foreign function and no `ffi` capability; this is
+#                                          the pin that says so (docs/design.md section 51)
 #
 #   LEX_SYS   the lex-sys compiler binary        (default: lex-sys on PATH; the commit lex-sys.toml pins)
 #
@@ -27,7 +29,8 @@ for arg in "$@"; do
   case "$arg" in
     --update) mode=update ;;
     --pure) variant=pure ;;
-    *) echo "usage: $0 [--update] [--pure]" >&2; exit 2 ;;
+    --mcp) variant=mcp ;;
+    *) echo "usage: $0 [--update] [--pure | --mcp]" >&2; exit 2 ;;
   esac
 done
 
@@ -37,6 +40,10 @@ if [ "$variant" = pure ]; then
   bin=hooks-pure
   pinned=$here/docs/authority-pure.json
   python3 "$here/scripts/make_pure.py" >&2
+elif [ "$variant" = mcp ]; then
+  project=$here
+  bin=hooks-mcp
+  pinned=$here/docs/authority-mcp.json
 else
   project=$here
   bin=hooks
@@ -50,7 +57,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # The files of the program, as `lex-sys build` would be given them: the bin's sources (a directory is its .ls files), then the libraries.
-python3 - "$project" "$bin" > "$work/files" <<'PY'
+python3 - "$project" "$bin" "$variant" > "$work/files" <<'PY'
 import glob, os, sys, tomllib
 here = sys.argv[1]
 project = tomllib.load(open(os.path.join(here, "lex-sys.toml"), "rb"))
@@ -64,7 +71,9 @@ for source in bins[0]["sources"]:
         files += sorted(glob.glob(os.path.join(path, "**", "*.ls"), recursive=True))
     else:
         files.append(path)
-files += sorted(glob.glob(os.path.join(here, "build", "deps", "*.ls")))
+if sys.argv[3] != "mcp":
+    # `hooks-mcp` has no libraries: its sources are one file of its own, and what it reaches is the standard library's
+    files += sorted(glob.glob(os.path.join(here, "build", "deps", "*.ls")))
 for f in files:
     print(os.path.relpath(f, here))
 PY
@@ -90,7 +99,7 @@ if [ "$mode" = update ]; then
 fi
 
 if [ ! -f "$pinned" ]; then
-  echo "check-authority: ${pinned#"$here"/} does not exist; run scripts/check-authority.sh --update${variant:+ }$([ "$variant" = pure ] && echo --pure) and commit it" >&2
+  echo "check-authority: ${pinned#"$here"/} does not exist; run scripts/check-authority.sh --update${variant:+ }$([ "$variant" = pure ] && echo --pure)$([ "$variant" = mcp ] && echo --mcp) and commit it" >&2
   exit 1
 fi
 if diff -u "$pinned" "$work/report.json" > "$work/diff"; then
@@ -100,6 +109,6 @@ fi
 cat "$work/diff"
 echo >&2
 echo "check-authority: the authority report changed. If the new foreign call or capability is intended, read the diff above, run" >&2
-echo "  scripts/check-authority.sh --update$([ "$variant" = pure ] && echo " --pure")" >&2
+echo "  scripts/check-authority.sh --update$([ "$variant" = pure ] && echo " --pure")$([ "$variant" = mcp ] && echo " --mcp")" >&2
 echo "and commit ${pinned#"$here"/}: that commit is the approval." >&2
 exit 1

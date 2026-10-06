@@ -7,6 +7,7 @@
 The tree (without .git) is copied to a temporary directory and built there. For each mutant of the file named (a list `MUTANTS` of `(id, file, old, new, [test sets])`): the text `old`, which
 must occur exactly once in `file`, is replaced by `new`; the service is built; the test sets are run in order until one fails (the mutant is killed) or all pass (it survives); the file
 is restored and compared byte for byte with what it was (`filecmp`, a mutant never stays on disk). A mutant that does not compile is reported as that (the checker killed it).
+A mutants file may name its own build (`BUILD = [...]`, where `{LEX}` is the compiler): `tests/mutants/mcp.py` rebuilds only `hooks-mcp` and runs `tests/mcp_test.py` with the service that is already in `build/`.
 Test sets: unit (`lex-sys test`), https, names, sessions, api, ssrf, reason, metrics, config, patch, slots, delete, ... (the `tests/*_test.py` of those names), many (all stages of
 `tests/many_test.py`) and many:<stage> (one).
 """
@@ -34,13 +35,16 @@ for name in os.listdir(here):
 env = dict(os.environ, LEX_SYS=lex)
 PURE = os.environ.get("PURE") == "1"
 BUILD = ["scripts/build.sh", "--pure"] if PURE else ["scripts/build.sh"]
+BUILD = [w.replace("{LEX}", lex) for w in namespace.get("BUILD", BUILD)]
 BIN = "pure/build/hooks-pure" if PURE else "build/hooks"
 TESTS = {"unit": [lex, "test"]}
-for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation", "pure"):
+for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation", "pure", "mcp"):
     TESTS[name] = ["python3", f"tests/{'https_api' if name == 'api' else name}_test.py", BIN]
 if PURE:
     # `tests/https_test.py` always fails on the pure build (the check that SSL_CERT_FILE is honoured, which it is not), so a failure of it is no sign of a mutant killed.
     TESTS["https"] = ["python3", "scripts/https_both.py", "--check-pure", BIN]
+# the first check that fails is the verdict (and the test says so at once, instead of finishing its minutes)
+TESTS["mcp"] = ["env", "FAIL_FAST=1", "python3", "tests/mcp_test.py", BIN]
 # the stages of tests/many_test.py (design section 41): "many:flags" runs only that stage, "many" all of them
 TESTS["many"] = ["python3", "tests/many_test.py", BIN]
 for stage in ("limit", "chaos", "flags", "replay", "quiet", "retention", "compactnow", "pool", "formats"):
