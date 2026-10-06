@@ -5,7 +5,7 @@
 #
 # It builds with `lex-sys build` (which refuses any compiler but the commit lex-sys.toml pins), then writes into --out (default dist/<name>/):
 #
-#   hooks-<version>-<arch>.tar.gz          bin/hooks, deploy/ (unit, settings sample, health check), scripts/ (backup, restore, logcheck),
+#   hooks-<version>-<arch>.tar.gz          bin/hooks, bin/hooks-mcp, deploy/ (unit, settings sample, health check), scripts/ (backup, restore, logcheck),
 #                                          sql/schema.sql, docs/, README.md, LICENSE, Dockerfile, SBOM.json
 #   hooks-<version>-<arch>.sbom.json       the same SBOM, beside the tarball
 #   SHA256SUMS                             of both files (`sha256sum -c SHA256SUMS`)
@@ -70,19 +70,22 @@ trap 'rm -rf "$stage"' EXIT
 root="$stage/$name"
 mkdir -p "$root/bin" "$root/deploy" "$root/scripts" "$root/sql" "$root/docs"
 cp "$here/build/hooks" "$root/bin/hooks"
+# The MCP server for agents (docs/agents.md) is a second program of the same project, built by the same `lex-sys build`.
+[ -x "$here/build/hooks-mcp" ] || die 3 "build/hooks-mcp does not exist: build first, or drop --no-build"
+cp "$here/build/hooks-mcp" "$root/bin/hooks-mcp"
 # What the compiler leaves in the binary that differs between two builds of the same sources is a temporary file's name with a process id
 # (a FILE symbol, `lex-sys-llvm-<pid>-0.ll`) and, in turn, the build-id note that hashes it. Without them the binary is bit-for-bit the same
 # from build to build (measured: docs/runbook.md "Releases"), so that is what is shipped. --keep-symbols ships what the compiler wrote.
 if [ "$strip_it" = 1 ]; then
   command -v strip >/dev/null || die 2 "strip is needed (binutils), or --keep-symbols"
-  strip --strip-all --remove-section=.note.gnu.build-id "$root/bin/hooks"
+  strip --strip-all --remove-section=.note.gnu.build-id "$root/bin/hooks" "$root/bin/hooks-mcp"
 fi
 cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy/hooks.docker.conf "$here"/deploy/hooks-healthcheck.sh "$here"/deploy/hooks-entrypoint.sh "$root/deploy/"
 cp "$here"/scripts/backup.sh "$here"/scripts/restore.sh "$here"/scripts/logcheck.py "$here"/scripts/release.sh "$root/scripts/"
 cp "$here"/sql/schema.sql "$here"/sql/queries.sql "$root/sql/"
 cp "$here"/docs/runbook.md "$here"/docs/design.md "$here"/docs/production.md "$root/docs/"
 cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/lex-sys.toml "$root/"
-chmod 0755 "$root/bin/hooks" "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
+chmod 0755 "$root/bin/hooks" "$root/bin/hooks-mcp" "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
 
 # The SBOM stub: read from the tools, and honest about what it does not list.
 python3 - "$here" "$root" "$name" "$version" "$commit" "$dirty" "${LEX_SYS:-}" "$strip_it" <<'PY' > "$out/$name.sbom.json"
@@ -159,6 +162,10 @@ sbom = {
                                   "sources on the same toolchain are byte-identical" if stripped == "1" else "no: as the compiler wrote it, with symbols")},
         "lex_sys_toml_sha256": sha256(os.path.join(here, "lex-sys.toml")),
     },
+    "other_binaries": [
+        {"path": "bin/hooks-mcp", "sha256": sha256(os.path.join(root, "bin", "hooks-mcp")), "bytes": os.path.getsize(os.path.join(root, "bin", "hooks-mcp")),
+         "what": "the MCP server for agents (docs/agents.md): no foreign function, authority pinned in docs/authority-mcp.json"},
+    ],
     "compiler": compiler,
     "std": std,
     "lex_sys_libraries_pinned_by_commit": libraries,
