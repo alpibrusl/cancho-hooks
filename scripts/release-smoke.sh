@@ -23,10 +23,11 @@ fail() { echo "release-smoke: FAIL: $*" >&2; exit 1; }
 # 2. the tarball holds what it says
 tar -xzf "$tarball" -C "$work"
 root=$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-for f in bin/hooks deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
+for f in bin/hooks bin/hooks-mcp deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
   [ -e "$root/$f" ] || fail "the tarball has no $f"
 done
 [ -x "$root/bin/hooks" ] || fail "bin/hooks is not executable"
+[ -x "$root/bin/hooks-mcp" ] || fail "bin/hooks-mcp is not executable"
 
 # 3. it runs: start, post, read back
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
@@ -47,6 +48,17 @@ grep -q '"id":1' "$work/post.json" || fail "the first event did not get id 1: $(
 code=$(curl -sS -o "$work/get.json" -w '%{http_code}' "http://127.0.0.1:$port/events/1")
 [ "$code" = 200 ] || fail "GET /events/1 answered $code"
 grep -q 'smoke.test' "$work/get.json" || fail "the event read back is not the one posted: $(cat "$work/get.json")"
+
+# 3b. the MCP server answers a handshake against it, and offers only the read tools
+mcp_in='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hooks_get_event","arguments":{"event_id":1}}}'
+mcp_out=$(printf '%s\n' "$mcp_in" | "$root/bin/hooks-mcp" --url "http://127.0.0.1:$port") || fail "hooks-mcp did not exit 0 at the end of its input"
+echo "$mcp_out" | grep -q '"protocolVersion"' || fail "hooks-mcp did not answer initialize: $mcp_out"
+echo "$mcp_out" | grep -q 'hooks_get_event' || fail "hooks-mcp did not list its tools: $mcp_out"
+if echo "$mcp_out" | grep -q 'hooks_post_event'; then fail "hooks-mcp lists a write tool without --allow-write"; fi
+echo "$mcp_out" | grep -q 'smoke.test' || fail "hooks-mcp did not read back the event: $mcp_out"
 
 # 4. and it stops when told
 kill -TERM "$pid"

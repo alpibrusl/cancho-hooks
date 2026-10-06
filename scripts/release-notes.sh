@@ -23,7 +23,7 @@ cat <<TEXT
 
 | file | |
 |---|---|
-| \`hooks-${version}-linux-x86_64.tar.gz\`, \`hooks-${version}-linux-aarch64.tar.gz\` | the service (\`bin/hooks\`), the unit file, backup and restore scripts, the SQL schema, the documents, the Dockerfile |
+| \`hooks-${version}-linux-x86_64.tar.gz\`, \`hooks-${version}-linux-aarch64.tar.gz\` | the service (\`bin/hooks\`), the MCP server for agents (\`bin/hooks-mcp\`, [docs/agents.md](https://github.com/${repo}/blob/main/docs/agents.md)), the unit file, backup and restore scripts, the SQL schema, the documents, the Dockerfile |
 | \`*.sbom.json\` | a listing of what the build used, read from the tools. It is not CycloneDX or SPDX and no scanner has checked it |
 | \`SHA256SUMS\` | the checksum of each file above |
 
