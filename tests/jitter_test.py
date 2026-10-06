@@ -8,7 +8,7 @@ writes to `delivery.seg` with each failed attempt (kind 2, its fifth field), rea
 
   1. the delay is the schedule's moved by up to `retry-jitter` percent either way: with 400 events failing at the same moment and a delay of 2,000 ms at 20 percent
      (`--retry-jitter 20`), every recorded delay is within 1,600 to 2,400 ms, their mean is the schedule's delay (within 2 percent), and they fall in every tenth
-     of the range (none of the ten holds a third of them, none is empty); and the second attempt of each event arrives at the time the record says, not before it
+     of the range (none of the ten holds a third of them, none is empty); and the second attempt of each event arrives at the time the record says, not before it and (but for a stall of the receiver: at most 1 percent more than 400 ms late, none more than 1,500 ms) not after it
   2. `--retry-jitter 0` is the schedule exactly: every delay is 2,000 ms (within the 30 ms that the receiver's clock and the loop's turn add), the same as a
      service that was never given the setting did before it existed; the default (10 percent, no flag) stays within 1,800 to 2,200 and does spread
   3. it is a function of the endpoint, the event and the attempt and nothing else: two services started apart, with the same endpoint id and the same events, give each
@@ -155,8 +155,12 @@ def main():
     check("1. the spread is wide: the standard deviation is near a uniform range's (231 ms)", 180 <= statistics.pstdev(vals) <= 280, f"{statistics.pstdev(vals):.0f}")
     rec = failed_records(d)
     early = [n for n in events if sink.seen(n)[1] < rec[(2, n, 1)] - 3]
+    # The receiver is a Python thread on a runner that other jobs share: it can stall for a moment, and on CI two of 400 arrived more than 400 ms late once. A service whose
+    # retries ran a loop's turn late would make most events late, not one in a hundred, so: none early, at most 1 percent more than 400 ms late, none more than 1,500 ms late.
     late = [n for n in events if sink.seen(n)[1] > rec[(2, n, 1)] + 400]
-    check("1. the second attempt of every event arrives at the time recorded: none early, none a loop's turn late", not early and not late, str((early[:5], late[:5])))
+    very_late = [n for n in events if sink.seen(n)[1] > rec[(2, n, 1)] + 1500]
+    check("1. the second attempt of every event arrives at the time recorded: none early, at most 1 percent more than 400 ms late, none more than 1,500 ms late",
+          not early and len(late) <= len(events) // 100 and not very_late, str((early[:5], len(late), late[:5], very_late[:5])))
     stop(svc, d)
     sink.close()
 
