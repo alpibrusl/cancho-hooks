@@ -15,6 +15,7 @@ on:
       - "scripts/release-smoke.sh"
       - "scripts/release-notes.sh"
       - "Dockerfile"
+      - ".dockerignore"
       - "deploy/**"
       - "lex-sys.toml"
   workflow_dispatch:
