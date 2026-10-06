@@ -65,9 +65,13 @@ def run(max_age_ms):
     svc = L.Service(BIN, d, args)
     svc.start(timeout=30)
     pad = "x" * 400
-    for n in range(2000):
+    # The replay is asked for after the first events, not after all 2000: on a slow machine posting them can take longer than the age, and by then
+    # event 5's segment is already expired and the answer is a 410 (CI run 37530950131), which is not what this check is about.
+    for n in range(10):
         svc.post_event(n, extra={"pad": pad})
     s, _ = svc.request("POST", "/events/5/replay/2", b"")[:2]
+    for n in range(10, 2000):
+        svc.post_event(n, extra={"pad": pad})
     return d, svc, peer, got, s
 
 
