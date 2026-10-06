@@ -45,4 +45,11 @@ unzip hooks-linux-x86_64-*.zip && sha256sum -c hooks-linux-x86_64.sha256 && chmo
 ./hooks-linux-x86_64 --port 8080 --dir /var/lib/hooks
 ```
 
-A run's artifacts expire (90 days by default); a release with a stable URL is not built.
+A run's artifacts expire (90 days by default). A **release** has a stable URL: pushing a tag `v*` runs `.github/workflows/release.yml`, which builds the tarballs (x86-64 and arm64, from `scripts/release.sh`) and the container image, tries each as a downloader would (`scripts/release-smoke.sh`: checksum, unpack, start, post an event, read it back, stop; for the image, wait until healthy and do the same), attests the build provenance of the tarballs, and publishes them with a single `SHA256SUMS` as a GitHub Release (a pre-release when the tag has a `-`, as `v0.1.0-alpha.1`) and the image to `ghcr.io/alpibrusl/lexsys-hooks`. A push that only touches the files a release is made of runs the same build and checks and publishes nothing (a dry run). To check a download:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify hooks-<version>-linux-x86_64.tar.gz --repo alpibrusl/lexsys-hooks
+```
+
+The attestation says the file was built by that workflow from the tagged commit; it does not say anyone has audited the code. The tarballs are not signed with a key of ours, the SBOM is the stub described above, `hooks-pure` and macOS are not built, and the image is x86-64 only.
