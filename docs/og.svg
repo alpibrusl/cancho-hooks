@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101B2D"/>
+      <stop offset="1" stop-color="#0B1220"/>
+    </linearGradient>
+    <pattern id="ticks" width="40" height="40" patternUnits="userSpaceOnUse">
+      <line x1="20" y1="0" x2="20" y2="10" stroke="#1E2A44" stroke-width="4" stroke-linecap="round"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#ticks)" opacity="0.7"/>
+
+  <!-- a retry curve: the first attempts fail (amber dots), the last one lands -->
+  <path d="M930 604 C 1010 590, 1070 550, 1100 500 S 1170 380 1176 250" fill="none" stroke="#1E2A44" stroke-width="3"/>
+  <path d="M930 604 C 1010 590, 1070 550, 1100 500" fill="none" stroke="#F5A623" stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity="0.8"/>
+
+  <!-- the mark: a hook with an eye (the amber dot) -->
+  <g transform="translate(80,168) scale(4.6)">
+    <rect x="2" y="2" width="60" height="60" rx="14" fill="#0D1728" stroke="#1E2A44" stroke-width="0.8"/>
+    <path d="M30 21 v19 a9 9 0 0 0 18 0 v-7 l-5 -6" fill="none" stroke="#E8EEF9" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="30" cy="15" r="6" fill="none" stroke="#F5A623" stroke-width="3.6"/>
+  </g>
+
+  <g font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace">
+    <text x="430" y="248" font-size="64" fill="#E8EEF9" font-weight="700">lexsys<tspan fill="#34D399">-hooks</tspan></text>
+    <text x="430" y="310" font-size="30" fill="#8FA3C4">Webhooks that survive failure.</text>
+
+    <g font-size="19" font-weight="600">
+      <rect x="430" y="362" width="236" height="48" rx="24" fill="#0D1728" stroke="#2B3A5C" stroke-width="2"/>
+      <text x="548" y="393" fill="#34D399" text-anchor="middle">on disk, then 202</text>
+      <rect x="680" y="362" width="250" height="48" rx="24" fill="#0D1728" stroke="#2B3A5C" stroke-width="2"/>
+      <text x="805" y="393" fill="#E8EEF9" text-anchor="middle">signed &#183; rotatable</text>
+      <rect x="944" y="362" width="206" height="48" rx="24" fill="#0D1728" stroke="#2B3A5C" stroke-width="2"/>
+      <text x="1047" y="393" fill="#F5A623" text-anchor="middle">retry &#183; replay</text>
+    </g>
+
+    <text x="430" y="470" font-size="22" fill="#5B6E93">alpibrusl.github.io/lexsys-hooks</text>
+    <circle cx="438" cy="548" r="7" fill="#F5A623"/>
+    <text x="456" y="555" font-size="18" fill="#5B6E93">alpha &#183; chaos-tested: kill -9, db cuts, lying receivers</text>
+  </g>
+</svg>

@@ -1,0 +1,2626 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "lexsys-hooks",
+    "version": "0.1.0",
+    "summary": "A self-hosted webhook delivery service.",
+    "description": "Events are on disk before the answer to `POST /events`, then signed (Standard Webhooks), retried and replayable. Delivery is at least once: a receiver drops a repeat by `webhook-id` (`evt_<id>`). Every route, its scope and its answers are also described in docs/api.md; tests/openapi_test.py keeps this file and the service's route table the same.",
+    "license": {
+      "name": "EUPL-1.2",
+      "identifier": "EUPL-1.2"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080"
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/events": {
+      "post": {
+        "operationId": "postEvent",
+        "summary": "Post an event",
+        "security": [
+          {
+            "ingest": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "ingest",
+        "responses": {
+          "202": {
+            "description": "On disk (flushed) before this answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad or doubled Idempotency-Key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The event is too large (about 65,499 bytes less its type and key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a JSON object with a string `type`, or a key already used for a different event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "`idem-keys` keys are held and fresh.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The log is broken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "1 to 255 visible ASCII characters. The same key returns the same answer, across crashes.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/{id}": {
+      "get": {
+        "operationId": "getEvent",
+        "summary": "Read a stored event",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "The event as it was posted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An id that was never given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Dropped by retention, or erased. Ids are never given twice.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "eraseEvent",
+        "summary": "Erase one event's body",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Erased (`already` is true the second time).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "erased": {
+                      "type": "boolean"
+                    },
+                    "already": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "erased"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "An id never given.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Dropped by retention; nothing is left.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The erasure could not be stored (nothing changed) or the segment could not be rewritten now (erased for delivery and reading; rewritten at the next start).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Not erased: type, idempotency key, id, size, history rows, and backups taken before.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/events/{id}/attempts": {
+      "get": {
+        "operationId": "getAttempts",
+        "summary": "The attempts of an event (from the database)",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "Attempts, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Attempt"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No database is named, or it cannot answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The database did not answer in five seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/events/{id}/replay": {
+      "post": {
+        "operationId": "replayEvent",
+        "summary": "Send an event again to every endpoint that subscribes to its type",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "202": {
+            "description": "Replays are waiting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "integer"
+                    },
+                    "endpoints": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      },
+                      "description": "The endpoints it was queued for."
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "endpoints"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The event was dropped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "32 replays already wait.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/events/{id}/replay/{endpoint}": {
+      "post": {
+        "operationId": "replayEventTo",
+        "summary": "Send an event again to one endpoint, whatever it subscribes to",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "202": {
+            "description": "A replay is waiting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "integer"
+                    },
+                    "endpoints": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      },
+                      "description": "The endpoints it was queued for."
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "endpoints"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown event or endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "The event was dropped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "507": {
+            "description": "32 replays already wait.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "endpoint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "cancelReplay",
+        "summary": "Take back a waiting replay",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Cancelled (durably, before this answer).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "event": {
+                      "type": "integer"
+                    },
+                    "endpoint": {
+                      "type": "integer"
+                    },
+                    "cancelled": {
+                      "type": "integer"
+                    },
+                    "busy": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "endpoint",
+                    "cancelled",
+                    "busy"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An id or endpoint that is not a number.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such replay waits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "An attempt of it is on the wire.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "endpoint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/endpoints": {
+      "get": {
+        "operationId": "listEndpoints",
+        "summary": "List endpoints",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "Endpoints in table order; paged when there are many.",
+            "headers": {
+              "X-Total-Count": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Number of endpoints."
+              },
+              "X-Next-Offset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Where the next page starts; absent on the last."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Endpoint"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "default": 64
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createEndpoint",
+        "summary": "Create an endpoint",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "201": {
+            "description": "Created. The secret is in this answer and in no other.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "host": {
+                      "type": "string"
+                    },
+                    "scheme": {
+                      "type": "string"
+                    },
+                    "port": {
+                      "type": "integer"
+                    },
+                    "secret": {
+                      "type": "string"
+                    },
+                    "from": {
+                      "type": "string"
+                    },
+                    "cursor": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "host",
+                    "scheme",
+                    "port",
+                    "secret"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "With the reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another change waits, or 1,024 exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No database is named, or it refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The database did not answer in five seconds (the row may still have been stored).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Needs a database and an admin token. The endpoint gets the events from now on, not the log's past.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndpointCreate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/endpoints/{id}": {
+      "get": {
+        "operationId": "getEndpoint",
+        "summary": "One endpoint",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "The endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a number.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "changeEndpoint",
+        "summary": "Change an endpoint, or rotate its secret",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Changed. `secret` is present when the change brought or made one; it is in this answer and in no other.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "host": {
+                      "type": "string"
+                    },
+                    "scheme": {
+                      "type": "string"
+                    },
+                    "port": {
+                      "type": "integer"
+                    },
+                    "secret": {
+                      "type": "string"
+                    },
+                    "secret_old_until": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "With a reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id or a row that is gone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another change waits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database refuses (nothing changes).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EndpointChange"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteEndpoint",
+        "summary": "Remove an endpoint",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    },
+                    "draining": {
+                      "type": "boolean"
+                    },
+                    "row": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "deleted"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a number.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another change waits, or all slots are taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database refuses (nothing changes).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The database did not answer in five seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/endpoints/{id}/enable": {
+      "post": {
+        "operationId": "enableEndpoint",
+        "summary": "Enable an endpoint a 410 or the circuit breaker disabled",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Whether or not it was disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/endpoints/{id}/dead": {
+      "get": {
+        "operationId": "listDeadLetters",
+        "summary": "The endpoint's dead letters, a page of them",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "A page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "endpoint": {
+                      "type": "integer"
+                    },
+                    "order": {
+                      "type": "string"
+                    },
+                    "held": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "complete_above": {
+                      "type": "integer"
+                    },
+                    "dead": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DeadLetter"
+                      }
+                    },
+                    "next": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "endpoint",
+                    "order",
+                    "dead"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "An event id.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/endpoints/{id}/replay-dead": {
+      "post": {
+        "operationId": "replayDead",
+        "summary": "Send the endpoint's dead letters again, oldest first",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Nothing more to take, or a page taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayDead"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Taken; call again until `remaining` is 0.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayDead"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2048
+                  },
+                  "types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "after": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/endpoints/{id}/replays": {
+      "delete": {
+        "operationId": "cancelReplays",
+        "summary": "Take back every waiting replay of the endpoint",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "endpoint": {
+                      "type": "integer"
+                    },
+                    "cancelled": {
+                      "type": "integer"
+                    },
+                    "busy": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "endpoint",
+                    "cancelled",
+                    "busy"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/schedules": {
+      "get": {
+        "operationId": "listSchedules",
+        "summary": "List schedules",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The schedules.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Schedule"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSchedule",
+        "summary": "Create a schedule",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schedule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "With the reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "64 schedules exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "A schedule counts from now: it does not fire for the time before it existed. A fire is an ordinary event.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expr": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "body": {},
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "expr",
+                  "type"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/schedules/{id}": {
+      "get": {
+        "operationId": "getSchedule",
+        "summary": "One schedule",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The schedule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schedule"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "changeSchedule",
+        "summary": "Change a schedule",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "The schedule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schedule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "expr": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "body": {},
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSchedule",
+        "summary": "Remove a schedule",
+        "security": [
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "admin",
+        "responses": {
+          "200": {
+            "description": "Removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "deleted": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "deleted"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/stats": {
+      "get": {
+        "operationId": "getStats",
+        "summary": "Counters since the start",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "Integer counters; the full list is in docs/api.md.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": [
+                      "integer",
+                      "boolean"
+                    ]
+                  },
+                  "required": [
+                    "endpoints",
+                    "delivered",
+                    "failed",
+                    "dead"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/config": {
+      "get": {
+        "operationId": "getConfig",
+        "summary": "The settings in force (never a token or a secret)",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "Settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "schedule",
+                    "production"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "summary": "Prometheus metrics (text exposition format 0.0.4)",
+        "security": [
+          {
+            "read": []
+          },
+          {
+            "admin": []
+          }
+        ],
+        "x-scope": "read",
+        "responses": {
+          "200": {
+            "description": "Metrics.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A token is configured and none, or a wrong one, was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The route needs the admin token and the service has none configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Pages of 64 endpoints; page 0 also has the service's series.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "healthz",
+        "summary": "Liveness: the process is up and its loop turns",
+        "security": [],
+        "x-scope": "open",
+        "responses": {
+          "200": {
+            "description": "Always 200 while the loop turns, even with the disk full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz",
+        "summary": "Readiness",
+        "security": [],
+        "x-scope": "open",
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ready"
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "check": {
+                      "type": "string",
+                      "enum": [
+                        "stopping",
+                        "events_log",
+                        "delivery_log",
+                        "data_dir",
+                        "database"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ready",
+                    "check"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ingest": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The ingest token (POST /events)."
+      },
+      "read": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The read token."
+      },
+      "admin": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The admin token; it also does what the other two do."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Attempt": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "integer"
+          },
+          "replay": {},
+          "attempt": {
+            "type": "integer"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer",
+            "description": "The HTTP status, or -1 could not connect, -2 could not send, -3 timed out, -4 no answer."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "at": {
+            "type": "integer"
+          },
+          "latency_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "endpoint",
+          "attempt",
+          "outcome",
+          "status",
+          "reason"
+        ]
+      },
+      "Endpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "scheme": {
+            "type": "string",
+            "enum": [
+              "http",
+              "https"
+            ]
+          },
+          "cursor": {
+            "type": "integer"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "failing_since": {
+            "type": "integer",
+            "description": "Unix ms at which the current run of failures began; 0 if none."
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the custom headers, not their values."
+          },
+          "secret_old_until": {
+            "type": "integer",
+            "description": "Unix ms until which the previous secret signs as well; 0: none."
+          },
+          "concurrency": {
+            "type": "integer"
+          },
+          "rate": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "port",
+          "scheme",
+          "disabled",
+          "paused",
+          "types"
+        ]
+      },
+      "EndpointCreate": {
+        "type": "object",
+        "description": "Give `url`, or `host` and `port`.",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "scheme": {
+            "type": "string",
+            "enum": [
+              "http",
+              "https"
+            ]
+          },
+          "secret": {
+            "type": "string",
+            "description": "`whsec_` and base64. The service makes one if left out."
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "concurrency": {
+            "type": "integer"
+          },
+          "rate": {
+            "type": "integer"
+          },
+          "from": {
+            "type": "string",
+            "enum": [
+              "now"
+            ]
+          }
+        }
+      },
+      "EndpointChange": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "scheme": {
+            "type": "string",
+            "enum": [
+              "http",
+              "https"
+            ]
+          },
+          "secret": {
+            "type": "string"
+          },
+          "rotate": {
+            "type": "boolean",
+            "description": "The service makes a new secret; not with `secret`."
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "concurrency": {
+            "type": "integer"
+          },
+          "rate": {
+            "type": "integer"
+          },
+          "keep_old_ms": {
+            "type": "integer",
+            "description": "Keep the secret this one replaces valid for this long; both signatures on every delivery meanwhile."
+          },
+          "keep_old": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DeadLetter": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "died_at": {
+            "type": "integer"
+          },
+          "replaying": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event",
+          "attempts",
+          "reason"
+        ]
+      },
+      "ReplayDead": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "integer"
+          },
+          "taken": {
+            "type": "integer"
+          },
+          "remaining": {
+            "type": "integer"
+          },
+          "waiting": {
+            "type": "integer"
+          },
+          "next": {}
+        },
+        "required": [
+          "endpoint",
+          "taken",
+          "remaining"
+        ]
+      },
+      "Schedule": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "expr": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "body": {},
+          "enabled": {
+            "type": "boolean"
+          },
+          "created_at": {},
+          "last_fired": {},
+          "next_fire": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "next_fire_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "expr",
+          "type",
+          "enabled"
+        ]
+      }
+    }
+  }
+}

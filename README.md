@@ -2,9 +2,9 @@
 
 [![ci](https://github.com/alpibrusl/lexsys-hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/lexsys-hooks/actions/workflows/ci.yml)
 
-**Webhooks that don't lose events.** Post an event once: it is on disk before you get the answer, then signed ([Standard Webhooks](https://www.standardwebhooks.com)) and delivered to every subscribed endpoint, **at least once**, through crashes, outages and slow receivers. One small binary, written in [lex-sys](https://github.com/alpibrusl/lex-sys). The [project page](https://alpibrusl.github.io/lexsys-hooks/) has the pictures.
+**Webhooks that survive failure.** A self-hosted delivery service: your events stay on your infrastructure. Post an event once: it is on disk before you get the answer, then signed ([Standard Webhooks](https://www.standardwebhooks.com)) and delivered to every subscribed endpoint, **at least once**, through crashes, outages and slow receivers. One small binary, written in [lex-sys](https://github.com/alpibrusl/lex-sys). The [project page](https://alpibrusl.github.io/lexsys-hooks/) has the pictures.
 
-**Status: pre-release, not for production yet.** A 24-hour chaos soak and the capacity figures it gives are in progress; `https` uses OpenSSL until lex-sys's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
+**Status: alpha, not for production yet.** The API may still change. A 24-hour chaos soak and the capacity figures it gives are in progress; `https` uses OpenSSL until lex-sys's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
 
 ## What you get
 
@@ -83,4 +83,4 @@ Every change goes through what CI runs: `fmt --check src`, the unit tests, the h
 
 ## Licence
 
-[EUPL-1.2](LICENSE).
+[EUPL-1.2](LICENSE). Open source, provided as is, without warranty: you run it at your own responsibility. What it holds about people, and what it does and does not do for data-protection duties, is in [docs/privacy.md](docs/privacy.md); using it does not by itself make a deployment compliant with anything.

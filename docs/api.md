@@ -1,5 +1,7 @@
 # HTTP API
 
+The same routes as an [OpenAPI 3.1 document](openapi.json), which `tests/openapi_test.py` keeps equal to the route table and to what the service answers; [llms.txt](llms.txt) is the short version for an agent.
+
 Every route of the service, the bearer-token scope it needs, and what it answers. The routes are registered in `src/hooks.ls` and the scope of each is the table in `src/authz.ls`; `tests/authz_test.py` checks the two against this list.
 
 The **scope** column says which token a route needs, when that token is configured ([security.md](security.md)): `ingest`, `read` or `admin`; the admin token also does what the other two do. `open`: no token, ever (`/healthz`, `/readyz`).
