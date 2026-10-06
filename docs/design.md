@@ -2434,3 +2434,15 @@ The change is in `src/attempt.ls` (states *draining* and *idle*, the pool, the e
 ### 53.10 Not done here
 
 The code. The pin of the pure build's lex-sys to a commit with the hardware AES (lex-sys#334): a separate change, which lowers the record cost of 53.1 but not the handshake this section removes. Making X25519 and ECDSA faster in lex-sys (the other half of the gap to OpenSSL).
+
+## 54. The log checker in lex-sys
+
+`scripts/logcheck.py` is the reference for what a sound pair of logs is, and it is slow (about 9 MB/s: a 400 MB restore took 4 min 28 s, all CPU). `tools/logcheck.ls` (`hooks-logcheck`, a second `[[bin]]`) is the same checker built from the service's own `logguard`, `state` and `store` modules, so the rule for a tail, a segment chain and an event reference is one piece of code, not two that agree by effort.
+
+**Modes.** `check <dir> [--kv|--json]` reads both logs and reports; `trim <dir>` makes the cut that `backup.sh` makes (the torn tail of the last segment) and refuses damage in the middle. `check` opens nothing for writing. The rows of `main` say what each mode may do: `check` has no write capability at all.
+
+**How it is tested.** `tests/logcheck_test.py` builds a real service directory (900 events, four segments, a receiver that succeeds and one that fails) and gives the two checkers the same input: the clean directory (exit status, `--kv` lines and JSON must be equal), 200 damaged copies per seed (flips, cuts, zeroed runs, appended and inserted bytes, a dropped or swapped segment, a moved or removed `events.first`, an old-format delivery log, a changed header, a record rewritten with a *valid* CRC, zeroed tails), and 100 `trim` runs (same exit status, same words, same bytes left). A sweep of more than 1,600 cases agreed. A check must leave the directory byte for byte as it found it.
+
+**Use.** `backup.sh` and `restore.sh` prefer `hooks-logcheck` (beside the script, in `../build` or `../bin`, or on `PATH`) and fall back to the Python script, so a release without the binary still works; `LOGCHECK=python` forces the fallback. `scripts/release.sh` ships the binary when it was built. The Python script stays as the oracle that the differential test compares against.
+
+**Not claimed.** Speed was measured on a 1.4 MB sample only (about 435 MB/s against 8.9 MB/s); a full-size restore has not been timed. The checker's own authority report is not pinned in CI yet.

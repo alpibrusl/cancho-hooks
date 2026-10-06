@@ -302,6 +302,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/corrupt_test.py build/hooks
 
+      - name: Native log checker (hooks-logcheck agrees with scripts/logcheck.py on clean and damaged logs, trim cuts the same bytes, reads leave the files untouched)
+        working-directory: hooks
+        run: python3 tests/logcheck_test.py build/hooks
+
       - name: /metrics against a known workload (ingest, group commits, attempts by outcome and reason, lag, history), /readyz
         working-directory: hooks
         run: |

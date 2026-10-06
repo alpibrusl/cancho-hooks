@@ -1,6 +1,6 @@
 edition 6;
 
-// `hooks-logcheck` -- read the two logs of a data directory without the service, and say whether they are a pair worth restoring (`docs/design.md` section 49).
+// `hooks-logcheck` -- read the two logs of a data directory without the service, and say whether they are a pair worth restoring (`docs/design.md` section 54).
 //
 //     hooks-logcheck check DIR [--kv]
 //     hooks-logcheck trim FILE

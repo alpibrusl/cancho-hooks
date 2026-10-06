@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The log checker in lex-sys (`hooks-logcheck`, docs/design.md section 49) against the one in Python (`scripts/logcheck.py`).
+"""The log checker in lex-sys (`hooks-logcheck`, docs/design.md section 54) against the one in Python (`scripts/logcheck.py`).
 
     python3 tests/logcheck_test.py build/hooks        (build/hooks-logcheck beside it)
 
