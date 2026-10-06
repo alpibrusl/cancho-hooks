@@ -3643,7 +3643,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     let secret = alloc_slice[ra](96, byte_of(0));
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_host(), hl, host);
                                     manage.bytes_of(dv[off_mg()..off_mg() + manage.mg_size()], manage.mg_secret(), sl, secret);
-                                    let request = change_request(heap, dv, host[0..hl], secret[0..sl], clock_unix_ms(clock));
+                                    let request = change_request(heap, dv, host[0..hl], secret[0..sl]);
                                     borrow request as &rb in {
                                         borrow mut pl as &!qw in {
                                             sent = pool.submit(qw, next_tag, buffer.bytes(rb));
@@ -4566,7 +4566,7 @@ fn fill_change[&d, &b](dv: &!d [int], blob: &b [byte]) -> [] int {
 }
 
 // The statement for the change that waits in `mg`: the insert of a new endpoint, the update of an address, or of the address and the secret.
-fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte], now: int) -> [heap] buffer.Buffer {
+fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte], secret: &b [byte]) -> [heap] buffer.Buffer {
     if dv[off_mg() + manage.mg_kind()] == 2 {
         return queries.delete_endpoint_start(heap, dv[off_mg() + manage.mg_target()]);
     }
@@ -4586,11 +4586,7 @@ fn change_request[&h, &d, &a, &b](heap: &!h Heap, dv: &d [int], host: &a [byte],
             q = queries.create_endpoint_start(heap, host, dv[off_mg() + manage.mg_port()], secret, types[0..tn], spec[0..sn], epx.pending_conc(xg), epx.pending_rate(xg));
         } else {
             let mask = epx.pending_mask(xg);
-            var keep_until = 0;
-            if epx.pending_keep_ms(xg) > 0 {
-                keep_until = now + epx.pending_keep_ms(xg);
-            }
-            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, keep_until, mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
+            q = queries.patch_endpoint_start(heap, dv[off_mg() + manage.mg_target()], host, dv[off_mg() + manage.mg_port()], secret, dv[off_mg() + manage.mg_fields()] & 12 != 0, types[0..tn], mask & epx.m_types() != 0, spec[0..sn], mask & epx.m_headers() != 0, epx.pending_keep_ms(xg), mask & epx.m_keep() != 0, epx.pending_conc(xg), mask & epx.m_conc() != 0, epx.pending_rate(xg), mask & epx.m_rate() != 0);
         }
     }
     return q;

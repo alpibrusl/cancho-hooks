@@ -18,7 +18,7 @@ The database must exist; the test applies sql/schema.sql and empties `endpoints`
      not the one before; a new secret without a period ends a running one
   8. every way a period can be wrong is a 400 with its reason; neither secret is in GET /endpoints, /stats or /config; the old secret is in the row
   9. a replay in the period carries both; `endpoints.conf` with `old=` and the database's columns give the same
- 11. the period is counted from the commit: a change the database held 2.5 s keeps its whole period after the answer
+ 11. the period is counted from the commit, in memory and in the row: a change the database held 2.5 s keeps its whole period after the answer, also after a kill -9 that reads the row
 """
 import json
 import os
@@ -105,8 +105,8 @@ def main():
     check("2. GET shows that time (and never a secret)", until_of(svc, 1) == until, str(get(svc, "/endpoints/1")))
     row = psql("select secret, secret_old, secret_old_until from endpoints where id = 1")[0]
     # the row's time is fixed when the change is sent, the answer's at the commit (section 35): the row's is at most the answer's, and not before the request's plus the period
-    check("2. the row has the new secret, the old one and the time (as of when the change was sent: between the request's and the answer's)",
-          row[:2] == (s2, s1) and t_before + 4000 <= int(row[2]) <= until, str((row, t_before, until)))
+    check("2. the row has the new secret, the old one and the time (as the database counted it: between the request's and the answer's)",
+          row[:2] == (s2, s1) and t_before + 4000 <= int(row[2]) <= until + 50, str((row, t_before, until)))
     post_event(svc, 2)
     check("2. the next event arrives", wait_for(lambda: rc.count() == 2, 5))
     r = last(rc)
@@ -159,8 +159,8 @@ def main():
     kill9(svc)
     svc = start(d)
     row_until = int(psql("select secret_old_until from endpoints where id = 1")[0][0])
-    check("5. after kill -9 the period is the one the row has (its time as of when the change was sent, at most the answer's)",
-          until_of(svc, 1) == row_until and until - 1000 <= row_until <= until, str((until_of(svc, 1), row_until, until)))
+    check("5. after kill -9 the period is the one the row has (its time as the database counted it, at most the answer's)",
+          until_of(svc, 1) == row_until and until - 1000 <= row_until <= until + 50, str((until_of(svc, 1), row_until, until)))
     post_event(svc, 2)
     check("5. ... and the next event carries both signatures", wait_for(lambda: 2 in rc.events(), 5) and len(sigs(of_event(rc, 2))) == 2 and verifies(of_event(rc, 2), s1) and verifies(of_event(rc, 2), s2), str([sigs(r) for r in rc.seen]))
     stop(svc)
@@ -230,7 +230,7 @@ def main():
     check("7. a second rotation keeps the secret it replaced (s2) and not the one before (s1)", wait_for(lambda: rc.count() == 1, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s3) and verifies(last(rc), s2) and not verifies(last(rc), s1), str(sigs(last(rc))))
     st, out = patch(svc, 1, {"keep_old_ms": 90000})
     check("7. a period alone moves the time of the previous secret", st == 200 and out["secret_old_until"] > now_ms() + 80000 and until_of(svc, 1) == out["secret_old_until"], str((st, out)))
-    check("7. ... in the row too (as of when the change was sent)", out["secret_old_until"] - 1000 <= int(psql("select secret_old_until from endpoints where id = 1")[0][0]) <= out["secret_old_until"])
+    check("7. ... in the row too (as the database counted it)", out["secret_old_until"] - 1000 <= int(psql("select secret_old_until from endpoints where id = 1")[0][0]) <= out["secret_old_until"] + 50)
     st, out = patch(svc, 1, {"keep_old_ms": 0})
     check("7. {keep_old_ms: 0} ends it now", st == 200 and until_of(svc, 1) == 0 and psql("select secret_old, secret_old_until from endpoints where id = 1") == [("", "0")], str(psql("select secret_old, secret_old_until from endpoints where id = 1")))
     post_event(svc, 2)
@@ -339,7 +339,10 @@ def main():
 
     # ---- 11. the period is counted from the commit, not from the request ---------------------------------------------
     # A change that waits for the database (here 2.5 s, through a proxy that holds every byte) keeps its whole overlap: counted from the request,
-    # the soak's rotation held 4 s by an unreachable database lost 4 s of it.
+    # the soak's rotation held 4 s by an unreachable database lost 4 s of it. The period is 8 s, so that two moments fit between where counting
+    # from the request would end it (the answer + 5.5 s) and where it really ends (the answer + 8 s): an event while the service lives, and one after
+    # a `kill -9` right after the answer, which reads the row (the soak's second finding: the row had the request's time and the restart ended the overlap
+    # early, 64 deliveries with one signature).
     reset_db()
     s1, s2 = secret(), secret()
     rc = Receiver()
@@ -355,17 +358,30 @@ def main():
     t_asked = now_ms()
     import threading
     threading.Timer(2.5, px.restore).start()
-    st, out = patch(svc, 1, {"secret": s2, "keep_old_ms": 4000})
+    st, out = patch(svc, 1, {"secret": s2, "keep_old_ms": 8000})
     t_answered = now_ms()
-    check(f"11. a PATCH held by the database for {t_answered - t_asked} ms is a 200 whose period ends 4000 ms after the commit, not after the request",
-          st == 200 and t_answered - t_asked >= 2000 and t_answered + 4000 - 300 <= out["secret_old_until"] <= t_answered + 4000, str((st, out, t_asked, t_answered)))
+    check(f"11. a PATCH held by the database for {t_answered - t_asked} ms is a 200 whose period ends 8000 ms after the commit, not after the request",
+          st == 200 and t_answered - t_asked >= 2000 and t_answered + 8000 - 300 <= out["secret_old_until"] <= t_answered + 8000, str((st, out, t_asked, t_answered)))
     row = psql("select secret_old_until from endpoints where id = 1")[0][0]
-    check("11. the row's time is the one as of when the change was sent: at least the request's plus the period", int(row) >= t_asked + 4000, str((row, t_asked)))
-    while now_ms() < t_answered + 2500:
+    check("11. the row's time is counted by the database when the statement ran, from the commit: the answer's plus the period, not the request's",
+          t_answered + 8000 - 400 <= int(row) <= t_answered + 8000 + 100, str((row, t_asked, t_answered)))
+    while now_ms() < t_answered + 6200:
         time.sleep(0.05)
     post_event(svc, 1)
-    check("11. an event 2.5 s after the answer (past the request's time plus the period) still carries both signatures",
+    check("11. an event 6.2 s after the answer (past the request's time plus the period) still carries both signatures",
           wait_for(lambda: rc.count() == 1, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s1) and verifies(last(rc), s2), str([sigs(r) for r in rc.seen]))
+    # the restart reads the row: the service is killed and started again, and an event before the real end still carries both
+    kill9(svc)
+    px.restore()
+    svc = start(d, extra=flags)
+    late = now_ms() >= t_answered + 7600
+    post_event(svc, 2)
+    if late:
+        print("skip 11. the restart took too long to judge the row against the period's end")
+        rc.count()
+    else:
+        check("11. after a kill -9 the restart reads the row: an event before the real end still carries both signatures (the request's time would have ended it)",
+              wait_for(lambda: rc.count() >= 2, 5) and len(sigs(last(rc))) == 2 and verifies(last(rc), s1) and verifies(last(rc), s2), str([sigs(r) for r in rc.seen]))
     stop(svc)
     shutil.rmtree(d)
     rc.close()

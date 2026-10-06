@@ -359,7 +359,7 @@ wh.verify(body, headers)   # raises if forged or stale
       <ul class="prose">
         <li><strong>Not for production.</strong> Before that line is lifted: a soak of at least 24 hours under chaos, with its numbers published, and the capacity figures it gives. The harness and its criteria are built and written down in advance (<a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/soak.md">soak.md</a>).</li>
         <li><strong>OpenSSL in the default build</strong>, until lex-sys&rsquo;s own TLS has been independently reviewed.</li>
-        <li><strong>One process, one thread, one core</strong>; at most 1,024 endpoints; no strict ordering; a host name for PostgreSQL is resolved with a call that waits (give an address).</li>
+        <li><strong>One process, one thread, one core</strong>; at most 1,024 endpoints; no strict ordering.</li>
         <li><strong>The database is the trust boundary</strong>: signing secrets and header values are stored in the clear. No TLS on the service&rsquo;s own port (put a reverse proxy in front), and a token changes only with a restart.</li>
         <li><strong>Packaging is young</strong>: the binary is a CI artifact for Linux x86-64; releases are not signed yet.</li>
       </ul>
