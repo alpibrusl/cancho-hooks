@@ -26,6 +26,16 @@ git = "https://github.com/alpibrusl/lexsys-pg"
 rev = "7a0acd7fc3e04264a088d4dd356613472e1bb981"
 path = ".lex-sys-vcs-pool"
 
+[dependencies.schema]
+git = "https://github.com/alpibrusl/lexsys-schema"
+rev = "10d30edab333e5cfb5445c430020ed1999872e2f"
+path = ".lex-sys-vcs"
+
+[dependencies.web]
+git = "https://github.com/alpibrusl/lexsys-web"
+rev = "94fe0cd510ca95e8088cb2d975fc8bcce11379b1"
+path = ".lex-sys-vcs"
+
 # lex-sys's own TLS client and the certificate verifier it needs (lex-sys epic #197).
 [dependencies.tls]
 git = "https://github.com/alpibrusl/lex-sys"
