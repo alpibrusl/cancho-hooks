@@ -282,6 +282,7 @@ class Churn(threading.Thread):
         with r.vlock:
             r.verifier.retire(ep.label, time.time())
         ep.active = False
+        ep.retired_at = time.time()
         r.counts["churn_done"] += 1
         threading.Timer(12.0, lambda: r.recv({"op": "remove", "label": ep.label})).start()
 
@@ -378,17 +379,30 @@ def run_backup(run, restore=False):
     return ok
 
 
+RESTORE_TIMEOUT_S = 1200.0
+
+
 def restore_check(run, backup, m0):
     from common import ROOT
     scratch = os.path.join(run.out, "restore-scratch")
     subprocess.run(["rm", "-rf", scratch])
     os.makedirs(scratch)
-    p = subprocess.run(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], capture_output=True, text=True, timeout=180)
+    # `restore.sh` checks the pair of logs with `logcheck.py`, which is Python: about 1.5 MB a second, so 400 MB of logs takes four and a half minutes of CPU on an idle
+    # core. The second 24 h run died here, in a timeout of 180 s, and left no verdict. A timeout is a finding, never a crash.
+    try:
+        p = subprocess.run(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        run.violate("K_restore", why=f"restore.sh did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+        return False
     run.counts["restores"] += 1
     if p.returncode != 0:
         run.violate("K_restore", status=p.returncode, stderr=p.stderr[-500:])
         return False
-    q = subprocess.run(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], capture_output=True, text=True, timeout=180)
+    try:
+        q = subprocess.run(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        run.violate("K_restore", why=f"logcheck.py did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+        return False
     if q.returncode != 0:
         run.violate("K_restore", why="logcheck does not accept the restored directory", out=q.stdout[-500:])
         return False
