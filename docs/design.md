@@ -2261,6 +2261,83 @@ Retention (38) drops an event only when it is final everywhere; an event that a 
 
 `tests/audit_test.py`: every route in the right class (written or not), a held change written twice with its outcome, no token or header value in the file, the rotation, `audit-log = 0` refused by `production = 1`, a full disk making `/readyz` say `audit_log`. `tests/maxage_test.py`: events pinned by a paused endpoint and a waiting replay dropped at the age, cursors moved, the counts, a restart that agrees. `tests/erase_test.py`: the body gone from the segment's bytes (read apart from the service), the event never sent again or served, the rest of the segment intact and read by `chaos.py`'s reader, `kill -9` at each step. `tests/encrypt_test.py`: no body readable in the files, delivery and `GET` the same, a start without the key refused, rotation.
 
+## 48. Signed, tamper-evident delivery receipts (design, not built)
+
+**Status: a design, written before any code, like sections 25, 33 and 40.** Nothing here exists yet. It records what receipts could honestly prove, what they could not, what they would cost, and which gaps in lex-sys building them would show.
+
+### 48.1 The gap, and what a receipt claims
+
+Today the proof that an event was delivered is the service's own logs and the `attempts` table, which the operator can edit and nobody else can check. A customer who is told "your event was delivered at 14:02" has to believe the operator. A **receipt** is a record a third party can check without believing the operator's current logs: it binds an event's payload, an endpoint, an attempt and what the endpoint answered to a position in a log whose history cannot be rewritten without being noticed by anyone who kept an earlier checkpoint.
+
+A receipt claims exactly this, and no more:
+
+* the service **recorded** that attempt *n* of the event whose (salted) payload hash is *H* was made to endpoint *e*, ended at time *t* by the **service's clock**, and the endpoint answered status *s*;
+* that record is **leaf *i* of a log of size *N*** whose root is *R*, and the checkpoint (*N*, *R*, a time, the key's id) is signed by the service's key;
+* any two checkpoints of the same log are **consistent**: the later one extends the earlier one, so a record that was in the earlier log cannot have been changed or removed.
+
+It does **not** claim that the receiver processed the event (a `200` is the receiver's word, unsigned, unless the receiver counter-signs, 48.5), that the service's clock is right (48.7), or that the service did not behave dishonestly *before* the first checkpoint a verifier ever saw: a verifier who has no earlier checkpoint learns that the log is internally consistent and signed, not that it is complete. Receipts make dishonesty **detectable by whoever kept a checkpoint**; they do not make it impossible.
+
+### 48.2 Why signing the records one by one is not enough
+
+A signature per record proves the service once produced that record. A service that wants to deny a delivery simply never shows the record, or shows a different one it also signed. What makes omission and rewriting detectable is a **Merkle tree over the records** (RFC 9162, the construction Certificate Transparency uses) with signed tree heads: an **inclusion proof** shows a record is in the tree a checkpoint commits to, and a **consistency proof** shows one checkpoint is a prefix of another. The signature goes on the checkpoint, once per interval, not on each record.
+
+### 48.3 The receipts log
+
+* A **leaf** is the SHA-256 of the receipt record (48.4) under RFC 9162's leaf prefix. The log is a new file, `receipts.seg`, in lexsys-log's record format with the same group commit and torn-tail rule as the others, holding the records and, as they complete, the nodes of the tree.
+* **It is derived from the outcomes log.** Each ended attempt already has an outcome record (`delivery.seg`) with a sequence number. A receipt is a deterministic function of that record, of the event and of the key, so after a crash the missing receipts are recomputed from the outcomes log and an interrupted checkpoint is simply made again. Nothing about delivery waits for a receipt: the receipts log trails the outcomes log, and `/readyz` says if it lags.
+* **Checkpoints** are written every `receipt-checkpoint-ms` (default 1,000) when the tree has grown, or at a clean stop. A checkpoint is signed over a fixed layout (the key id, *N*, *R*, the time, the hash of the previous checkpoint). The **checkpoint chain** (each names the hash of the one before) is small, one record an interval, and is **never dropped**.
+* **Retention.** The leaves and nodes are bounded by `receipt-days` (default 365; 0 keeps all), a whole segment at a time and only when the segment is entirely older. The drop is **recorded in the next checkpoint** ("leaves before *k* dropped"), so removing history is visible and not silent. A receipt already given out keeps its inclusion proof forever (the proof is in the receipt); a receipt asked for after the leaf was dropped is a `410`, as a dropped event is (section 44).
+
+### 48.4 The record, the payload hash and erasure
+
+A receipt record holds: the version, the event id and type, the **salted payload hash**, the endpoint id (not its host or secret), the attempt number, whether it was a replay, the outcome, the HTTP status or the failure reason (section 34.3), the start and end times, and the receiver's counter-signature if there was one (48.5). It never holds the payload, a header value, a host or a secret.
+
+The payload hash is `SHA-256(salt || payload)` with a **random 16-byte salt kept with the event** (in the events log, beside the body). Two reasons. A bare hash of a small payload can be guessed by trying candidates, and a hash of personal data can itself be personal data. And **erasure (section 47.3) becomes crypto-shredding**: erasing an event erases its salt with its body, after which the hash in the receipt can no longer be tied to any payload, while the tree, every proof and every checkpoint stay valid. A receipt carries the salt only when it is handed to someone entitled to the payload (the read scope, audit-logged), so verifying "this payload is what was sent" needs the receipt, the salt and the payload.
+
+### 48.5 What the receiver can add
+
+An endpoint may be given an **Ed25519 public key** (`"receipt_key"` on `POST` and `PATCH /endpoints`). The delivery then carries a `webhook-receipt-nonce` header, and a receiver that answers with `webhook-receipt: v1,<base64 signature>` over (`webhook-id`, the payload hash, the nonce, its own timestamp) has **signed that it received that payload**. The service verifies it, stores it in the record, and a receipt then carries evidence the service could not have forged. An endpoint with no key, or an answer without the header, gives a receipt that says the endpoint answered `2xx` and nothing stronger: the receipt says which. Receipt headers are optional and ignored by receivers that do not know them.
+
+### 48.6 The interface
+
+* `GET /events/:id/receipts` (**read** scope, audit-logged): a receipt for each ended attempt: the record, the salt, the leaf index, the inclusion proof and the checkpoint it is proved against, as JSON.
+* `GET /receipts/checkpoint` (**read**): the latest signed checkpoint; `GET /receipts/consistency?from=N&to=M` (**read**): the consistency proof; `GET /receipts/keys` (**open**): the public keys, each with its id, the first and last checkpoint it signed, and how it ended (a rotation is a record in the log).
+* **`hooks-verify`**, written in lex-sys in this repository, checks a receipt against a public key (inclusion and signature), two checkpoints against each other (consistency), and the payload hash from the payload and the salt. It reads files, so an auditor needs no running service.
+* **Settings:** `receipt-log` (0 or 1, default 0 until the soak has run with it), `receipt-key-file` (a 32-byte seed in a file of mode 0600, the production profile refusing a readable one, like `encryption-key-file`), `receipt-checkpoint-ms`, `receipt-days`.
+
+### 48.7 What it does not do
+
+* **No trusted time.** Times are the service's clock. A checkpoint can be **witnessed**: published or co-signed elsewhere (a second service, an RFC 3161 time-stamp authority), which also removes the "no earlier checkpoint" weakness. That needs outbound `https` of a kind the service has only for deliveries, so it is a later slice; checkpoints are small and self-contained so that a person can publish one today.
+* **No proof of non-delivery, and no proof of what was never recorded.** An event the service never accepted has no receipt; an accepted event (`202`) is in the events log, and tying `202` to the receipts log is a second record kind (an *ingest receipt*), not built here.
+* **Key compromise.** Whoever holds the signing key can sign a checkpoint for a log they made up. Detection is by comparing checkpoints: a verifier or a witness that saw the real one will find the two inconsistent. The key is a file, handled as `encryption-key-file` is, and a rotation is a record in the log.
+* **It is single node.** There is one log of one process, as everything else here.
+
+### 48.8 What building it would ask of lex-sys
+
+Two gaps in lex-sys, one of them known and unfiled until now, and a question:
+
+1. **`std.ed25519` signing is not constant-time.** Its field and point arithmetic no longer branch on data (`docs/x25519.md` §3.1), but the scalar arithmetic modulo the group order still does (`bn_mulmod`, `bn_reduce_wide`: the ctgrind check names them). For a service that signs a checkpoint a second, with the key in memory, that is a timing channel for anyone who can measure signing; the network position that would let them is the same as for any request. The fix belongs in lex-sys (a constant-time scalar reduction), and receipts should not be called production-grade until it is there and until the signature code has been independently reviewed (lex-sys#209, area C: signatures).
+2. **Randomness exists, but not in a form hooks can share.** lex-sys has no randomness builtin by design: `docs/tls-pure.md` decides that the caller reads 32 bytes of `/dev/urandom` through `Fs` (the authority report names `fs_read("/dev/urandom")`) and draws everything else from a ChaCha20 fast-key-erasure generator, which today lives inside `packages/tls`. Hooks already reads `/dev/urandom` by hand in three places (`history.ls`'s SCRAM nonce and seed, `manage.ls`'s endpoint secrets). The salts of 48.4 would be a fourth. A generator in `std` that any program can seed and draw from, with the same refusal to run unseeded, is the clean answer and replaces all of them.
+3. **What "only the receipts module can sign" means.** The compiler's authority report has labels for the file system, the network and foreign calls; it has none for "reaches this key". What CI can pin is structural: that `std.ed25519.sign` is imported by exactly one module of the service (a check over the sources, as `scripts/check-authority.sh` is a check over a report). That is a convention a person approves in a diff, not a property the type system proves, and the documents should say so.
+
+### 48.9 How it would be tested
+
+* An **independent verifier in Python** (the `cryptography` library for Ed25519, `hashlib` for the tree) written apart from the service, as `chaos.py`'s log reader is: every receipt, inclusion proof and consistency proof the service gives is checked by it, and the lex-sys `hooks-verify` is checked against the same vectors. RFC 9162's own test vectors for the tree.
+* **Tampering is caught:** a flipped bit in a leaf, a swapped pair, a dropped record, a truncated log, an old checkpoint with a newer root, a checkpoint signed by another key: each must be refused by the verifier under its own reason, and each is also a mutant of the service's own code that a test must kill.
+* **Crashes:** `kill -9` as a power cut at each step of an append, a checkpoint and a segment drop: after the restart the receipts log equals what the outcomes log implies, every checkpoint ever given still verifies, and a consistency proof from any pre-crash checkpoint to a post-crash one holds.
+* **Erasure:** an erased event's receipt still verifies structurally, and its hash can no longer be matched to a payload.
+* **Cost, measured and not guessed:** SHA-256 per delivery, the tree append, and one Ed25519 signature per checkpoint (lex-sys's signature is slower than a native library; its speed is measured before the default interval is chosen), as a share of the CPU a delivery costs (section 40.9: 100 µs plain).
+
+### 48.10 Slices
+
+1. A `lexsys-log` tree: append, root, inclusion and consistency proofs, RFC 9162's vectors. The one piece that may belong in `lexsys-log` and not here.
+2. `receipts.seg`, derived from the outcomes log, with checkpoints, the signature, retention, recovery; `GET /events/:id/receipts` and `GET /receipts/*`; the Python verifier.
+3. `hooks-verify` in lex-sys.
+4. The receiver counter-signature (48.5) and the key setting on endpoints.
+5. Witnessing (48.7), and an ingest receipt.
+
+Slices 1 and 2 need the two lex-sys gaps of 48.8 for the salt (2) and for any claim of production quality (1); both are filed (lex-sys#289: a shared generator, and lex-sys#290: constant-time signing).
+
 ## 50. The API as a document an agent can read
 
 `docs/openapi.json` (OpenAPI 3.1) describes all 26 operations: path and query parameters, the body of each request, every status an operation answers and the shape of the body for it, and which of the three tokens it needs (`x-scope`, and `security`; since section 52 the document is generated and says it in `security` alone). `docs/llms.txt` is the short entry for an agent: what the service is, the facts that matter when calling it, and where the rest is. Both are on the product's site next to the page.
