@@ -4,7 +4,8 @@
 .gitignore
 build
 docs
-scripts
+scripts/*
+!scripts/cc-ssl.sh
 README.md
 LICENSE
 Dockerfile
