@@ -2362,7 +2362,7 @@ Nothing here needed a foreign function, and no workaround for a gap was written 
 
 ## 53. Keeping connections open to an endpoint (design, not built)
 
-*Status: a design, with its open questions in 53.9 for a person to answer before anything is built. Its claims are measured where it says so and arithmetic from measured parts where it says that; the build measures each and corrects this section in place.*
+*Status: a design; its open questions (53.9) answered as proposed (2026-10-06), not yet built. Its claims are measured where it says so and arithmetic from measured parts where it says that; the build measures each and corrects this section in place.*
 
 ### 53.1 Why
 
@@ -2423,6 +2423,8 @@ The change is in `src/attempt.ls` (states *draining* and *idle*, the pool, the e
 - **The soak (`docs/soak.md`)** on both builds with keep-alive on, before it is the default.
 
 ### 53.9 Open questions, for a person
+
+*Decided: all four as proposed (2026-10-06).*
 
 1. **On by default?** *Proposed: yes, with `keep-alive 0` to turn it off*, once 53.8's gates pass; the saving is a TLS handshake per delivery on every `https` endpoint.
 2. **The automatic retry of 53.4.** *Proposed: retry once, at once, on a new connection, only when the connection was reused and no byte of a response came*, accepting that a receiver which processed the request and closed without answering gets it twice (at-least-once, deduped on `webhook-id`). The other answer is to count it as a failed attempt and let the retry schedule redeliver, which delays that delivery by the first retry delay and adds a failure the receiver did not cause.
