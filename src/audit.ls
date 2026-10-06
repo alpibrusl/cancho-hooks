@@ -93,9 +93,9 @@ pub fn status_of[&b](answer: &b [byte]) -> [] int {
 
 // Whether a request is written: the routes of events, attempts, endpoints, replays, schedules and dead letters, and `/config`; an ingest only when it was
 // refused for its credentials; a path that matched no route (somebody looking); never `/healthz`, `/readyz`, `/metrics` or `/stats`. `id` is the route
-// (`hooks.route_table`), 0 or less for none.
+// (`api.declare`), 0 or less for none.
 pub fn wanted(id: int, status: int) -> [] bool {
-    if id == 1 || id == 4 || id == 40 || id == 41 {
+    if id == 1 || id == 4 || id == 25 || id == 26 {
         return false;
     }
     if id == 2 {

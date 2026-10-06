@@ -3,11 +3,14 @@
 
     python3 tests/authz_test.py build/hooks
 
-The routes are not listed here from memory: they are read from the source. Every `route.add` of src/hooks.ls must have a row in ROUTES below
-(its scope, the request that reaches it and the status of the handler behind the gate) and an entry in the table of src/authz.ls with the same
-method, path and scope; a route added without either fails this test, and so does a row or an entry for a route that is not there.
+The routes are not listed here from memory: they are read from the source. Every operation that `api.declare` (src/api.ls) declares must have a row
+in ROUTES below (its scope, the request that reaches it and the status of the handler behind the gate) and an entry in the table of src/authz.ls with
+the same method, path and scope; a route added without either fails this test, and so does a row or an entry for a route that is not there. The route
+numbers are the order of the declarations (`web.operation` numbers them 1, 2, 3 ...), which is how the table of src/authz.ls and `handle` name a route.
 
-  1. the routes of the source, the rows below and the table of src/authz.ls are the same set
+  1. the operations of the source, the rows below and the table of src/authz.ls are the same set; and the scope each operation DECLARES (the
+     `secure` call in src/api.ls, and the `security` of it in the committed docs/openapi.json) is the scope the table ENFORCES: the gate reads the
+     table, the document reads the declaration, and this is where they are made to agree
   2. for each way of configuring the tokens (all three; only the admin token; none; the production profile, whose read scope falls back to
      the admin token; ingest and read without an admin token), each route is called with no token, a wrong one, the ingest, the read and the
      admin token, and the status is the one the scope's table says (a request the gate lets through reaches its handler and has the
@@ -111,13 +114,45 @@ CONFIGS = {
     ),
 }
 
-HOOKS_SRC = open(os.path.join(ROOT, "src", "hooks.ls")).read()
+API_SRC = open(os.path.join(ROOT, "src", "api.ls")).read()
+SPEC = json.load(open(os.path.join(ROOT, "docs", "openapi.json")))
 AUTHZ_SRC = open(os.path.join(ROOT, "src", "authz.ls")).read()
 
 
 # ---- 1: the source, the rows and the table are the same set -------------------------------------------------------------------------------------
+SCOPE_OF_NUMBER = {0: "open", 1: "ingest", 2: "read", 3: "admin"}
+
+
+def declarations():
+    """The operations of src/api.ls in the order they are declared, which is their route number: {(method, path): (id, declared scope)}."""
+    found, current, n = {}, None, 0
+    for line in API_SRC.splitlines():
+        m = re.search(r'web\.operation\(heap, api, "([A-Z]+)", "([^"]+)", "(\w+)"\)', line)
+        if m:
+            n += 1
+            current = (m.group(1), m.group(2))
+            found[current] = [n, None]
+            continue
+        m = re.search(r"api = secure\(heap, api, \w+, (\d)\);", line)
+        if m and current is not None:
+            found[current][1] = SCOPE_OF_NUMBER[int(m.group(1))]
+    return {k: (v[0], v[1]) for k, v in found.items()}
+
+
 def source_routes():
-    return {(m, p): int(i) for m, p, i in re.findall(r'route\.add\(\s*heap,\s*r,\s*"([A-Z]+)",\s*"([^"]+)",\s*(\d+)\)', HOOKS_SRC)}
+    return {k: v[0] for k, v in declarations().items()}
+
+
+def document_scope(security):
+    """The scope a `security` array of the document stands for: [] open; one of ingest/read with the admin token as the other alternative; admin alone."""
+    names = [list(alternative)[0] for alternative in security]
+    if names == []:
+        return "open"
+    if names == ["admin"]:
+        return "admin"
+    if len(names) == 2 and names[1] == "admin" and names[0] in ("ingest", "read"):
+        return names[0]
+    return "?" + "+".join(names)
 
 
 def authz_table():
@@ -126,7 +161,7 @@ def authz_table():
 
 def stage_sets():
     src = source_routes()
-    check("1. the source registers routes (the pattern still finds them)", len(src) >= 19, f"{len(src)} found")
+    check("1. the source declares routes (the pattern still finds them)", len(src) >= 19, f"{len(src)} found")
     ids = list(src.values())
     check("1. route ids are unique", len(ids) == len(set(ids)), str(sorted(ids)))
     for key in sorted(src):
@@ -142,6 +177,15 @@ def stage_sets():
     for rid in sorted(table):
         check(f"1. the entry of src/authz.ls for route {rid} is a route of the source", rid in src.values())
     check("1. every route has an entry in the table", len(table) == len(src), f"{len(table)} entries, {len(src)} routes")
+    # the declaration and the table: the scope an operation is declared with is the scope that is enforced
+    declared = declarations()
+    for key, (rid, scope) in sorted(declared.items(), key=lambda kv: kv[1][0]):
+        entry = table.get(rid)
+        check(f"1. route {rid} ({key[0]} {key[1]}): the scope it is declared with ({scope}) is the one src/authz.ls enforces", entry is not None and entry[0] == scope, str(entry))
+        doc = SPEC["paths"].get(re.sub(r":(\w+)", r"{\1}", key[1]), {}).get(key[0].lower())
+        check(f"1. route {rid} ({key[0]} {key[1]}): docs/openapi.json has the operation, with the security of the scope {scope}", doc is not None and document_scope(doc.get("security", ["none"])) == scope, str(doc and doc.get("security")))
+    n_doc = sum(len([m for m in v if m != "parameters"]) for v in SPEC["paths"].values())
+    check("1. docs/openapi.json has exactly the operations the source declares", n_doc == len(declared), f"{n_doc} in the document, {len(declared)} declared")
 
 
 # ---- the service --------------------------------------------------------------------------------------------------------------------------

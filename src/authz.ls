@@ -20,9 +20,10 @@ import std.http;
 // the token. `GET /healthz` and `GET /readyz` are open whatever is configured. `production = 1` makes the service refuse to start without the admin and
 // ingest tokens, and treats an unset read token as the admin token (`hooks.ls`, `main`).
 //
-// **Fail closed.** The table below is the one place a route gets its scope. A route that is registered in `hooks.ls` and has no line here is
+// **Fail closed.** The table below is the one place a route gets its scope. A route that is declared in `api.ls` and has no line here is
 // `unscoped()`: it needs the admin token, and with no admin token configured it is refused outright (`403`), never open. A test
-// (`tests/authz_test.py`) lists every `route.add` of `hooks.ls` and fails if one has no line here or no row in its matrix.
+// (`tests/authz_test.py`) lists every operation `src/api.ls` declares and fails if one has no line here or no row in its matrix, or if the scope
+// the declaration documents for it is not the one this table enforces.
 //
 // The three tokens are kept in the delivery state one after another, 256 integers each (`manage.token_size()`): the admin token, then the
 // ingest token, then the read token. A token is compared by `manage.authorize`, which looks at every byte of the longest token there can be
@@ -61,8 +62,9 @@ pub fn read_at() -> [] int {
     return 2 * manage.token_size();
 }
 
-// THE TABLE. One entry for each route `routes()` registers in `hooks.ls`, by the id it gives the route: the scope, and (as the comment on
-// that line) the method and path, which the test checks against the `route.add` line. A new route is added HERE, on its own entry.
+// THE TABLE. One entry for each operation `src/api.ls` declares, by the id `web.operation` gives it (1, 2, 3 ... in the order of the declarations):
+// the scope, and (as the comment on that line) the method and path, which the test checks against the declaration. A new route is added HERE, on its
+// own entry, after it is declared at the END of `api.declare`.
 pub fn scope_of(id: int) -> [] int {
     if id == 1 {
         return s_open(); // GET /healthz
@@ -136,10 +138,10 @@ pub fn scope_of(id: int) -> [] int {
     if id == 24 {
         return s_admin(); // DELETE /events/:id
     }
-    if id == 40 {
+    if id == 25 {
         return s_open(); // GET /readyz
     }
-    if id == 41 {
+    if id == 26 {
         return s_read(); // GET /metrics
     }
     return s_unscoped();

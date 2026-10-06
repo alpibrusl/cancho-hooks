@@ -16,9 +16,29 @@ git = "https://github.com/alpibrusl/lex-sys"
 rev = "f804ce7e6fcf5717ea52442bf648a1fe81090f98"
 path = "packages/http-server/.lex-sys-vcs"
 
+# The API, declared once (src/api.ls): `web` makes the router and the OpenAPI document from one declaration, and `schema` is what the
+# declaration's bodies and answers are written in. `web` is a package of lexsys-web (its store is published by scripts/publish.sh there) and
+# records `schema` as its own requirement; the project names `schema` as well because its sources import it.
+[dependencies.schema]
+git = "https://github.com/alpibrusl/lexsys-schema"
+rev = "10d30edab333e5cfb5445c430020ed1999872e2f"
+path = ".lex-sys-vcs"
+
+[dependencies.web]
+git = "https://github.com/alpibrusl/lexsys-web"
+rev = "94fe0cd510ca95e8088cb2d975fc8bcce11379b1"
+path = ".lex-sys-vcs"
+
 [[bin]]
 name = "hooks"
 sources = ["src"]
+std = true
+
+# The OpenAPI document, printed (tools/openapi.ls; `scripts/openapi.sh` writes docs/openapi.json from it). It is built from the declaration the
+# service routes with (src/api.ls) and nothing else: no network, no clock, no filesystem, no foreign code.
+[[bin]]
+name = "hooks-openapi"
+sources = ["tools/openapi.ls", "src/api.ls"]
 std = true
 
 # The probe that tests signing and base64 on their own (tests/sign_test.py).

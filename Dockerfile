@@ -8,7 +8,7 @@
 # TWO STAGES, and what is pinned in each:
 #   compiler  the lex-sys compiler at the commit `lex-sys.toml` names ([package] lex-sys: one place, which `lex-sys build` itself
 #             checks), built with the Rust toolchain that commit's rust-toolchain.toml pins, from its Cargo.lock (--locked).
-#   build     `lex-sys build` of this repository: it fetches the two libraries lex-sys.toml pins by commit and checks them.
+#   build     `lex-sys build` of this repository: it fetches the libraries lex-sys.toml pins by commit and checks them.
 #   runtime   the binary, tini, a non-root user, a volume and a health check. Nothing else: no shell tools beyond the base image's,
 #             no compiler, no git.
 #
@@ -53,6 +53,7 @@ FROM compiler AS build
 WORKDIR /src/hooks
 COPY src ./src
 COPY tests ./tests
+COPY tools ./tools
 COPY sql ./sql
 COPY scripts/cc-ssl.sh ./scripts/cc-ssl.sh
 # The binary is normalized as scripts/release.sh does (no symbols, no build-id: the only bytes that differ between two builds of
