@@ -57,6 +57,11 @@ std = true
 [[bin]]
 name = "hooks-mcp"
 sources = ["tools/mcp.ls"]
+
+# The log checker (docs/design.md section 49): the same checks as scripts/logcheck.py, about 50 times faster on the one sample measured; backup.sh and restore.sh use it when it is built.
+[[bin]]
+name = "hooks-logcheck"
+sources = ["tools/logcheck.ls", "src/logguard.ls", "src/state.ls", "src/store.ls"]
 std = true
 
 # The unit tests (`lex-sys test`): each set is run against the installed libraries.
