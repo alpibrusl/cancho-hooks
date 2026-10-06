@@ -1,0 +1,25 @@
+# lexsys-hooks
+
+> A self-hosted webhook delivery service. POST an event once: it is on disk before the answer (202), then signed (Standard Webhooks), retried and replayable. Delivery is at least once; receivers drop a repeat by the `webhook-id` header (`evt_<id>`). One binary, one process; PostgreSQL is optional (it holds the endpoints table and the attempts history). Pre-release: not yet certified for production.
+
+## Use it
+- [OpenAPI description](https://alpibrusl.github.io/lexsys-hooks/openapi.json): every route, its scope and its answers. It is checked against the service by a test.
+- [HTTP API in prose](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/api.md): the same, with the details that do not fit a schema.
+- [Quick start](https://github.com/alpibrusl/lexsys-hooks#quick-start): build, one endpoint, one event.
+- [Configuration](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/configuration.md): every setting.
+
+## Facts that matter when calling it
+- Auth: bearer tokens in three scopes (ingest, read, admin); the admin token also does what the others do. A scope with no configured token leaves its routes open (development). `/healthz` and `/readyz` never need one.
+- Errors are JSON: `{"error": "..."}` with a meaningful status. `410` means the event was dropped by retention or erased (ids are never reused); `404` means the id was never given.
+- `POST /events` takes a JSON object with a string `type`; an `Idempotency-Key` header (1 to 255 visible ASCII characters) makes a retry return the same answer.
+- Replay: `POST /events/{id}/replay`, or `/replay/{endpoint}` for one. Dead letters: `GET /endpoints/{id}/dead`, `POST /endpoints/{id}/replay-dead`.
+- A new endpoint's secret is in the answer to `POST /endpoints` and in no other.
+
+## Running it
+- [Runbook](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/runbook.md): backup, restore, start failures.
+- [Security](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/security.md) and [privacy](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/privacy.md).
+- [Evidence](https://alpibrusl.github.io/lexsys-hooks/evidence.html): what was tested and how, and what is not claimed.
+
+## Optional
+- [Design](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/design.md): why each part is the way it is.
+- [Status](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md): what is not done.

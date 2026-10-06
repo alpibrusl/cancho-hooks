@@ -277,6 +277,10 @@ jobs:
         working-directory: hooks
         run: python3 tests/stop_test.py build/hooks
 
+      - name: OpenAPI (docs/openapi.json describes exactly the routes and scopes of the table, and the service's answers fit it)
+        working-directory: hooks
+        run: python3 tests/openapi_test.py build/hooks
+
       - name: Refuse corruption (a delivery log ahead of its events log, damage in the middle of a log, a torn tail still recovered, --repair-logs)
         working-directory: hooks
         run: python3 tests/corrupt_test.py build/hooks
