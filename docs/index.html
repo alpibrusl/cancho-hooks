@@ -95,6 +95,17 @@ pre.code { background: var(--soft); border: 1px solid var(--line); border-radius
 .status ul { margin: .4rem 0 0; padding-left: 1.2rem; color: var(--muted); }
 footer { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
+table.fit { width: 100%; border-collapse: collapse; margin-top: 2rem; font-size: .95rem; }
+table.fit th, table.fit td { text-align: left; padding: .8rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.fit thead th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+table.fit tbody th { font-weight: 650; }
+table.fit td { color: var(--muted); }
+table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us th { color: var(--fg); }
+@media (max-width: 44rem) { .fitwrap { overflow-x: auto; } table.fit.wide { min-width: 38rem; } }
+.cols { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); margin-top: 1.4rem; }
+.cols > div { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.3rem; background: var(--surface); }
+.cols ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--muted); } .cols li { margin: .25rem 0; }
+.cols .no h3 { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 </style>
 </head>
@@ -103,7 +114,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
 <header class="top"><div class="wrap">
   <a class="brand" href="#top">lexsys-hooks</a>
   <nav aria-label="Sections">
-    <a href="#how" class="opt">How it works</a><a href="#proof" class="opt">Tested</a><a href="#numbers" class="opt">Numbers</a><a href="#start">Quick start</a>
+    <a href="#why" class="opt">Why</a><a href="#proof" class="opt">Evidence</a><a href="#fit" class="opt">Where it fits</a><a href="#start">Try it</a>
     <a href="https://github.com/alpibrusl/lexsys-hooks">GitHub</a>
   </nav>
 </div></header>
@@ -112,10 +123,10 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
 
 <div class="hero" id="top">
   <div>
-    <a class="badge" href="#status"><i></i>Pre-release · 24 h soak running</a>
-    <h1>Webhooks that don&rsquo;t lose events.</h1>
-    <p class="lead">Post an event once. It&rsquo;s on disk before you get the answer, then signed and delivered, at least once, through crashes, outages and slow receivers.</p>
-    <div class="cta"><a class="btn primary" href="#start">Quick start</a><a class="btn ghost" href="evidence.html">See the evidence</a></div>
+    <a class="badge" href="#status"><i></i>Pre-release · we are trying to break it before you deploy it</a>
+    <h1>Webhooks that survive failure.</h1>
+    <p class="lead">A self-hosted webhook delivery service. Post an event once: it is on disk before you get the answer, then signed, retried and replayable through crashes, outages and slow receivers.</p>
+    <div class="cta"><a class="btn primary" href="#start">Try it</a><a class="btn ghost" href="#proof">See the evidence</a></div>
   </div>
   <div class="term" role="img" aria-label="An example request and its deliveries"><div class="bar"><i></i><i></i><i></i></div>
 <pre><span class="c">$</span> curl -d '{"type":"order.paid"}' hooks/events
@@ -136,6 +147,19 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
   <div><h3>Signed, and rotatable</h3><p>Standard Webhooks signatures. Rotate a secret with both signatures valid, so receivers switch without downtime.</p></div>
   <div><h3>Retry, dead-letter, replay</h3><p>Nine retries over about three days, then a dead letter you can list and replay.</p></div>
 </div>
+
+<section id="why">
+  <h2>Sending a webhook is easy. Not losing one is the work.</h2>
+  <div class="fitwrap"><table class="fit">
+    <thead><tr><th>When</th><th>What hooks does</th></tr></thead>
+    <tbody>
+      <tr><th>The service is killed after it said yes</th><td>The event is on disk first. After a restart it is delivered; nothing acknowledged is lost.</td></tr>
+      <tr><th>A receiver is down for hours</th><td>Retries on a growing schedule, then a dead letter you can list and replay.</td></tr>
+      <tr><th>A receiver is slow</th><td>Each endpoint has its own pace; the others do not wait.</td></tr>
+      <tr><th>The service dies after a receiver answered, before it wrote that down</th><td>The event is sent again. Delivery is at least once, so receivers de-duplicate on <code>webhook-id</code>.</td></tr>
+    </tbody>
+  </table></div>
+</section>
 
 <section id="how">
   <h2>How it works</h2>
@@ -180,12 +204,13 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
 </section>
 
 <section id="proof">
-  <h2>Broken on purpose</h2>
-  <p class="sub">The service is killed, its database is cut, its receivers lie, and a separate checker looks for lost, repeated or badly signed deliveries.</p>
+  <h2>We try to break it.</h2>
+  <p class="sub">Kill the process. Cut the database. Make receivers hang, reset and lie. Run it under load. Then a separate checker looks at every event for loss, repetition and bad signatures.</p>
   <figure class="figure wide">
     <img src="figures/soak.svg" alt="Timeline of a soak run: kills, database faults and bursts, and how far behind the endpoints that must keep up were; it rises in each fault and returns to nearly zero.">
     <figcaption>A 24-hour chaos run in progress (run 3, first 4.7 hours). Each red tick is a <code>kill -9</code> as a power cut; each amber bar, a database cut, frozen or black-holed. Every rise returns to nearly zero. <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/soak.md">What it checks, and what the first two runs found</a>.</figcaption>
   </figure>
+  <p class="note"><a href="evidence.html">The tests, what they found, and how each claim was measured</a></p>
   <div class="stats">
     <div><b>kill -9</b><span>and power cuts, at random instants and at every step of a compaction</span></div>
     <div><b>50</b><span>test programs against the real binary, with receivers that hang, reset and lie</span></div>
@@ -194,33 +219,20 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
   </div>
 </section>
 
-<section id="numbers">
-  <h2>Small, bounded, quick enough</h2>
-  <p class="sub">Measured on a shared 4-core VM. Each figure has its method on the <a href="evidence.html#costs">evidence page</a>.</p>
-  <div class="two">
-    <figure class="figure">
-      <h3>Disk for 3,000,000 events</h3>
-      <svg viewBox="0 0 420 124" role="img" aria-label="Disk used for three million events through one endpoint: about 1,002 megabytes if everything is kept, 95 megabytes with retention.">
-        <text class="s" x="0" y="18">Keep everything</text><rect class="bar2" x="0" y="26" width="400" height="26" rx="5"/><text class="t" x="394" y="44" text-anchor="end">≈ 1,002 MB</text>
-        <text class="s" x="0" y="82">hooks, with retention</text><rect class="bar1" x="0" y="90" width="38" height="26" rx="5"/><text class="t" x="46" y="108">95 MB</text>
-      </svg>
-      <figcaption>Finished events are dropped a segment at a time; an endpoint that is down keeps what it still needs.</figcaption>
-    </figure>
-    <figure class="figure">
-      <h3>Deliveries a second, one core</h3>
-      <svg viewBox="0 0 420 156" role="img" aria-label="Deliveries a second one core does: about 10,000 over plain HTTP, 1,460 over https with sessions resumed, 970 over https with a full handshake each time.">
-        <text class="s" x="0" y="18">plain HTTP</text><rect class="bar1" x="0" y="26" width="400" height="22" rx="5"/><text class="t" x="392" y="42" text-anchor="end" style="fill:var(--accent-fg)">≈ 10,000</text>
-        <text class="s" x="0" y="74">https, session resumed</text><rect class="bar1" x="0" y="82" width="58" height="22" rx="5"/><text class="t" x="66" y="98">1,460</text>
-        <text class="s" x="0" y="126">https, full handshake</text><rect class="bar1" x="0" y="134" width="39" height="22" rx="5"/><text class="t" x="47" y="150">970</text>
-      </svg>
-      <figcaption>Worked out from the measured CPU per delivery (about 100 µs plain); not a throughput run.</figcaption>
-    </figure>
-  </div>
-  <div class="stats">
-    <div><b>2.5 MB</b><span>resident after start</span></div>
-    <div><b>0.9 s</b><span>to start with 1,000,000 events retained</span></div>
-    <div><b>1,024</b><span>endpoints, each at its own pace</span></div>
-    <div><b>1</b><span>binary, one process, one core</span></div>
+<section id="fit">
+  <h2>Where it fits</h2>
+  <p class="sub">For teams that need durable webhook delivery without building a sender or running a messaging platform.</p>
+  <div class="fitwrap"><table class="fit wide">
+    <thead><tr><th></th><th>You run</th><th>You get</th><th>You give up</th></tr></thead>
+    <tbody>
+      <tr class="us"><th>hooks</th><td>One binary, optional PostgreSQL</td><td>Signing, retry, replay and per-endpoint pace, on your disk</td><td>One process: no clustering, no strict ordering</td></tr>
+      <tr><th>A queue and your own workers</th><td>A broker, and the workers you write</td><td>Whatever you build</td><td>Signing, pacing and replay are yours to write and test</td></tr>
+      <tr><th>A hosted webhook service</th><td>Nothing</td><td>Dashboards, scale</td><td>Your events pass through a third party</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols">
+    <div><h3>Built for</h3><ul><li>SaaS products sending customer webhooks</li><li>Billing and payment events</li><li>CRM and ERP integrations</li><li>Internal event-driven services</li></ul></div>
+    <div class="no"><h3>Not for</h3><ul><li>Stream processing or analytics at Kafka scale</li><li>Realtime messaging to browsers</li><li>A hosted webhook marketplace</li></ul></div>
   </div>
 </section>
 
@@ -238,9 +250,19 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
   </div>
 </section>
 
+<section id="start">
+  <h2>Try it</h2>
+  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/lexsys-hooks &amp;&amp; cd lexsys-hooks
+scripts/build.sh                                  # one binary: build/hooks
+mkdir data &amp;&amp; echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" &gt; data/endpoints.conf
+build/hooks --port 8080 --dir data --allow-private-hosts 1 &amp;
+curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre>
+  <p class="note">Building needs the pinned lex-sys compiler: the <a href="https://github.com/alpibrusl/lexsys-hooks#quick-start">README</a> has the extra lines, and a receiver that verifies each signature.</p>
+</section>
+
 <section id="lexsys">
-  <h2>Written in lex-sys</h2>
-  <p class="sub">A typed systems language whose compiler writes down what a program may do. That report is checked in CI, so a new foreign call is a change somebody has to approve.</p>
+  <h2>A durable webhook server, built in lex-sys</h2>
+  <p class="sub">lex-sys is a typed systems language whose compiler writes down what a program may do. For infrastructure that is the point: that report is checked in CI, so a new foreign call is a change somebody has to approve.</p>
   <div class="two">
     <figure class="figure">
       <h3><code>hooks</code>: foreign calls</h3>
@@ -260,24 +282,37 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
   <p class="note">Logs, the PostgreSQL client (SCRAM), DNS, HTTP and signatures are lex-sys too. No <code>unsafe</code>.</p>
 </section>
 
-<section id="start">
-  <h2>Quick start</h2>
-  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/lexsys-hooks &amp;&amp; cd lexsys-hooks
-scripts/build.sh                                  # one binary: build/hooks
-mkdir data &amp;&amp; echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" &gt; data/endpoints.conf
-build/hooks --port 8080 --dir data --allow-private-hosts 1 &amp;
-curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre>
-  <p class="note">Building needs the pinned lex-sys compiler: the <a href="https://github.com/alpibrusl/lexsys-hooks#quick-start">README</a> has the extra lines, and a receiver that verifies each signature.</p>
+<section id="numbers">
+  <h2>Small and bounded</h2>
+  <p class="sub">Measured on a shared 4-core VM. Each figure has its method on the <a href="evidence.html#costs">evidence page</a>.</p>
+  <div class="two" style="grid-template-columns:1fr;max-width:34rem">
+    <figure class="figure">
+      <h3>Disk for 3,000,000 events</h3>
+      <svg viewBox="0 0 420 124" role="img" aria-label="Disk used for three million events through one endpoint: about 1,002 megabytes if everything is kept, 95 megabytes with retention.">
+        <text class="s" x="0" y="18">Keep everything</text><rect class="bar2" x="0" y="26" width="400" height="26" rx="5"/><text class="t" x="394" y="44" text-anchor="end">≈ 1,002 MB</text>
+        <text class="s" x="0" y="82">hooks, with retention</text><rect class="bar1" x="0" y="90" width="38" height="26" rx="5"/><text class="t" x="46" y="108">95 MB</text>
+      </svg>
+      <figcaption>Finished events are dropped a segment at a time; an endpoint that is down keeps what it still needs.</figcaption>
+    </figure>
+    
+  </div>
+  <div class="stats">
+    <div><b>2.5 MB</b><span>resident after start</span></div>
+    <div><b>0.9 s</b><span>to start with 1,000,000 events retained</span></div>
+    <div><b>1,024</b><span>endpoints, each at its own pace</span></div>
+    <div><b>1</b><span>binary, one process, one core</span></div>
+  </div>
+  <p class="note">Throughput has not been benchmarked. The only per-delivery figure is the measured CPU cost (about 100 &micro;s over plain HTTP), and what it implies is on the <a href="evidence.html#costs">evidence page</a>, labelled as worked out.</p>
 </section>
 
 <aside class="status" id="status">
-  <h2>Not for production yet</h2>
+  <h2>Pre-release: we are trying to break it before you deploy it</h2>
   <ul>
-    <li>The 24-hour chaos soak and the capacity figures it gives are in progress; the first two runs found two real bugs, both fixed.</li>
+    <li>The 24-hour chaos soak is still running; the first two runs found two real bugs, both fixed. Until a clean run on the release candidate, it is not certified for production.</li>
     <li><code>https</code> uses OpenSSL until lex-sys&rsquo;s own TLS has been independently reviewed.</li>
     <li>One process on one core; put a reverse proxy in front for TLS on the service&rsquo;s own port.</li>
   </ul>
-  <p style="margin:.8rem 0 0"><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md">The full list, with what each one was measured as</a></p>
+  <p style="margin:.8rem 0 0"><a href="evidence.html">The evidence</a> · <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md">The full list of what is not done</a></p>
 </aside>
 
 </main>
