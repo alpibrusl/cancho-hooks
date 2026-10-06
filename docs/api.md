@@ -1,6 +1,6 @@
 # HTTP API
 
-The same routes as an [OpenAPI 3.1 document](openapi.json), which `tests/openapi_test.py` keeps equal to the route table and to what the service answers; [llms.txt](llms.txt) is the short version for an agent.
+The same routes as an [OpenAPI 3.1 document](openapi.json), generated from the declaration the service routes with (`src/api.ls`) and held by `tests/openapi_test.py` to the gate's table and to what the service answers; [llms.txt](llms.txt) is the short version for an agent.
 
 Every route of the service, the bearer-token scope it needs, and what it answers. The routes are registered in `src/hooks.ls` and the scope of each is the table in `src/authz.ls`; `tests/authz_test.py` checks the two against this list.
 

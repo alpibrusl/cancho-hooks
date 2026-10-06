@@ -29,6 +29,8 @@ import std.io;
 import std.json;
 import std.route;
 import http.server;
+import api;
+import web;
 import log;
 import evlog;
 import history;
@@ -632,11 +634,11 @@ fn metrics_reply[&h, &d, &l, &g, &x, &j, &q, &t](heap: &!h Heap, dv: &d [int], l
 // One request, answered or noted for later. `note[0]` is set to the event's id if the request was an accepted
 // `POST /events` (answer it after the flush, with `202`: a new event, or the one an earlier request with the same
 // `Idempotency-Key` made), and to -1 otherwise (the answer in `out` goes out now). `now` is the Unix time in ms.
-fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r route.Router, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] buffer.Buffer {
+fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h Heap, router: &r web.Api, request: &q [byte], table: &t [int], params: &!p [int], body: &b [byte], lg: &!l evlog.Ev, done: &!z log.Log, window: &!w [byte], scratch: &!c [byte], note: &!n [int], stats: &!s [int], ix: &!x [int], arena: &!y [byte], sg: &!u [int], now: int, out: buffer.Buffer) -> [heap, fs_read(""), fs_write(""), file_read, file_write, poll] buffer.Buffer {
     note[0] = 0 - 1;
     let keep = http.keeps_alive(table);
     let path = http.path(request, table);
-    let id = route.find(router, http.method(request, table), path, params);
+    let id = web.find(router, http.method(request, table), path, params);
     // the route, for the audit log (`audit.ls`), which the loop writes once the answer is known
     note[2] = id;
     // Who may call this route (`src/authz.ls`: the scope of every route is there, and a route with none is admin-only).
@@ -653,11 +655,11 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         // lists, changes, replays nor enables them (an event is still taken: it waits in the log for them).
         return server.failure(heap, out, 503, "the endpoints are not loaded yet: the database has not answered since the service started", keep);
     }
-    if id == 40 {
+    if id == 25 {
         // GET /readyz (section 34.1): open, like /healthz (`authz.scope_of`).
         return readyz_reply(heap, stats, lg, done, keep, out);
     }
-    if id == 41 {
+    if id == 26 {
         // GET /metrics (section 34.2). Scope: read (`authz.scope_of`).
         return metrics_reply(heap, stats, lg, done, ix, sg, now, keep, out, request, table);
     }
@@ -1317,7 +1319,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
     }
     if id == 0 - 2 {
         var extra = buffer.append(heap, buffer.empty(heap, 48), "Allow: ");
-        extra = route.allowed(heap, router, path, params, extra);
+        extra = web.allowed(heap, router, path, params, extra);
         extra = buffer.append(heap, extra, "\r\n");
         var answer = out;
         borrow extra as &eb in {
@@ -1713,37 +1715,6 @@ fn cancel_route[&h, &q, &p, &g, &s](heap: &!h Heap, id: int, path: &q [byte], pa
     }
     buffer.drop(heap, payload);
     return answer;
-}
-
-fn routes[&h](heap: &!h Heap) -> [heap] route.Router {
-    var r = route.empty(heap);
-    r = route.add(heap, r, "GET", "/healthz", 1);
-    r = route.add(heap, r, "POST", "/events", 2);
-    r = route.add(heap, r, "GET", "/events/:id", 3);
-    r = route.add(heap, r, "GET", "/stats", 4);
-    r = route.add(heap, r, "GET", "/config", 5);
-    r = route.add(heap, r, "POST", "/endpoints/:id/enable", 6);
-    r = route.add(heap, r, "GET", "/endpoints", 7);
-    r = route.add(heap, r, "POST", "/events/:id/replay", 8);
-    r = route.add(heap, r, "POST", "/events/:id/replay/:endpoint", 9);
-    r = route.add(heap, r, "GET", "/events/:id/attempts", 10);
-    r = route.add(heap, r, "POST", "/endpoints", 11);
-    r = route.add(heap, r, "GET", "/endpoints/:id", 12);
-    r = route.add(heap, r, "PATCH", "/endpoints/:id", 13);
-    r = route.add(heap, r, "DELETE", "/endpoints/:id", 14);
-    r = route.add(heap, r, "POST", "/schedules", 15);
-    r = route.add(heap, r, "GET", "/schedules", 16);
-    r = route.add(heap, r, "GET", "/schedules/:id", 17);
-    r = route.add(heap, r, "PATCH", "/schedules/:id", 18);
-    r = route.add(heap, r, "DELETE", "/schedules/:id", 19);
-    r = route.add(heap, r, "GET", "/endpoints/:id/dead", 20);
-    r = route.add(heap, r, "POST", "/endpoints/:id/replay-dead", 21);
-    r = route.add(heap, r, "DELETE", "/events/:id/replay/:endpoint", 22);
-    r = route.add(heap, r, "DELETE", "/endpoints/:id/replays", 23);
-    r = route.add(heap, r, "DELETE", "/events/:id", 24);
-    r = route.add(heap, r, "GET", "/readyz", 40);
-    r = route.add(heap, r, "GET", "/metrics", 41);
-    return r;
 }
 
 // ---------------------------------------------------------------------
@@ -3919,7 +3890,7 @@ fn say_unreadable[&i, &s](out: &!i Io, status: int, detail: int, state: &s [byte
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h Heap, router: &r route.Router, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int, ssl: &c Ffi("libcrypto,libssl"), tls_ctx: int, ns: int, ns_port: int, resume: bool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libcrypto"), ffi("libssl"), err_write] int {
+fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h Heap, router: &r web.Api, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int, ssl: &c Ffi("libcrypto,libssl"), tls_ctx: int, ns: int, ns_port: int, resume: bool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libcrypto"), ffi("libssl"), err_write] int {
     // The outcomes log is owned here, by value: a snapshot replaces it (`compact.ls`), and a resource can only be replaced by its owner.
     var done = done0;
     match poller_new() {
@@ -3933,8 +3904,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                 }
             }
             var widest = 1;
-            if route.most_params(router) > 1 {
-                widest = route.most_params(router);
+            if web.most_params(router) > 1 {
+                widest = web.most_params(router);
             }
             let params = box_slice(heap, 2 * widest, 0);
             let scratch = box_slice(heap, max_len() + 8192, byte_of(0));
@@ -5978,7 +5949,7 @@ fn main(world: World) -> [] int {
                                                                     var listener = l;
                                                                     borrow mut listener as &!lh in {
                                                                         listener_nonblocking(lh);
-                                                                        let router = routes(h);
+                                                                        let router = api.routes(h);
                                                                         put_token(contents(dvw), off_token(), cblob[config.token_at()..config.token_at() + config.token_len(cfg)]);
                                                                         put_token(contents(dvw), off_token() + authz.ingest_at(), cblob[config.ingest_token_at()..config.ingest_token_at() + config.ingest_token_len(cfg)]);
                                                                         if config.read_token_len(cfg) > 0 {
@@ -6041,7 +6012,7 @@ fn main(world: World) -> [] int {
                                                                                 }
                                                                             }
                                                                         }
-                                                                        route.drop(h, router);
+                                                                        web.drop(h, router);
                                                                     }
                                                                     // (the context is freed by `attempt.close_tls`, at the end of `run`)
                                                                     listener_close(listener);

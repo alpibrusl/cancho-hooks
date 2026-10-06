@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""docs/openapi.json is the service's API, checked (docs/design.md section 50).
+"""docs/openapi.json is the service's API, checked (docs/design.md sections 50 and 52).
 
     python3 tests/openapi_test.py build/hooks
+
+The document is GENERATED from the declaration the service routes with (`src/api.ls`; `scripts/openapi.sh --check` keeps the committed file equal to
+what that declaration prints). What this test adds is that it is also TRUE of the running service, and that the gate agrees with it.
 
   1. the document is a valid shape (OpenAPI 3.1, every $ref resolves, every operation has an id and answers) and describes exactly the
      routes of `src/authz.ls`'s table: the same methods, paths and scopes, and the security of each operation is its scope's
@@ -34,6 +37,20 @@ def check(name, ok, detail=""):
 
 # ---- 1. the document against the route table
 SCOPES = {0: "open", 1: "ingest", 2: "read", 3: "admin"}
+
+
+def scope_of_security(security):
+    """The scope a `security` array stands for: [] open; ingest or read with the admin token as the other alternative; admin alone."""
+    names = [list(alternative)[0] for alternative in security]
+    if names == []:
+        return "open"
+    if names == ["admin"]:
+        return "admin"
+    if len(names) == 2 and names[1] == "admin" and names[0] in ("ingest", "read"):
+        return names[0]
+    return "?" + "+".join(names)
+
+
 table = {}
 for m in re.finditer(r"return s_(\w+)\(\);\s*//\s*(GET|POST|PATCH|DELETE|PUT) (\S+)", open(os.path.join(ROOT, "src", "authz.ls")).read()):
     scope, method, path = m.groups()
@@ -42,14 +59,14 @@ for m in re.finditer(r"return s_(\w+)\(\);\s*//\s*(GET|POST|PATCH|DELETE|PUT) (\
 declared = {}
 for path, ops in SPEC["paths"].items():
     for method, o in ops.items():
+        if method == "parameters":
+            continue  # the parameters of the path, shared by its operations (the generated document writes each path parameter once)
         declared[(method.upper(), path)] = o
 check("1. the document has the same operations as the route table", set(declared) == set(table),
       f"only in the table: {sorted(set(table) - set(declared))}; only in the document: {sorted(set(declared) - set(table))}")
-check("1. every operation has the scope the table gives, and its security says so",
-      all(declared[k]["x-scope"] == table[k] and
-          (declared[k]["security"] == []) == (table[k] == "open") and
-          ({tuple(s)[0] for sec in declared[k]["security"] for s in [sec]} == {"admin"} if table[k] == "admin" else True)
-          for k in table if k in declared), "")
+check("1. every operation's security is the scope the gate's table enforces for it",
+      all(scope_of_security(declared[k].get("security", ["none"])) == table[k] for k in table if k in declared),
+      str({k: (scope_of_security(declared[k].get("security", ["none"])), table[k]) for k in table if k in declared and scope_of_security(declared[k].get("security", ["none"])) != table[k]}))
 ids = [o["operationId"] for o in declared.values()]
 check("1. operation ids are unique", len(ids) == len(set(ids)))
 check("1. the version is OpenAPI 3.1", SPEC["openapi"].startswith("3.1"))
@@ -81,6 +98,13 @@ def resolve(s):
             t = t[part]
         s = t
     return s
+
+
+def resolve_response(r):
+    t = SPEC
+    for part in r["$ref"][2:].split("/"):
+        t = t[part]
+    return t
 
 
 def fits(v, s, where="$"):
@@ -162,6 +186,9 @@ try:
         st, ctype, raw = call(method, path, body, headers)
         op = SPEC["paths"][spec_path][method.lower()]
         decl = op["responses"].get(str(st))
+        if decl is not None and "$ref" in decl:
+            # a shared response (`components.responses`): the answer of the status, whose body is then held to the schema it names
+            decl = {**resolve_response(decl), **{k: v for k, v in decl.items() if k != "$ref"}}
         if decl is None:
             check(f"2. {label}: {st} is declared", False, f"declared: {sorted(op['responses'])}; body {raw[:120]!r}")
             return st, raw
