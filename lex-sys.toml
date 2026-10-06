@@ -57,6 +57,7 @@ std = true
 [[bin]]
 name = "hooks-mcp"
 sources = ["tools/mcp.ls"]
+std = true
 
 # The log checker (docs/design.md section 54): the same checks as scripts/logcheck.py, about 50 times faster on the one sample measured; backup.sh and restore.sh use it when it is built.
 [[bin]]
