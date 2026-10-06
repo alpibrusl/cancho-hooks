@@ -1,0 +1,174 @@
+name: release
+
+# A tag `v*` builds the release tarballs (x86-64 and arm64) and the container image, and publishes them as a GitHub Release (a pre-release when
+# the tag has a `-`, as `v0.1.0-alpha.1`), with a build-provenance attestation. Any other push that touches what a release is made of
+# only DRY-RUNS it: the same build and the same checks, nothing published, the files kept as run artifacts for 14 days.
+#
+# Only GitHub's own actions are used. A release is made by pushing a tag, which is a person's decision (docs/operating.md, "Releases").
+on:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/release.sh"
+      - "scripts/release-smoke.sh"
+      - "scripts/release-notes.sh"
+      - "Dockerfile"
+      - "deploy/**"
+      - "lex-sys.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: hooks
+
+      - name: The version (the tag without its v, or a dry-run name) and the compiler pin
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dry.$(git -C hooks rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.v.outputs.rev }}
+          path: lex-sys
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: lex-sys/target/release/lex-sys
+          key: lex-sys-${{ runner.arch }}-${{ steps.v.outputs.rev }}
+
+      - name: Build lex-sys
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: lex-sys
+        run: cargo build --release --locked -p lex-sys
+
+      - name: OpenSSL development files (the service links against it)
+        run: |
+          dpkg -s libssl-dev >/dev/null 2>&1 || (sudo apt-get update -q && sudo apt-get install -y -q libssl-dev)
+
+      - name: Build and package (scripts/release.sh)
+        working-directory: hooks
+        env:
+          LEX_SYS: ${{ github.workspace }}/lex-sys/target/release/lex-sys
+        run: scripts/release.sh --version "${{ steps.v.outputs.version }}" --out "${{ github.workspace }}/dist"
+
+      - name: Try the tarball as a downloader would (checksum, unpack, start, post, read back, stop)
+        working-directory: hooks
+        run: scripts/release-smoke.sh "${{ github.workspace }}/dist/hooks-${{ steps.v.outputs.version }}-linux-$(uname -m).tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.arch }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  image:
+    # x86-64 only: the Dockerfile fetches the x86-64 rustup and builds the compiler inside.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The version
+        id: v
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"; else echo "version=0.0.0-dry.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build the image
+        run: docker build -t lexsys-hooks:${{ steps.v.outputs.version }} .
+
+      - name: Run it, wait for it to be healthy, post an event, read it back
+        run: |
+          docker volume create hooks-data
+          docker run -d --name hooks -p 8080:8080 -v hooks-data:/var/lib/hooks lexsys-hooks:${{ steps.v.outputs.version }}
+          for i in $(seq 1 60); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' hooks)
+            [ "$s" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' hooks)" = true ] || { docker logs hooks; exit 1; }
+            sleep 1
+          done
+          [ "$s" = healthy ] || { docker logs hooks; echo "the container never became healthy"; exit 1; }
+          code=$(curl -sS -o /tmp/post.json -w '%{http_code}' -X POST localhost:8080/events -d '{"type":"image.smoke"}')
+          [ "$code" = 202 ] || { cat /tmp/post.json; docker logs hooks; exit 1; }
+          curl -fsS localhost:8080/events/1 | grep -q image.smoke
+          docker stop hooks >/dev/null
+          [ "$(docker inspect -f '{{.State.ExitCode}}' hooks)" = 0 ] || { docker logs hooks; echo "it did not stop cleanly"; exit 1; }
+
+      - name: Publish the image (a tag only)
+        if: github.ref_type == 'tag'
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY,,}
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag lexsys-hooks:${{ steps.v.outputs.version }} "$image:${{ steps.v.outputs.version }}"
+          docker push "$image:${{ steps.v.outputs.version }}"
+          # `latest` names only a release that is not a pre-release.
+          case "${{ steps.v.outputs.version }}" in
+            *-*) ;;
+            *) docker tag lexsys-hooks:${{ steps.v.outputs.version }} "$image:latest"; docker push "$image:latest" ;;
+          esac
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [build, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+          pattern: release-*
+          merge-multiple: true
+
+      - name: One SHA256SUMS for every file
+        run: |
+          mkdir release
+          find parts -type f \( -name 'hooks-*.tar.gz' -o -name 'hooks-*.sbom.json' \) -exec cp {} release/ \;
+          (cd release && sha256sum hooks-* > SHA256SUMS && cat SHA256SUMS && sha256sum -c SHA256SUMS)
+          [ "$(ls release/hooks-*.tar.gz | wc -l)" = 2 ] || { echo "expected one tarball per architecture"; ls release; exit 1; }
+
+      - name: Attest the build provenance of the tarballs
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/hooks-*.tar.gz
+
+      - name: Create the release (a pre-release when the tag has a `-`)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=0; case "$GITHUB_REF_NAME" in *-*) pre=1 ;; esac
+          scripts/release-notes.sh "$GITHUB_REF_NAME" "$pre" > notes.md
+          flags=(); [ "$pre" = 1 ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "lexsys-hooks ${GITHUB_REF_NAME#v}" --notes-file notes.md "${flags[@]}"
