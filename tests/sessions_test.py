@@ -7,7 +7,9 @@ A delivery to an `https` endpoint costs a handshake, because the service closes 
 delivery makes that handshake abbreviated (half the CPU, `scripts/bench/https_cost.py`). The service keeps one session per endpoint, in memory, and offers it only to the same
 name and port. What is checked here is seen from the receiver's side, which counts the handshakes that resumed one:
 
-  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2, and in slot 1000); `tls-resume 0` never resumes
+  1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2, and in slot 1000); `tls-resume 0` never resumes. The pure
+     build (`pure/build/hooks-pure`, docs/pure-tls.md) resumes TLS 1.3 only, by lex-sys's design (its `docs/tls-resumption.md` §3 rule 7): its TLS 1.2 deliveries are six full
+     handshakes
   2. a session is the endpoint's own: a second endpoint, behind the same receiver, starts with a full handshake of its own, and resumes its own after that
   3. the session is dropped when the endpoint changes: `PATCH` of the host, of the port, of the secret, and a `DELETE` followed by a new endpoint (which may have the old one's
      slot) each make the next delivery a full handshake, verified against the trust store again
@@ -26,6 +28,8 @@ import opslib as L  # noqa: E402
 import tlskit as K  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
+# The build with lex-sys's own TLS (docs/pure-tls.md), which resumes TLS 1.3 only.
+PURE = os.path.basename(BIN) == "hooks-pure"
 TOKEN = "sessions-test-token"
 check = L.Checks()
 
@@ -78,7 +82,10 @@ def main():
         for n in range(1, 7):
             r.event(n)
             r.delivered(n)
-        check(f"1. {label}: six deliveries, six handshakes, the first full and the five after it resumed", srv.handshakes == 6 and srv.resumed == 5, f"{srv.handshakes} {srv.resumed}")
+        if kw and PURE:
+            check(f"1. {label}, the pure build: six deliveries, six full handshakes (it resumes TLS 1.3 only)", srv.handshakes == 6 and srv.resumed == 0, f"{srv.handshakes} {srv.resumed}")
+        else:
+            check(f"1. {label}: six deliveries, six handshakes, the first full and the five after it resumed", srv.handshakes == 6 and srv.resumed == 5, f"{srv.handshakes} {srv.resumed}")
         check(f"1. {label}: the receiver saw the protocol it was meant to", {s["version"] for s in srv.seen} == {"TLSv1.3" if not kw else "TLSv1.2"}, str({s["version"] for s in srv.seen}))
         check(f"1. {label}: nothing failed", r.svc.stats()["delivered"] == 6 and r.svc.stats()["failed"] == 0)
         r.close()

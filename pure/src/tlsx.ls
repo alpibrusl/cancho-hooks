@@ -3,6 +3,7 @@ edition 5;
 module tlsx;
 
 import std.conns;
+import epx;
 import tls;
 import tls_record;
 
@@ -413,10 +414,11 @@ pub fn shutdown[&e, &t, &a, &o](engine: &!e tls.Engine, tab: &!t conns.Table, tt
 // Sessions: tickets the engine keeps (lex-sys `docs/tls-resumption.md`)
 // ---------------------------------------------------------------------
 
-// The ticket of the connection in `slot`, to give `open` for a later connection to the same server: a handle, or 0 if the server sent none. The engine keeps
-// the ticket and its secret; the caller holds only the handle, and gives it back with `free_session`.
-pub fn save_session[&e, &a](engine: &!e tls.Engine, slot: int, tt: &a [int], b: int) -> [] int {
-    return tls.save(engine, slot);
+// The ticket of the connection in `slot`, kept in the pool `session` (0: a new pool), to give `open` for a later connection to the same server: the pool, or 0
+// if the server sent none. The engine keeps the tickets and their secrets; the caller holds only the pool, and gives it back with `free_session`. A pool
+// holds `epx.max_concurrency()` tickets, the newest (lex-sys `docs/tls-resumption.md` §12).
+pub fn save_session[&e, &a](engine: &!e tls.Engine, slot: int, tt: &a [int], b: int, session: int) -> [] int {
+    return tls.save_to(engine, slot, session);
 }
 
 pub fn free_session[&e](engine: &!e tls.Engine, session: int) -> [] int {
@@ -463,6 +465,9 @@ pub fn setup[&e, &h, &f, &c](engine: &!e tls.Engine, heap: &!h Heap, fs: &f Fs("
             if tls.seed(engine, entropy) == 0 {
                 // Every ClientHello says the service can resume, without which Go's and rustls's servers send no ticket (RFC 8446 §4.2.9).
                 tls.set_resumption(engine, true);
+                // A pool of tickets an endpoint, as many as its deliveries in flight can be, so that each of a burst finds one (lex-sys
+                // `docs/tls-resumption.md` §12).
+                tls.set_tickets_per_pool(engine, epx.max_concurrency());
                 seeded = true;
             }
         }

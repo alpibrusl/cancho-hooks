@@ -16,13 +16,17 @@ MUTANTS = [
  ("P13", "pure/src/tlsx.ls", "        if len(cafile) > 0 {\n            roots = load(engine, fs, cafile, buf);", "        if false {\n            roots = load(engine, fs, cafile, buf);", ["https"]),
  ("P14", "pure/src/tlsx.ls", "    if n < 1 || n >= len(into) {\n        return 0;\n    }", "    if n < 1 {\n        return 0;\n    }", ["https", "pure"]),
  ("P15", "pure/src/tlsx.ls", "    tls.finish(engine, slot);\n    flush(engine, tab, tt, b, out, slot);", "    flush(engine, tab, tt, b, out, slot);", ["https", "pure"]),
- ("P16", "pure/src/tlsx.ls", "                tls.set_resumption(engine, true);\n                seeded = true;", "                tls.set_resumption(engine, true);\n                seeded = false;", ["https"]),
+ ("P16", "pure/src/tlsx.ls", "                tls.set_tickets_per_pool(engine, epx.max_concurrency());\n                seeded = true;", "                tls.set_tickets_per_pool(engine, epx.max_concurrency());\n                seeded = false;", ["https"]),
  ("P17", "pure/src/tlsx.ls", "        if c >= 0 && c < k {\n                tt[b + 1] = c;", "        if false {\n                tt[b + 1] = c;", ["https", "pure"]),
  ("P18", "pure/src/tlsx.ls", "    if code == tls_record.x509_bad_signature() {\n        return 7;", "    if code == tls_record.x509_bad_signature() {\n        return 62;", ["https", "pure"]),
- ("P19", "pure/src/tlsx.ls", "    return tls.save(engine, slot);", "    return 0;", ["pure"]),
+ ("P19", "pure/src/tlsx.ls", "    return tls.save_to(engine, slot, session);", "    return 0;", ["pure"]),
  ("P20", "pure/src/tlsx.ls", "            if tls.resumed(engine, slot) {\n                tt[b + 8] = 1;", "            if false {\n                tt[b + 8] = 1;", ["pure"]),
  ("P21", "pure/src/tlsx.ls", "    let code = tls.start_with(engine, slot, host, now_ms, session);", "    let code = tls.start_with(engine, slot, host, now_ms, 0);", ["pure"]),
  ("P22", "pure/src/tlsx.ls", "                tls.set_resumption(engine, true);", "                tls.set_resumption(engine, false);", ["pure"]),
+ # A pool of tickets an endpoint (lex-sys docs/tls-resumption.md §12): a burst to one endpoint resumes only if each connection finds a ticket.
+ ("P23", "pure/src/tlsx.ls", "tls.set_tickets_per_pool(engine, epx.max_concurrency());", "tls.set_tickets_per_pool(engine, 1);", ["sessions"]),
+ ("P24", "pure/src/tlsx.ls", "    return tls.save_to(engine, slot, session);", "    return tls.save_to(engine, slot, 0);", ["sessions"]),
+ ("P25", "scripts/make_pure.py", "    if at[env_at() + e_keys() + e] != key {\n        drop_session(engine, at, e);\n    }\n", "    drop_session(engine, at, e);\n", ["sessions"]),
 ]
 
 # Survivors, and why (docs/pure-tls.md): P07, P10 and P17 each guard a state the service cannot reach. P07: by the time a closed socket reaches the last line of the handshake's handling,

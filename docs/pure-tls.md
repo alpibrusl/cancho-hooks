@@ -69,7 +69,7 @@ the least and the most; ECDSA P-256 certificates, TLS 1.3). The CPU time is read
 |---|---|---|---|
 | `http, name` (the floor: no TLS) | 1 / 10 | 133 (117 to 150) / 67 (33 to 67) µs | 117 (100 to 117) / 33 (33 to 50) µs |
 | `https`, a full handshake | 1 / 10 | 700 (483 to 817) / 400 (367 to 400) µs | **2,950** (2,933 to 2,983) / **2,900** (2,867 to 2,933) µs |
-| `https`, resumed | 1 / 10 | 250 (233 to 267) / 200 (183 to 200) µs | 3,000 / 2,900 µs before lex-sys#286; **1,900 (1,883 to 1,933) / 1,533 (1,483 to 1,567) µs** after, with 401 and 528 of 600 resumed (below) |
+| `https`, resumed | 1 / 10 | 250 (233 to 267) / 200 (183 to 200) µs | 3,000 / 2,900 µs before lex-sys#286; 1,900 (1,883 to 1,933) / 1,533 (1,483 to 1,567) µs after, with 401 and 528 of 600 resumed; **1,400 (1,333 to 1,583) / 1,350 (1,333 to 1,367) µs** with a pool of tickets an endpoint (lex-sys#310), 593 and 584 resumed (below) |
 | `https`, full, a 50,000-byte event | 1 / 10 | 1,333 (1,200 to 1,367) / 800 (767 to 800) µs | 4,300 (4,267 to 4,400) / 4,067 (4,000 to 4,067) µs |
 
 - **Resumption (lex-sys#286), measured** on the same VM and day as its own run (a second run of the table's rows: OpenSSL full 917 and 383 µs, resumed 250 and 217 µs; pure full
@@ -77,6 +77,10 @@ the least and the most; ECDSA P-256 certificates, TLS 1.3). The CPU time is read
   **a resumed delivery costs about 1,350 µs** (1,353 and 1,337 from the two rows), 2.2 times cheaper than a full one and about 740 a second a core; OpenSSL's resumed is 200 to 250 µs.
   **Why fewer resume:** `https_cost.py` posts every event at once, so several deliveries to one endpoint are in flight together. OpenSSL lends one session to all of them; the pure
   build's ticket is used once (RFC 8446 Appendix C.4), and the service keeps one per endpoint, so the others make full handshakes. The load average was 2.2 when this run started.
+- **A pool of tickets an endpoint (lex-sys#310, its `docs/tls-resumption.md` §12).** An endpoint's saved session is now a pool of up to `epx.max_concurrency()` (8) tickets,
+  its cap on deliveries in flight: each connection's ticket joins the pool (`tlsx.save_session`), and each new connection takes the newest. Measured again, the same way: **593
+  of 600 deliveries resumed with one endpoint and 584 with ten**, at 1,400 and 1,350 µs a delivery, against 401 and 528 at 1,900 and 1,533 µs. `tests/sessions_test.py`'s
+  bursts resume 3,192 of 3,200 deliveries, as the OpenSSL build does, against 1,943. Memory does not change: the table is still 1,024 tickets, shared by every endpoint.
 - **A full handshake costs the pure build 4 to 7 times what OpenSSL's does** (2.9 ms against 0.4 to 0.7 ms), and **12 to 15 times a resumed one**. Without the floor that is about 2.8 ms
   against 0.3 to 0.6 ms for the handshake alone. A core does about **340** `https` deliveries a second with the pure build, against 1,430 to 2,500 with OpenSSL here
   (`docs/status.md` has about 970 for OpenSSL on a shared 4-core x86-64 VM: the machine is part of the result).
@@ -105,7 +109,7 @@ measured as latency). **Not measured either:** RSA certificate chains (the test 
 
 ```
 python3 scripts/https_both.py                          # the https tests on both builds, the outcomes compared: every difference must be listed in the script
-PURE=1 python3 scripts/mutate.py tests/mutants/pure.py   # the adapter's mutants (21 mutants of the adapter: 18 killed, 3 survive, below)
+PURE=1 python3 scripts/mutate.py tests/mutants/pure.py   # the adapter's mutants (24 mutants of the adapter: 21 killed, 3 survive, below; P23 to P25, the pool, are killed by `sessions`)
 python3 tests/pure_test.py pure/build/hooks-pure       # what only the pure build does: an oversize trust store, no environment, close_notify, resumption seen from the receiver
 scripts/check-authority.sh --pure                      # the authority report is docs/authority-pure.json
 ```
@@ -130,9 +134,9 @@ thousands of copies of one certificate, which the store of roots refuses for its
 ## Not done
 
 - **Making it the default.** That is lex-sys#209's review, and a person's.
-- **TLS 1.2 resumption, and a ticket for every connection in a burst.** `tests/sessions_test.py` passes on the pure build (with PostgreSQL) except two checks, each from lex-sys's
-  design: its TLS 1.2 deliveries do not resume (TLS 1.3 only), and of 3,200 deliveries to one endpoint posted in bursts 1,943 resumed where the check wants 3,100 (a ticket used once,
-  above). Keeping several tickets per endpoint would close the second; it is lex-sys `docs/tls-resumption.md` §9's question 2.
+- **TLS 1.2 resumption.** lex-sys resumes TLS 1.3 only (its `docs/tls-resumption.md` §3 rule 7), so `tests/sessions_test.py` expects six full handshakes of the pure build's
+  TLS 1.2 deliveries, and passes on it (with PostgreSQL). *Corrected:* this said the test failed two checks, the second a burst resuming 1,943 of 3,200; the pool of tickets
+  (above) closed it.
 - **The environment.** `SSL_CERT_FILE` and `SSL_CERT_DIR` are not read (above). A deployment that sets either names the file with `tls-ca-file`.
 - **The other database tests on the pure build**, and the 24-hour soak.
 - **RSA chains, and a measurement of the loop's latency under handshakes.**
