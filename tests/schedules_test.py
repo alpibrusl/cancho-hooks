@@ -110,6 +110,7 @@ class Svc:
         env = dict(os.environ)
         if self.shim and os.path.exists(SHIM):
             env["LD_PRELOAD"] = SHIM
+        self.preloaded = env.get("LD_PRELOAD") == SHIM
         self.proc = subprocess.Popen([BIN, *self.args], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env=env)
         RUNNING.append(self.proc)
         self.lines = []
@@ -132,6 +133,9 @@ class Svc:
             self.proc.send_signal(signal.SIGKILL)
         self.proc.wait()
         if power:
+            # Without the shim there is no `<file>.synced`, and the cut would take flushed records too (retention_test.power_cut_needs_shim).
+            if not getattr(self, "preloaded", False):
+                raise SystemExit(f"schedules_test: a power cut needs the fsync shim loaded into the service, and {SHIM} was not (scripts/build.sh builds it)")
             for name in sorted(os.listdir(self.d)):
                 if name.endswith(".seg"):
                     chaos.Service.cut_file(self, os.path.join(self.d, name))
