@@ -42,6 +42,7 @@ import record;
 import attempt;
 import dbname;
 import audit;
+import bodies;
 import crc;
 import idem;
 import std.conns;
@@ -327,15 +328,69 @@ fn event_record[&c, &b, &y, &k](scratch: &!c [byte], ms: int, body: &b [byte], t
     return record.seal(scratch, 0, end);
 }
 
+// `event_record` with the pair `x` that names the key a sealed body was sealed with (`bodies.ls`, section 47.4), last.
+fn event_record_x[&c, &b, &y, &k, &f](scratch: &!c [byte], ms: int, body: &b [byte], typ: &y [int], tlen: int, key: &k [byte], keyed: bool, now: int, fp: &f [byte]) -> [] int {
+    var fields = 2;
+    if tlen > 0 {
+        fields = fields + 1;
+    }
+    if keyed {
+        fields = fields + 2;
+    }
+    let p = record.begin(scratch, 0, ms, 0, fields);
+    var end = record.put_pair(scratch, p, "event", body);
+    if tlen > 0 {
+        region ty {
+            let tb = alloc_slice[ty](filter.max_type() + 8, byte_of(0));
+            var k = 0;
+            while k < tlen {
+                tb[k] = byte_of(typ[k]);
+                k = k + 1;
+            }
+            end = record.put_pair(scratch, end, "typ", tb[0..tlen]);
+        }
+    }
+    if !keyed {
+        end = record.put_pair(scratch, end, "x", fp);
+        return record.seal(scratch, 0, end);
+    }
+    end = record.put_pair(scratch, end, "key", key);
+    region a {
+        let stamp = alloc_slice[a](8, byte_of(0));
+        record.put_u64(stamp, 0, now);
+        end = record.put_pair(scratch, end, "t", stamp);
+    }
+    end = record.put_pair(scratch, end, "x", fp);
+    return record.seal(scratch, 0, end);
+}
+
 // Append the event `body` (already judged) to the log, under `key` if it is `keyed`, and note the key in the index. This is the whole of storing an event: `POST /events`
 // and a schedule's fire (`fire_cron`) both end here, so a fire is an ordinary event. `sum` is the CRC-32C of `body`, `entry` the index entry of a key that is
 // held or -1 (an entry that had expired has been removed by the caller, and room made). `typ[0..tlen]` is the type the record keeps (`tlen` 0 for none). Answers `(code, id)`: 0 and the event's id, or what `evlog.append` refused with.
-fn store_event[&c, &b, &t, &k, &l, &x, &y](scratch: &!c [byte], body: &b [byte], typ: &t [int], tlen: int, key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], now: int) -> [] (int, int) {
+fn store_event[&c, &b, &t, &k, &l, &x, &y, &z](scratch: &!c [byte], body: &b [byte], typ: &t [int], tlen: int, key: &k [byte], keyed: bool, sum: int, entry: int, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], now: int, bd: &!z [int]) -> [] (int, int) {
     var ms = 1;
     if evlog.last_id(lg) >= 1 {
         ms = evlog.last_id(lg) + 1;
     }
-    let total = event_record(scratch, ms, body, typ, tlen, key, keyed, now);
+    var total = 0;
+    if bodies.on(bd) {
+        // At rest the body is sealed (`docs/design.md` section 47.4): nonce, ciphertext and tag, and a pair `x` naming the key. The room is a region's, left by
+        // falling out of it.
+        region sb {
+            let sealed = alloc_slice[sb](len(body) + bodies.overhead(), byte_of(0));
+            let n = bodies.seal(bd, ms, body, sealed);
+            if n > 0 {
+                let fp = alloc_slice[sb](4, byte_of(0));
+                bodies.print_bytes(bd, fp);
+                total = event_record_x(scratch, ms, sealed[0..n], typ, tlen, key, keyed, now, fp);
+            }
+        }
+        if total == 0 {
+            return (evlog.is_broken(), 0);
+        }
+    } else {
+        total = event_record(scratch, ms, body, typ, tlen, key, keyed, now);
+    }
     let code = evlog.append(lg, scratch[0..total], ms);
     if code != 0 {
         return (code, 0);
@@ -669,7 +724,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
                 }
             }
         }
-        let stored = store_event(scratch, body, stats[off_ex() + ex_type()..off_ex() + ex_type() + filter.max_type()], tlen, key, keyed, sum, entry, lg, ix, arena, now);
+        let stored = store_event(scratch, body, stats[off_ex() + ex_type()..off_ex() + ex_type() + filter.max_type()], tlen, key, keyed, sum, entry, lg, ix, arena, now, stats[off_body()..off_body() + bodies.size()]);
         if stored.0 == log.too_long() {
             return refuse_event(heap, out, stats, 413, "the event is too large", keep);
         }
@@ -703,7 +758,7 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         if event_erased(lg, window, want) {
             return server.failure(heap, out, 410, "the event was erased (DELETE /events/:id)", keep);
         }
-        let found = find_event(heap, lg, window, want);
+        let found = find_event(heap, lg, window, want, stats[off_body()..off_body() + bodies.size()]);
         var answer = out;
         var empty = false;
         borrow found as &sz in {
@@ -757,6 +812,10 @@ fn handle[&h, &r, &q, &t, &p, &b, &l, &w, &c, &n, &s, &x, &y, &z, &u](heap: &!h 
         w = json.put_int(heap, w, history.dropped(stats[off_hq()..off_hq() + history.size()]));
         w = json.put_key(heap, w, "history_pruned");
         w = json.put_int(heap, w, history.pruned(stats[off_hq()..off_hq() + history.size()]));
+        w = json.put_key(heap, w, "bodies_sealed");
+        w = json.put_int(heap, w, bodies.sealed_count(stats[off_body()..off_body() + bodies.size()]));
+        w = json.put_key(heap, w, "bodies_refused");
+        w = json.put_int(heap, w, bodies.refused_count(stats[off_body()..off_body() + bodies.size()]));
         w = json.put_key(heap, w, "events_erased");
         w = json.put_int(heap, w, stats[off_ex() + ex_erased()]);
         w = json.put_key(heap, w, "events_expired");
@@ -2198,8 +2257,13 @@ fn off_aud() -> [] int {
     return off_dbn() + dbname.size();
 }
 
-fn off_token() -> [] int {
+// The key that seals the bodies at rest (`bodies.ls`, `docs/design.md` section 47.4).
+fn off_body() -> [] int {
     return off_aud() + audit.size();
+}
+
+fn off_token() -> [] int {
+    return off_body() + bodies.size();
 }
 
 fn off_mg() -> [] int {
@@ -3187,17 +3251,41 @@ fn start_one[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r](heap: &!h Heap, lg: &!l
         dv[off_lag() + e] = 1;
         return (atab, 0);
     }
-    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+    // A sealed body is opened for the ask (`bodies.ls`, section 47.4), in a room left by falling out of it; one that does not open is not sent.
+    var ask = buffer.empty(heap, 0);
+    var opened = true;
+    let fp = bodies.sealed_by(window, 0);
+    if fp < 0 {
+        buffer.drop(heap, ask);
+        ask = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+    } else {
+        region ob {
+            let plain = alloc_slice[ob](p.3, byte_of(0));
+            let n = bodies.open(dv[off_body()..off_body() + bodies.size()], id, fp, window[p.2..p.2 + p.3], plain);
+            if n >= 0 {
+                buffer.drop(heap, ask);
+                ask = wire.request(heap, id, plain[0..n], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+            } else {
+                opened = false;
+            }
+        }
+    }
+    if !opened {
+        buffer.drop(heap, ask);
+        dv[flight_at(e, id)] = 1;
+        dv[off_flying() + e] = dv[off_flying() + e] + 1;
+        return (atab, finish_attempt(done, dv, clock, e, id, attempt.no_connect(), 0));
+    }
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
-    borrow request as &qb in {
+    borrow ask as &qb in {
         let (grown, slot, answer) = attempt.begin(heap, table, poller, net, endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i), buffer.bytes(qb), at, req, token0, e, id, clock_ms(clock) + dv[c_deadline()]);
         table = grown;
         started = slot;
         code = answer;
     }
-    buffer.drop(heap, request);
+    buffer.drop(heap, ask);
     if started >= 0 {
         dv[flight_at(e, id)] = 1;
         dv[off_flying() + e] = dv[off_flying() + e] + 1;
@@ -3235,17 +3323,38 @@ fn start_replay[&h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &q](heap: &!h Heap, lg: 
         note_outcome(done, dv, state.replay_cancelled(), e, id, 0, 0);
         return (atab, 1);
     }
-    let request = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+    var ask = buffer.empty(heap, 0);
+    var opened = true;
+    let fp = bodies.sealed_by(window, 0);
+    if fp < 0 {
+        buffer.drop(heap, ask);
+        ask = wire.request(heap, id, window[p.2..p.2 + p.3], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+    } else {
+        region ob {
+            let plain = alloc_slice[ob](p.3, byte_of(0));
+            let n = bodies.open(dv[off_body()..off_body() + bodies.size()], id, fp, window[p.2..p.2 + p.3], plain);
+            if n >= 0 {
+                buffer.drop(heap, ask);
+                ask = wire.request(heap, id, plain[0..n], endpoints.key_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), dv[off_xt()..off_xt() + epx.xt_size()], i, clock_unix_ms(clock), endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i));
+            } else {
+                opened = false;
+            }
+        }
+    }
+    if !opened {
+        buffer.drop(heap, ask);
+        return (atab, finish_replay(done, dv, clock, e, id, attempt.no_connect(), 0));
+    }
     var table = atab;
     var started = 0 - 1;
     var code = attempt.no_connect();
-    borrow request as &qb in {
+    borrow ask as &qb in {
         let (grown, slot, answer) = attempt.begin(heap, table, poller, net, endpoints.host_of(dv[off_table()..off_table() + endpoints.table_size()], blob, i), endpoints.port_of(dv[off_table()..off_table() + endpoints.table_size()], i), buffer.bytes(qb), at, req, token0, e, id + replay_base(), clock_ms(clock) + dv[c_deadline()]);
         table = grown;
         started = slot;
         code = answer;
     }
-    buffer.drop(heap, request);
+    buffer.drop(heap, ask);
     if started >= 0 {
         return (table, 0);
     }
@@ -3494,7 +3603,7 @@ fn delivery_turn[&f, &h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](ffi: &f
 // stopped between the two, and nothing is appended (this is the whole of "exactly once"; the key is held whatever its age). Answers 0 (the event is in
 // the log, now or before), 1 (the schedule cannot make an event: its type or body is not what the service wrote, or the event is too large), or 2 (the
 // log or the key index would not take it: the row stays due).
-fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte]) -> [heap] int {
+fn fire_cron[&h, &m, &c, &l, &x, &y, &z](heap: &!h Heap, rep: &m [byte], row: int, second: int, now: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], bd: &!z [int]) -> [heap] int {
     let id = queries.schedules_due_id(rep, row);
     var outcome = 2;
     // The region is left by falling out of it, on every path: one left by a `return` is not given back (lex-sys #252), and this runs for every fire.
@@ -3536,7 +3645,7 @@ fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, s
                 if len(why) > 0 {
                     outcome = 1;
                 } else {
-                    let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, cix, carena, now);
+                    let stored = store_event(scratch, text, tbuf, tlen, key, true, crc.of(text), 0 - 1, lg, cix, carena, now, bd);
                     if stored.0 == 0 {
                         outcome = 0;
                     } else if stored.0 == log.too_long() {
@@ -3553,7 +3662,7 @@ fn fire_cron[&h, &m, &c, &l, &x, &y](heap: &!h Heap, rep: &m [byte], row: int, s
 // The rows of the tick's select (`rep`): each is judged (`sched.plan`), the ones that fire are appended to the log (not yet flushed), and what each decided is kept
 // in `sg` for `tick_send`. Answers how many rows are kept and how many events are in the log for them. A row whose event the log would not take is left as it
 // is, and so is due again at the next cycle.
-fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], sg: &!s [int]) -> [heap] (int, int) {
+fn tick_rows[&h, &m, &c, &l, &x, &y, &s, &z](heap: &!h Heap, rep: &m [byte], unix_ms: int, scratch: &!c [byte], lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], sg: &!s [int], bd: &!z [int]) -> [heap] (int, int) {
     var kept = 0;
     var appended = 0;
     var row = pg.first_row(rep);
@@ -3566,7 +3675,7 @@ fn tick_rows[&h, &m, &c, &l, &x, &y, &s](heap: &!h Heap, rep: &m [byte], unix_ms
         var fired = 0;
         var next = after;
         if action == 2 {
-            let done = fire_cron(heap, rep, row, second, unix_ms, scratch, lg, ix, arena);
+            let done = fire_cron(heap, rep, row, second, unix_ms, scratch, lg, ix, arena, bd);
             if done == 0 {
                 fired = second;
                 appended = appended + 1;
@@ -3635,7 +3744,7 @@ fn tick_send[&h, &q, &l, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l evlog.Ev
 
 // The pool has answered a request the tick sent: the select (part 0) names what is due, an update (part 1 and up) only counts the cycle down. An answer to a
 // cycle that was given up (it took too long) is not this cycle's and is dropped.
-fn tick_answer[&h, &q, &l, &x, &y, &c, &s](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], scratch: &!c [byte], sg: &!s [int], tag: int, unix_ms: int, mono_ms: int) -> [heap, fs_write(""), file_write] int {
+fn tick_answer[&h, &q, &l, &x, &y, &c, &s, &z](heap: &!h Heap, qw: &!q pool.Pool, lg: &!l evlog.Ev, ix: &!x [int], arena: &!y [byte], scratch: &!c [byte], sg: &!s [int], tag: int, unix_ms: int, mono_ms: int, bd: &!z [int]) -> [heap, fs_write(""), file_write] int {
     let part = sched.tick_part(sg, tag);
     if part < 0 {
         return 0;
@@ -3660,7 +3769,7 @@ fn tick_answer[&h, &q, &l, &x, &y, &c, &s](heap: &!h Heap, qw: &!q pool.Pool, lg
         sched.tick_end(sg, mono_ms);
         return 0;
     }
-    let (kept, appended) = tick_rows(heap, pool.reply(qw), unix_ms, scratch, lg, ix, arena, sg);
+    let (kept, appended) = tick_rows(heap, pool.reply(qw), unix_ms, scratch, lg, ix, arena, sg, bd);
     return tick_send(heap, qw, lg, sg, kept, appended, mono_ms);
 }
 
@@ -3687,6 +3796,78 @@ fn tick_start[&h, &q, &s](heap: &!h Heap, qw: &!q pool.Pool, sg: &!s [int], unix
 // ---------------------------------------------------------------------
 // The loop
 // ---------------------------------------------------------------------
+
+// The keys that seal the bodies at rest (`bodies.ls`, `docs/design.md` section 47.4), read from their files at the start, and four random bytes for the nonces.
+// Answers 0, or 46 if a file cannot be read or holds no key (32 bytes, or 64 hexadecimal digits), or an old key is given without a key.
+fn load_keys[&f, &c, &b, &d](fs: &f Fs(""), cfg: &c [int], blob: &b [byte], bd: &!d [int]) -> [fs_read(""), file_read] int {
+    if config.key_file_len(cfg) == 0 {
+        if config.old_key_file_len(cfg) > 0 {
+            return 46;
+        }
+        return 0;
+    }
+    var status = 0;
+    region a {
+        let raw = alloc_slice[a](96, byte_of(0));
+        let key = alloc_slice[a](32, byte_of(0));
+        let rnd = alloc_slice[a](4, byte_of(0));
+        let n = store.read_range(fs, blob[config.key_file_at()..config.key_file_at() + config.key_file_len(cfg)], 0, raw);
+        if n <= 0 || bodies.parse_key(raw[0..n], key) != 0 {
+            status = 46;
+        } else {
+            var prefix = 0;
+            // (bound first: compared directly, a file operation's answer is one the LLVM backend cannot type, `docs/design.md` section 34.9)
+            let got = fs_read(fs, "/dev/urandom", rnd);
+            if got == 4 {
+                prefix = int_of(rnd[0]) * 16777216 + int_of(rnd[1]) * 65536 + int_of(rnd[2]) * 256 + int_of(rnd[3]);
+            }
+            bodies.set_key(bd, 0, key, prefix);
+            if config.old_key_file_len(cfg) > 0 {
+                let m = store.read_range(fs, blob[config.old_key_file_at()..config.old_key_file_at() + config.old_key_file_len(cfg)], 0, raw);
+                if m <= 0 || bodies.parse_key(raw[0..m], key) != 0 {
+                    status = 46;
+                } else {
+                    bodies.set_key(bd, 1, key, 0);
+                }
+            }
+        }
+        var i = 0;
+        while i < 96 {
+            raw[i] = byte_of(0);
+            i = i + 1;
+        }
+        i = 0;
+        while i < 32 {
+            key[i] = byte_of(0);
+            i = i + 1;
+        }
+    }
+    return status;
+}
+
+// A start that cannot open what the log holds (section 47.4): the newest event's body is sealed by a key this start was not given. Answers 0, or 47.
+fn check_sealed[&l, &w, &d](lg: &!l evlog.Ev, window: &!w [byte], bd: &d [int]) -> [fs_read(""), file_read] int {
+    let last = evlog.last_id(lg);
+    if last < 1 || last < evlog.first_id(lg) {
+        return 0;
+    }
+    let at = find_offset(lg, window, last);
+    if at < 0 {
+        return 0;
+    }
+    let r = evlog.read_at(lg, at, window);
+    if r.0 != 0 {
+        return 0;
+    }
+    let fp = bodies.sealed_by(window, 0);
+    if fp < 0 {
+        return 0;
+    }
+    if bodies.on(bd) && (bd[2] == fp || bd[1] == 1 && bd[3] == fp) {
+        return 0;
+    }
+    return 47;
+}
 
 // The outcome of a request that was held for the database, for the audit log (`audit.ls`), when it is answered.
 fn audit_answer[&h, &d, &b](heap: &!h Heap, lines: buffer.Buffer, dv: &!d [int], now: int, ticket: int, answer: &b [byte]) -> [heap] buffer.Buffer {
@@ -4333,7 +4514,7 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                 } else if sched.is_tick(tag) {
                                     // the answer to what the tick asked the database: what is due, or that an update was made
                                     borrow mut scratch as &!cw in {
-                                        tick_answer(heap, qw, lg, ix, arena, contents(cw), sg, tag, clock_unix_ms(clock), clock_ms(clock));
+                                        tick_answer(heap, qw, lg, ix, arena, contents(cw), sg, tag, clock_unix_ms(clock), clock_ms(clock), dv[off_body()..off_body() + bodies.size()]);
                                     }
                                 } else if sched.is_admin(tag) {
                                     // the database has answered a request about schedules: the held connection gets the answer
@@ -5704,10 +5885,24 @@ fn main(world: World) -> [] int {
                                                     ops.init(ops_of_mut(contents(dvw)));
                                                     ops.set_settings(ops_of_mut(contents(dvw)), config.stop_deadline_ms(cfg), config.repair_logs(cfg));
                                                     borrow mut dl as &!dw in {
-                                                        status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), cblob[0..0], from_db, config.allow_private_hosts(cfg), now0);
+                                                        // The keys of the bodies at rest are read before the logs are (section 47.4): a log sealed by a key this start was not given is refused.
+                                                        status = load_keys(evlog.lend(lw), cfg, cblob, contents(dvw)[off_body()..off_body() + bodies.size()]);
+                                                        if status == 46 {
+                                                            borrow mut io as &!i46 in {
+                                                                say(i46, "hooks: encryption-key-file (or encryption-key-file-old) cannot be read, or holds no key: 32 bytes, or 64 hexadecimal digits; an old key needs a key\n");
+                                                            }
+                                                        } else {
+                                                            status = prepare(h, dir_buf[0..dir_len], lw, dw, buffer.room(wb), contents(dvw), contents(bw), sched_buf[0..sched_len], deadline_ms, contents(ixw), contents(arw), cblob[0..0], from_db, config.allow_private_hosts(cfg), now0);
+                                                        }
                                                         if status == 0 {
                                                             // An erasure the last run recorded and did not finish in the segment is finished now (section 47.3).
                                                             redo_erasures(h, lw, dw, buffer.room(wb), now0);
+                                                            status = check_sealed(lw, buffer.room(wb), contents(dvw)[off_body()..off_body() + bodies.size()]);
+                                                            if status == 47 {
+                                                                borrow mut io as &!i47 in {
+                                                                    say(i47, "hooks: the events log holds bodies sealed by a key this start was not given (encryption-key-file, encryption-key-file-old); nothing was changed\n");
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                     if status == 0 && config.production(cfg) {
