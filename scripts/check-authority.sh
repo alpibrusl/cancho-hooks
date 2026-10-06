@@ -3,7 +3,7 @@
 # report is bounded, the foreign symbols it calls); `docs/authority.json` is that report as of the last time a person approved it. This script
 # regenerates it from the sources and the installed libraries and fails on any difference, so a new foreign call or a new capability is a red diff
 # that is only made green by committing the new file, which is the approval. The report's `unbounded_by` lists every reachable foreign symbol as
-# `scope:symbol`, one per line (`libc:statx` today), so a new symbol is exactly one added line (lex-sys docs/foreign-authority.md).
+# `scope:symbol`, one per line (`libssl:SSL_read` today), so a new symbol is exactly one added line (lex-sys docs/foreign-authority.md).
 #
 #   scripts/check-authority.sh             compare; exit 0 if the report is the committed one, 1 (and show the diff) if not
 #   scripts/check-authority.sh --update    write docs/authority.json (after reading what changed)

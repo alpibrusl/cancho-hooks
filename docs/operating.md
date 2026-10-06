@@ -31,7 +31,7 @@ The `/metrics` series, readiness and health, stopping the service, building it a
   `tcp_connect_start` (attempts that do not wait; #191), a lock with an origin (#192), the project file (#193), and `std.hmac`, which signs
   every delivery and replaced this repository's own HMAC (#229; [`design.md`](design.md) section 30).
 - `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are dependencies in `lex-sys.toml`, pinned to a commit each, and `lex-sys build` fetches and checks them.
-- Rust, to build the compiler; `gcc`, to build the three small shims the tests preload (`fsync`, for the crash tests; `statx`, for the production profile's; `send` and `recv`, for the partial-I/O tests).
+- Rust, to build the compiler; `gcc`, to build the three small shims the tests preload (`fsync`, for the crash tests; `fstat` and `fstatat`, for the production profile's; `send` and `recv`, for the partial-I/O tests).
 - OpenSSL 3.0 or later: its development files (`libssl-dev`) to build, because the service is linked against `libssl` and `libcrypto` (`scripts/build.sh` does it; a plain `lex-sys build` stops at the link), and `libssl3` and `ca-certificates` to run it.
 
 ## A prebuilt binary

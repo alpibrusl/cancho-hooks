@@ -9,6 +9,16 @@ import subprocess
 import threading
 import time
 
+
+def _small_pages():
+    """Small pages for the service (`prctl(PR_SET_THP_DISABLE)`, run in the child before `exec` and kept across it): with transparent huge pages
+    set to `always` the service's memory would follow the host's page size, not what it holds (docs/design.md section 46). Linux only."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(41, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
 # lines the service says on its own (docs/runbook.md 3.1); anything else on standard error is invariant L
 KNOWN_STDERR = ("listening", "hooks: the database: ", "hooks: endpoints loaded: ", "hooks: stopping on SIG", "hooks: stopped: ", "hooks: endpoint ",
                 # what retention says at each step (src/compact.ls); docs/runbook.md 3.1 lists only the lines of the start and the stop
@@ -59,6 +69,7 @@ class Svc:
 
     def _pre(self):
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+        _small_pages()
         if self.cpus:
             try:
                 os.sched_setaffinity(0, self.cpus)

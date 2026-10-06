@@ -19,8 +19,8 @@ Every unsafe combination is one test, with its own exit status and a message tha
      `production = 0` and everything unsafe (the profile is off), and with a database named (HOOKS_PG) -- production does not need one
   5. several things wrong are said one at a time, in a fixed order (30, 31, 32, 34, then the modes)
   6. the status of a refusal is not the status of a bad setting (2) nor of the other starts that end (10 to 20)
-  7. the one call into libc going wrong (tests/statx_shim.c, preloaded): refused by the kernel, or answered with no mode filled in, for a log or for
-     the directory: each a refusal (35) naming the path, never a pass; and without `production = 1` the call is never made
+  7. the status calls going wrong (tests/stat_shim.c, preloaded: lex-sys's `dir_mode` and `dir_own_mode` are `fstatat` and `fstat`): refused by
+     the kernel for a log or for the directory, each a refusal (35) naming the path, never a pass; and without `production = 1` they are never made
 """
 import os
 import re
@@ -208,6 +208,48 @@ def stage_modes():
     shutil.rmtree(base)
 
 
+def stage_entries():
+    """Every entry of the data directory is judged, not three names: the segments of the events log, `events.first`, a copy a repair or a backup
+    left, a stray file, a subdirectory and a symbolic link (judged by its own bits), found among fifty private files whatever order the kernel lists."""
+    bad = [("events-7.seg", 0o640), ("events-12.seg", 0o644), ("events.first", 0o644), ("events.seg.cut-100", 0o604), ("notes.txt", 0o604), ("backup.tar", 0o660)]
+    for name, m in bad:
+        d = make_dir()
+        for k in range(50):
+            path = os.path.join(d, f"private-{k:02d}")
+            open(path, "wb").close()
+            os.chmod(path, 0o600)
+        path = os.path.join(d, name)
+        open(path, "wb").close()
+        os.chmod(path, m)
+        code, err, proc, _ = run(d, SAFE)
+        stop(proc)
+        check(f"2. a {name} of {m:04o} among fifty private files is refused (33) and named", code == 33 and path in err, f"{code} {err!r}")
+        shutil.rmtree(d)
+    d = make_dir()
+    os.mkdir(os.path.join(d, "sub"), 0o755)
+    code, err, proc, _ = run(d, SAFE)
+    stop(proc)
+    check("2. a subdirectory of 0755 is refused (33) and named", code == 33 and os.path.join(d, "sub") in err, f"{code} {err!r}")
+    shutil.rmtree(d)
+    d = make_dir()
+    open(os.path.join(d, "events.seg"), "wb").close()
+    os.chmod(os.path.join(d, "events.seg"), 0o600)
+    os.symlink("events.seg", os.path.join(d, "endpoints.conf"))
+    code, err, proc, _ = run(d, SAFE)
+    stop(proc)
+    check("2. a symbolic link in the directory is judged by its own bits (refused, 33), not by its target's", code == 33 and os.path.join(d, "endpoints.conf") in err, f"{code} {err!r}")
+    shutil.rmtree(d)
+    d = make_dir()
+    for name in ("events-7.seg", "events.first", "notes.txt", "backup.tar"):
+        path = os.path.join(d, name)
+        open(path, "wb").close()
+        os.chmod(path, 0o600)
+    code, err, proc, _ = run(d, SAFE)
+    stop(proc)
+    check("2. (control) strays that are private are not refused", code not in (33, 35), f"{code} {err!r}")
+    shutil.rmtree(d)
+
+
 def stage_umask():
     d = make_dir()
     code, err, proc, _ = run(d, SAFE, umask=0o022)
@@ -233,39 +275,39 @@ def stage_umask():
     shutil.rmtree(d)
 
 
-SHIM = os.path.join(os.path.dirname(BIN), "statx_shim.so")
+SHIM = os.path.join(os.path.dirname(BIN), "stat_shim.so")
 
 
-def stage_statx_fails():
-    """The ways the one call into libc can go wrong, which a file's mode cannot make happen: tests/statx_shim.c does."""
+def stage_stat_fails():
+    """The status calls refused by the kernel, which a file's mode cannot make happen: tests/stat_shim.c does."""
     if not os.path.exists(SHIM):
-        print(f"skip 7. the statx shim ({SHIM}) is not built: scripts/build.sh builds it")
+        print(f"skip 7. the stat shim ({SHIM}) is not built: scripts/build.sh builds it")
         return
-    for how, what in [("fail", "the kernel refuses (EACCES)"), ("nomask", "the kernel answers and says it filled in no mode")]:
+    for how, what in [("fail", "the kernel refuses (EACCES)")]:
         d = make_dir()
         for name in ("events.seg", "delivery.seg"):
             path = os.path.join(d, name)
             open(path, "wb").close()
             os.chmod(path, 0o600)
-        env = {"LD_PRELOAD": SHIM, "STATX_SHIM": how}
+        env = {"LD_PRELOAD": SHIM, "STAT_SHIM": how}
         code, err, proc, _ = run(d, SAFE, env=env)
         stop(proc)
         check(f"7. a log whose mode cannot be read ({what}) is a refusal (35) naming it, not a pass", code == 35 and os.path.join(d, "events.seg") in err and "mode cannot be read" in err, f"{code} {err!r}")
         shutil.rmtree(d)
     d = make_dir()
-    code, err, proc, _ = run(d, SAFE, env={"LD_PRELOAD": SHIM, "STATX_SHIM": "failall"})
+    code, err, proc, _ = run(d, SAFE, env={"LD_PRELOAD": SHIM, "STAT_SHIM": "failall"})
     stop(proc)
     check("7. a data directory whose mode cannot be read is a refusal (35) naming it", code == 35 and d in err and "mode cannot be read" in err, f"{code} {err!r}")
     shutil.rmtree(d)
     # the shim passes everything else to the real call: with it loaded and nothing to fail, a safe start is a start
     d = make_dir()
-    code, err, proc, _ = run(d, SAFE, env={"LD_PRELOAD": SHIM, "STATX_SHIM": "none"})
+    code, err, proc, _ = run(d, SAFE, env={"LD_PRELOAD": SHIM, "STAT_SHIM": "none"})
     stop(proc)
     check("7. (control) with the shim loaded and asked for nothing, a safe start starts", code is None, f"{code} {err!r}")
     shutil.rmtree(d)
     # without the profile the call is never made: the same shim, nothing refused
     d = make_dir()
-    code, err, proc, _ = run(d, [], env={"LD_PRELOAD": SHIM, "STATX_SHIM": "failall"})
+    code, err, proc, _ = run(d, [], env={"LD_PRELOAD": SHIM, "STAT_SHIM": "failall"})
     stop(proc)
     check("7. without production = 1 the mode is never asked for (failall changes nothing)", code is None, f"{code} {err!r}")
     shutil.rmtree(d)
@@ -407,10 +449,11 @@ def stage_order():
 def main():
     stage_refusals()
     stage_modes()
+    stage_entries()
     stage_umask()
     stage_starts()
     stage_order()
-    stage_statx_fails()
+    stage_stat_fails()
     print()
     if FAILS:
         print(f"{len(FAILS)} FAILED: " + "; ".join(FAILS[:10]))

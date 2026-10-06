@@ -19,7 +19,7 @@ src/retain.ls      the rules of retention (pure): when a segment goes, when the 
 src/roster.ls      the endpoints table: read at start, and `--import-endpoints`
 src/manage.ls      `POST`, `PATCH` and `DELETE /endpoints`: who may call them, what a request may say, a secret for the endpoint
 src/authz.ls       who may call which route: the scope of every route, and the verdict for a request's token
-src/perm.ls        the modes of the data directory and its files (`production = 1`): the `statx` call into libc
+src/perm.ls        the modes of the data directory and every entry in it (`production = 1`): lex-sys's `dir_own_mode` and `dir_mode`
 src/filter.ls      which events an endpoint is sent: the patterns, the match, the type in a record
 src/hdrs.ls        an endpoint's custom headers: the rules, the form they are kept in, the wire form
 src/epx.ls         what an endpoint has besides an address and a secret (types, headers, the previous secret), and the request that sets it

@@ -53,10 +53,11 @@ read-token   = <32 random characters>   # the GETs: give it to dashboards and mo
 
 The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and talks to PostgreSQL through
 [`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `unsafe`, and foreign authority only through `Ffi`, per library, for exactly the symbols
-[`authority.json`](authority.json) lists, 33 in all (**the report is pinned in CI**: `scripts/check-authority.sh` regenerates it and fails on any difference, so a new foreign symbol is a red diff that only a commit of the new file turns green):
+[`authority.json`](authority.json) lists, 32 in all (**the report is pinned in CI**: `scripts/check-authority.sh` regenerates it and fails on any difference, so a new foreign symbol is a red diff that only a commit of the new file turns green). **All 32 are OpenSSL's**; libc is not called through `Ffi` at all:
 
-* **libc**, two functions: `statx`, which reads the mode of the data directory for the production profile (`src/perm.ls`; lex-sys has no file-mode builtin: lex-sys#243), and `prctl`, called once at the start to ask the kernel for small pages for the process (`src/thp.ls`, design.md section 46).
-  How the service learns it was asked to stop is not foreign: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability (`Signals("INT,TERM")`, `src/ops.ls`) and
+* **The modes of the data directory** (the production profile, `src/perm.ls`) are lex-sys builtins: the directory is opened as a `Dir`, `dir_own_mode` reads its bits and `dir_mode` those of every entry in it, beneath the handle and never following a link (lex-sys `docs/directory-listing.md` §3.5; they replaced a call of libc's `statx`, lex-sys#243). That adds one capability to the report, `dir_read`.
+* **Small pages for the process** are no longer asked for by the service: it called libc's `prctl` once (design.md section 46); the test harnesses now ask for them for the processes they start, which is all the measurement needs.
+* **How the service learns it was asked to stop** is not foreign either: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability (`Signals("INT,TERM")`, `src/ops.ls`) and
   watches the claim in the same poller as its sockets, so a stop wakes the loop at once.
 * **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/tls.ls`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,
   `SSL_CTX_set_verify`, `SSL_CTX_set_default_verify_paths`, `SSL_CTX_load_verify_file`, `TLS_client_method`, `SSL_new`, `SSL_free`, `SSL_set_bio`, `SSL_set_connect_state`,
@@ -68,5 +69,4 @@ The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/le
   has been independently reviewed (#209), and the 32 symbols go with it.
 
 The authority report (`lex-sys authority`) therefore says `bounded: false`, with the symbols above under `unbounded_by`, each with the library the program says it is in (a library
-is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in lex-sys), and names the two signals. A file-mode builtin in lex-sys
-would remove the libc part; the pure TLS would remove the rest.
+is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in lex-sys), and names the two signals. The second build, `hooks-pure` (lex-sys's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol and its report says `bounded: true`**; it is not the default until that TLS has been independently reviewed.

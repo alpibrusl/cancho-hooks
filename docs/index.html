@@ -322,13 +322,13 @@ wh.verify(body, headers)   # raises if forged or stale
     <div class="authority">
       <article class="card">
         <h3>The default build</h3>
-        <strong class="big">34</strong>
-        <p>foreign functions: two of libc (reading the data directory&rsquo;s mode, and asking for small pages once at start) and 32 of OpenSSL for <code>https</code> delivery.</p>
+        <strong class="big">32</strong>
+        <p>foreign functions, all of them OpenSSL&rsquo;s, for <code>https</code> delivery. The data directory&rsquo;s permissions are read with lex-sys built-ins, and the report says <code>bounded: false</code> only because of these 32.</p>
       </article>
       <article class="card">
         <h3><code>hooks-pure</code></h3>
-        <strong class="big">2</strong>
-        <p>foreign functions, both of libc: <code>https</code> uses lex-sys&rsquo;s own TLS. Built and tested beside the default; not the default until that TLS has been independently reviewed (<a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/pure-tls.md">pure-tls.md</a>).</p>
+        <strong class="big">0</strong>
+        <p>foreign functions, and the report says <code>bounded: true</code>: <code>https</code> uses lex-sys&rsquo;s own TLS. Built and tested beside the default; not the default until that TLS has been independently reviewed (<a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/pure-tls.md">pure-tls.md</a>).</p>
       </article>
       <article class="card">
         <h3>lex-sys all the way down</h3>
@@ -336,7 +336,7 @@ wh.verify(body, headers)   # raises if forged or stale
         <p>C libraries for the logs (<a href="https://github.com/alpibrusl/lexsys-log">lexsys-log</a>), the PostgreSQL client with its SCRAM login (<a href="https://github.com/alpibrusl/lexsys-pg">lexsys-pg</a>), the name resolver, HTTP and the signatures.</p>
       </article>
     </div>
-    <p class="note prose more">The aim is a report with no foreign function at all; each one left is a gap in lex-sys with an issue of its own (a file-mode builtin, lex-sys#243, would remove the first).</p>
+    <p class="note prose more">The aim is a report with no foreign function at all, and <code>hooks-pure</code> has reached it. Each one that was left was a gap in lex-sys, filed and closed there: a file-mode builtin (lex-sys#243) replaced the call that read the data directory&rsquo;s permissions. What remains is OpenSSL, until lex-sys&rsquo;s own TLS has been independently reviewed.</p>
   </section>
 
   <section id="tested" aria-labelledby="h-tested">

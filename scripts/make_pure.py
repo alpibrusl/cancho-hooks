@@ -17,7 +17,7 @@ What the changes do, in short:
   `ffi(...)` entries leave every row. `attempt.advance` also takes the time (the certificates' dates) and `main` opens the engine once, seeds it and loads the
   trust store (`tlsx.setup`), and closes it at the end;
 - every `tls.` of `attempt.ls` and `hooks.ls` (the OpenSSL module) is `tlsx.` (the adapter);
-- `main` holds the `libc` scope only: libssl and libcrypto are gone.
+- `main` holds no foreign library: the `Ffi` it is given is released at once (libssl and libcrypto were the only ones it narrowed to).
 """
 import os
 import re
@@ -88,14 +88,15 @@ def hooks(text):
     text = exact(text, 'ffi: &f Ffi("libcrypto,libssl")', "engine: &!f tls.Engine", 2, "hooks.ls: both-library parameters")
     text = exact(text, 'ffi: &f Ffi("libssl")', "engine: &!f tls.Engine", 2, "hooks.ls: libssl parameters")
     # `main`: the scope, the engine, the trust store.
-    text = exact(text, 'narrow(ffi, "libc,libcrypto,libssl")', 'narrow(ffi, "libc")', 1, "hooks.ls: the scope")
+    text = exact(text, 'let ssl = narrow(ffi, "libcrypto,libssl");', "release(ffi);", 1, "hooks.ls: no foreign scope")
+    text = exact(text, "    release(ssl);\n", "\n", 1, "hooks.ls: nothing to release")
     # A ticket per endpoint at most, as the OpenSSL build keeps a session per endpoint.
     text = exact(text, "borrow mut heap as &!h in {\n", "borrow mut heap as &!h in { var engine = tls.open_with_tickets(h, attempt.slots(), state.max_endpoints());\n", 1, "hooks.ls: the engine is opened")
     text = close_engine(text)
-    text = regex(text, r"borrow libc as &lt in \{\n(\s*)tls_ctx = start_tls\(lt, (.*)\n(\s*)\}",
+    text = regex(text, r"borrow ssl as &lt in \{\n(\s*)tls_ctx = start_tls\(lt, (.*)\n(\s*)\}",
                  r"borrow mut engine as &!en in {\n\1tls_ctx = tlsx.setup(en, h, evlog.lend(lw), \2\n\3}", 1, "hooks.ls: the trust store")
-    text = exact(text, "borrow libc as &lb in {\n", "borrow mut engine as &!lb in {\n", 1, "hooks.ls: the engine is lent to run")
-    text = regex(text, r"borrow libc as &lt in \{\n\s*tlsx\.free_context\(lt, tls_ctx\);\n\s*\}\n",
+    text = exact(text, "borrow ssl as &lb in {\n", "borrow mut engine as &!lb in {\n", 1, "hooks.ls: the engine is lent to run")
+    text = regex(text, r"borrow ssl as &lt in \{\n\s*tlsx\.free_context\(lt, tls_ctx\);\n\s*\}\n",
                  "// (the engine is closed at the end of its block)\n\n\n", 1, "hooks.ls: the context of a failed listen")
     return text
 
