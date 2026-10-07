@@ -7,6 +7,8 @@ import os
 import random
 import re
 import secrets as pysecrets
+import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -419,33 +421,100 @@ def sweep_dead(run, e, rounds=40):
 
 # ---- backups -----------------------------------------------------------------------------------------------------------
 
+BACKUPS_KEPT = 2          # the newest backup is what the restore check reads; the one before it is kept in case the newest is not good. Nothing older is.
+
+
+def run_group(cmd, timeout, env=None):
+    """Run a command in a process group of its own and, when it takes longer than `timeout`, kill the whole group: `subprocess.run(timeout=)` kills only the child (the `bash` of
+    backup.sh), and the `cp` and the checker it started went on running, with the directory they were writing left behind. Returns (completed process or None on timeout, stdout, stderr)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        return None, "", ""
+
+
+def checker_kind():
+    """Which log checker backup.sh and restore.sh will use: the native `hooks-logcheck` when it is built beside the service and the scripts know it, else scripts/logcheck.py (Python)."""
+    from common import ROOT
+    try:
+        known = "hooks-logcheck" in open(os.path.join(ROOT, "scripts", "backup.sh")).read()
+    except OSError:
+        known = False
+    built = os.path.exists(os.path.join(ROOT, "build", "hooks-logcheck"))
+    return "native hooks-logcheck" if (known and built) else "python logcheck.py"
+
+
+def backup_timeout(datadir, native):
+    """Seconds a backup may take: the copy and the check of the logs scale with their size (the Python checker reads about 1.5 MB a second, the native one far faster), so a fixed
+    180 s was a verdict on the size of the directory."""
+    mb = dir_mb(datadir)
+    return min(3600.0, (90.0 + 0.1 * mb) if native else (120.0 + 1.2 * mb)), mb
+
+
+def dir_mb(d):
+    from service import dir_usage
+    return dir_usage(d)[0] / 1048576.0
+
+
+def remove_partials(out):
+    """The `.partial` directories a backup that was killed leaves in `out` (backup.sh writes under that name and renames when the copy verified). Returns how many were left that could not be removed."""
+    left = 0
+    try:
+        names = [n for n in os.listdir(out) if n.endswith(".partial")]
+    except OSError:
+        return 0
+    for n in names:
+        shutil.rmtree(os.path.join(out, n), ignore_errors=True)
+        if os.path.exists(os.path.join(out, n)):
+            left += 1
+    return left
+
+
 def run_backup(run, restore=False):
     """An online backup of the live service (scripts/backup.sh), and, if asked, a restore of it into a scratch directory, checked by logcheck and against the poster's ledger."""
     from common import ROOT
     out = os.path.join(run.out, "backups")
     os.makedirs(out, exist_ok=True)
+    remove_partials(out)        # what an earlier backup left (a run that was resumed after a crash)
     with run.vlock:
         m0 = run.poster.max_id
     t0 = time.time()
+    kind = checker_kind()
+    timeout, mb = backup_timeout(run.datadir, kind.startswith("native"))
     cmd = ["bash", os.path.join(ROOT, "scripts", "backup.sh"), "--dir", run.datadir, "--out", out, "--mode", "online", "--pg-database", run.pg["db"], "--pg-host", run.pg["host"],
            "--pg-port", str(run.pg["port"]), "--pg-user", run.pg["user"], "--skip-attempts"]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=run.pg_env())
-    except subprocess.TimeoutExpired:
-        run.violate("K_backup", why="backup.sh did not finish in 180 s")
+    p, so, se = run_group(cmd, timeout, env=run.pg_env())
+    if p is None:
+        left = remove_partials(out)
+        run.log("backup", status="timeout", seconds=round(time.time() - t0, 2), timeout_s=round(timeout), data_mb=round(mb, 1), checker=kind, partials_left=left)
+        run.violate("K_backup", why=f"backup.sh did not finish in {timeout:.0f} s (the data directory is {mb:.0f} MB; checker: {kind})")
         return None
     run.counts["backups"] += 1
-    run.log("backup", status=p.returncode, seconds=round(time.time() - t0, 2), stderr=p.stderr[-300:] if p.returncode else "")
+    run.log("backup", status=p.returncode, seconds=round(time.time() - t0, 2), timeout_s=round(timeout), data_mb=round(mb, 1), checker=kind, stderr=se[-300:] if p.returncode else "")
     if p.returncode != 0:
-        run.violate("K_backup", status=p.returncode, stderr=p.stderr[-500:])
+        remove_partials(out)
+        run.violate("K_backup", status=p.returncode, stderr=se[-500:])
         return None
-    dirs = sorted(d for d in os.listdir(out) if d.startswith("hooks-backup-"))
+    dirs = sorted(d for d in os.listdir(out) if d.startswith("hooks-backup-") and not d.endswith(".partial"))
     path = os.path.join(out, dirs[-1])
     ok = True
     if restore:
         ok = restore_check(run, path, m0)
-    for d in dirs[:-1]:
-        subprocess.run(["rm", "-rf", os.path.join(out, d)])
+    for d in dirs[:-BACKUPS_KEPT]:
+        shutil.rmtree(os.path.join(out, d), ignore_errors=True)
+    left = remove_partials(out)
+    if left:
+        run.violate("K_backup", why=f"{left} .partial directories could not be removed from {out}")
     return ok
 
 
@@ -459,22 +528,22 @@ def restore_check(run, backup, m0):
     os.makedirs(scratch)
     # `restore.sh` checks the pair of logs with `logcheck.py`, which is Python: about 1.5 MB a second, so 400 MB of logs takes four and a half minutes of CPU on an idle
     # core. The second 24 h run died here, in a timeout of 180 s, and left no verdict. A timeout is a finding, never a crash.
-    try:
-        p = subprocess.run(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        run.violate("K_restore", why=f"restore.sh did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+    native = checker_kind().startswith("native")
+    tmo = max(RESTORE_TIMEOUT_S if not native else 300.0, backup_timeout(run.datadir, native)[0])
+    p, so, se = run_group(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], tmo)
+    if p is None:
+        run.violate("K_restore", why=f"restore.sh did not finish in {tmo:.0f} s")
         return False
     run.counts["restores"] += 1
     if p.returncode != 0:
-        run.violate("K_restore", status=p.returncode, stderr=p.stderr[-500:])
+        run.violate("K_restore", status=p.returncode, stderr=se[-500:])
         return False
-    try:
-        q = subprocess.run(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        run.violate("K_restore", why=f"logcheck.py did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+    q, qo, qe = run_group(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], tmo)
+    if q is None:
+        run.violate("K_restore", why=f"logcheck.py did not finish in {tmo:.0f} s")
         return False
     if q.returncode != 0:
-        run.violate("K_restore", why="logcheck does not accept the restored directory", out=q.stdout[-500:])
+        run.violate("K_restore", why="logcheck does not accept the restored directory", out=qo[-500:])
         return False
     chaos = common.chaos_module()  # tests/chaos.py: an independent reader of the log
     recs, torn = chaos.read_events(scratch)
