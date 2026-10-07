@@ -129,6 +129,19 @@ class HostSampler:
         return row
 
 
+def cpu_mhz(cpus):
+    """The mean clock, in MHz, of these CPUs as the kernel last saw it (cpufreq), or None. The cost of a record in CPU seconds depends on it: on the machine of the validation runs (a laptop-class
+    i7-1260P with the `powersave` governor) the same code cost twice as much per record in one run as in another, and a figure of CPU per record is only comparable within a run unless this is
+    known."""
+    vals = []
+    for c in cpus or []:
+        try:
+            vals.append(int(open(f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq").read()) / 1000.0)
+        except (OSError, ValueError):
+            pass
+    return round(sum(vals) / len(vals)) if vals else None
+
+
 def proc_ticks():
     """{pid: (ticks used so far, command name, cpu it last ran on)} for every process (Linux)."""
     out = {}

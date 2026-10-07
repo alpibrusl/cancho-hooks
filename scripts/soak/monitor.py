@@ -24,7 +24,7 @@ COLUMNS = ["t", "el", "inc", "pid", "up", "rss_kb", "hwm_kb", "threads", "fds", 
            "loadavg5", "loadavg15", "psi_cpu_some10", "psi_cpu_some60", "psi_mem_some10", "psi_mem_some60", "psi_mem_full10", "psi_mem_full60", "psi_io_some10", "psi_io_some60",
            "psi_io_full10", "psi_io_full60", "mem_avail_mb", "swap_free_mb", "swap_used_mb", "swapin_s", "swapout_s", "majflt_s", "ctxt_s", "procs_running", "procs_blocked",
            "host_iowait_pct", "host_steal_pct", "host_busy_pct", "recv_late_unplanned", "recv_conn_lost", "recv_bind_failures", "recv_writer_wait_max_ms", "recv_sync_fallbacks",
-           "recv_writer_queue_max", "recv_records", "valid", "events_expired"]
+           "recv_writer_queue_max", "recv_records", "valid", "events_expired", "cron_fired", "cron_skipped", "cron_errors", "cpu_mhz_service", "cpu_mhz_harness"]
 
 SERIES = re.compile(r'^(hooks_[a-z_]+)\{endpoint="(\d+)"\} (\S+)$', re.M)
 PLAIN = re.compile(r'^(hooks_[a-z_]+) (\S+)$', re.M)
@@ -253,7 +253,8 @@ class Watcher(threading.Thread):
                              ("dropped", "segments_dropped"), ("snapshots", "snapshots"), ("maint_ms_max", "maintenance_ms_max"), ("maint_errors", "maintenance_errors"),
                              ("lock_skips", "maintenance_lock_skips"), ("delivered", "delivered"), ("failed", "failed"), ("dead", "dead"), ("filtered", "filtered"),
                              ("db_reconnects", "database_reconnects"), ("db_failures", "database_failures"), ("db_losses", "database_losses"), ("hist_written", "history_written"),
-                             ("hist_failed", "history_failed"), ("hist_dropped", "history_dropped"), ("replays_waiting", "replays")):
+                             ("hist_failed", "history_failed"), ("hist_dropped", "history_dropped"), ("replays_waiting", "replays"), ("cron_fired", "cron_fired"),
+                             ("cron_skipped", "cron_skipped"), ("cron_errors", "cron_errors")):
                 row[col] = st.get(key, "")
             if isinstance(st.get("events_expired"), int):
                 r.expired_seen[r.svc.inc] = max(r.expired_seen.get(r.svc.inc, 0), st["events_expired"])
@@ -320,6 +321,7 @@ class Watcher(threading.Thread):
         self.last.update(t=now, cpu=cpu, probe_cpu=pcpu)
         # the host, so that a stall can be put on something; and who else was using the cores when one was seen
         row.update(self.host.sample(now))
+        row["cpu_mhz_service"], row["cpu_mhz_harness"] = guard.cpu_mhz(r.service_cpus), guard.cpu_mhz(r.harness_cpus)
         snap_t, before = self.proc_snap
         after = guard.proc_ticks()
         self.proc_snap = (now, after)

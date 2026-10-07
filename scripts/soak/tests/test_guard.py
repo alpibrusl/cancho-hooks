@@ -82,6 +82,13 @@ def main():
     check("little memory does not", len(guard.check_start({"MemAvailable": 900.0, "SwapTotal": 0.0, "SwapFree": 0.0})) == 1)
     check("the override starts it", guard.check_start({"MemAvailable": 900.0, "SwapTotal": 0.0, "SwapFree": 0.0}, allow_low=True) == [])
 
+    # who else was using the cores when a stall was seen
+    hz = os.sysconf("SC_CLK_TCK")
+    before = {1: (0, "hooks", 15), 2: (0, "firefox", 3), 3: (0, "idle", 4), 4: (10, "other", 5)}
+    after = {1: (int(hz * 4), "hooks", 15), 2: (int(hz * 8), "firefox", 3), 3: (0, "idle", 4), 4: (10 + int(hz * 0.5), "other", 5), 5: (int(hz * 6), "new", 9)}
+    top = guard.top_processes(before, after, 10.0, 3, mine={1})
+    check("the three processes that used most CPU in the interval are named, with whose they are", [t["comm"] for t in top] == ["firefox", "new", "hooks"] and top[0]["cpu_pct"] == 80.0 and top[2]["mine"], str(top))
+
     print("guard: all checks passed" if all(RESULTS) else "guard: FAILED")
     return 0 if all(RESULTS) else 1
 
