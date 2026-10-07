@@ -41,49 +41,58 @@ def sweep_sidecars(d):
         pass
 
 
+def seek_time(path, st, target):
+    """The offset of the first record of a ledger whose time (its first field) is not before `target` (the records are in time order, near enough for a window of a minute)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    lo, hi = 0, size // st.size
+    with open(path, "rb") as f:
+        while lo < hi:
+            mid = (lo + hi) // 2
+            f.seek(mid * st.size)
+            if st.unpack(f.read(st.size))[0] < target:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo * st.size
+
+
 class Checker(threading.Thread):
     def __init__(self, run):
         super().__init__(daemon=True, name="checker")
         self.r = run
-        self.recv_off = 0
+        self.recv_paths = list(run.recv_paths)
+        self.recv_off = [0] * len(self.recv_paths)
         self.ack_off = 0
         self.last_purge = 0.0
         self.cycles = 0
-        self.recv_path = os.path.join(run.out, "ledger", "recv.bin")
         self.ack_path = os.path.join(run.out, "acked.bin")
 
     def seek_end_minus(self, seconds):
         """On a resume: start the ledgers again from where the open window began, so that the counts of the newest events are rebuilt."""
-        for attr, path, st in (("recv_off", self.recv_path, REC), ("ack_off", self.ack_path, ACK)):
-            try:
-                size = os.path.getsize(path)
-            except OSError:
-                continue
-            ts_idx = 0 if st is REC else 0
-            off = size - size % st.size
-            lo, hi = 0, off // st.size
-            target = time.time() - seconds
-            with open(path, "rb") as f:
-                while lo < hi:
-                    mid = (lo + hi) // 2
-                    f.seek(mid * st.size)
-                    t = st.unpack(f.read(st.size))[ts_idx]
-                    if t < target:
-                        lo = mid + 1
-                    else:
-                        hi = mid
-            setattr(self, attr, lo * st.size)
+        target = time.time() - seconds
+        for k, path in enumerate(self.recv_paths):
+            self.recv_off[k] = seek_time(path, REC, target)
+        self.ack_off = seek_time(self.ack_path, ACK, target)
 
     def drain(self):
-        """Both ledgers, to their ends. The poster's first, so that an event is acknowledged before its delivery is looked at."""
+        """Both ledgers, to their ends. The poster's first, so that an event is acknowledged before its delivery is looked at. The receivers' ledgers (one for each receiver process)
+        are read one after the other and merged by the time of the request, so that what the checker is given is in the order it happened whichever process wrote it."""
         r = self.r
         recs, self.ack_off = read_records(self.ack_path, self.ack_off, ACK, limit=64 << 20)
         if recs:
             r.verifier.ingest_acks(recs)
-        recs, self.recv_off = read_records(self.recv_path, self.recv_off, REC, limit=64 << 20)
-        if recs:
-            r.verifier.ingest(recs)
-        return len(recs)
+        batch = []
+        for k, path in enumerate(self.recv_paths):
+            part, self.recv_off[k] = read_records(path, self.recv_off[k], REC, limit=64 << 20)
+            batch += part
+        if len(self.recv_paths) > 1:
+            batch.sort(key=lambda x: x[0])
+        if batch:
+            r.verifier.ingest(batch)
+        return len(batch)
 
     def cycle(self):
         r = self.r

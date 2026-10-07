@@ -229,7 +229,8 @@ class Verifier:
     # ---- the receivers' ledger
     def ingest(self, recs):
         v = self.v
-        for (t, idx, ev, n, src, typ, flags, status, e2e) in recs:
+        for rec in recs:
+            (t, idx, ev, n, src, typ, flags, status, e2e) = rec[:9]      # a tenth field (when the answer was sent) is for whoever reads the ledger by hand: the judgements use the time of the request
             self.t_last = max(self.t_last, t)
             ep = self.by_idx.get(idx)
             if ep is None:
