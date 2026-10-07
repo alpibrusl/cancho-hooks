@@ -1,4 +1,6 @@
-# Examples
+# Examples: the mechanisms by hand
+
+Seven use cases, as scripts you can run and the output they print, are on the [examples page](examples.html) (the scripts are in [`examples/`](../examples); `tests/examples_test.py` runs each and checks that the page says only what it printed). This page is the other half: the same mechanisms by hand, one at a time, against a service you start yourself.
 
 Worked examples against a running service. The quick start in the [README](../README.md) builds and starts it.
 

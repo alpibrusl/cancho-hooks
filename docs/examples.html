@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-hooks: examples</title>
+<meta name="description" content="Seven situations, each a script you can run: customers' webhooks, payments that must not be lost, an endpoint that is down, cron, several systems, erasure, an agent. The output on this page is what the scripts print.">
+<meta property="og:title" content="cancho-hooks: examples">
+<meta property="og:description" content="Seven runnable scripts, and the output they print: webhooks to customers, payments, dead letters, cron, erasure.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-hooks/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="cancho-hooks: webhooks that survive failure. On disk, then 202; signed and rotatable; retry and replay.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="canonical" href="https://alpibrusl.github.io/cancho-hooks/examples.html">
+<meta property="og:url" content="https://alpibrusl.github.io/cancho-hooks/examples.html">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1c1f24;
+  --muted: #4b5563;
+  --line: #d9dde3;
+  --line-strong: #8b95a3;
+  --surface: #f5f6f8;
+  --code-bg: #f1f3f5;
+  --accent: #1d4ed8;
+  --accent-fg: #ffffff;
+  --warn: #92400e;
+  --warn-bg: #fdf6e7;
+  --warn-line: #d9a441;
+  --ok: #166534;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --fg: #e6e8eb;
+    --muted: #a6aeba;
+    --line: #2a3038;
+    --line-strong: #5d6877;
+    --surface: #171b21;
+    --code-bg: #171b21;
+    --accent: #8ab4ff;
+    --accent-fg: #0b1020;
+    --warn: #f3c77a;
+    --warn-bg: #1d1a12;
+    --warn-line: #8a6a2a;
+    --ok: #86d9a0;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 4.5rem; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 1rem/1.6 var(--font);
+}
+a { color: var(--accent); text-underline-offset: 0.15em; }
+a:focus-visible, button:focus-visible, pre:focus-visible, .scroll:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.skip { position: absolute; left: 16px; top: -4rem; background: var(--accent); color: var(--accent-fg); padding: 0.5rem 0.75rem; border-radius: 4px; z-index: 10; }
+.skip:focus { top: 8px; }
+.wrap { width: 100%; max-width: 62rem; margin: 0 auto; padding: 0 16px; }
+.prose { max-width: 42rem; }
+
+header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
+header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.brand { font-weight: 700; color: var(--fg); text-decoration: none; font-family: var(--mono); letter-spacing: -0.01em; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; padding: 0; }
+nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; display: inline-block; }
+nav a:hover { color: var(--fg); text-decoration: underline; }
+.top .gh { margin-left: auto; }
+
+h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 0.75rem; letter-spacing: -0.02em; font-family: var(--mono); }
+h2 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.75rem; letter-spacing: -0.01em; }
+h3 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+p { margin: 0 0 1rem; }
+section { padding: 2.75rem 0 0; }
+code { font-family: var(--mono); font-size: 0.9em; background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { margin: 0 0 1rem; padding: 0.875rem 1rem; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; font: 0.85rem/1.55 var(--mono); max-width: 100%; }
+pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+.muted { color: var(--muted); }
+.small { font-size: 0.9rem; }
+
+.hero { padding: 3rem 0 0.5rem; }
+.lede { font-size: 1.15rem; max-width: 40rem; }
+.badge { display: inline-block; font-size: 0.85rem; border: 1px solid var(--warn-line); background: var(--warn-bg); color: var(--warn); padding: 0.2rem 0.6rem; border-radius: 999px; margin-bottom: 1rem; }
+.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.5rem 0 0; }
+.btn { display: inline-block; padding: 0.55rem 1rem; border-radius: 6px; border: 1px solid var(--accent); text-decoration: none; font-weight: 600; transition: background-color 0.15s, color 0.15s; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); }
+.btn.secondary { color: var(--accent); background: transparent; }
+.btn.secondary:hover { background: var(--surface); }
+.btn.primary:hover { filter: brightness(1.08); }
+
+.facts { list-style: none; padding: 0; margin: 2rem 0 0; display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+.facts li { border-left: 3px solid var(--accent); padding: 0.1rem 0 0.1rem 0.75rem; }
+.facts strong { display: block; }
+
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin-top: 1.25rem; }
+.card { border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 1rem; }
+.card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.card h3 { color: var(--fg); }
+
+.how { display: grid; gap: 2rem; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 52rem) { .how { grid-template-columns: minmax(0, 1fr) 26rem; } }
+ol.steps { margin: 0; padding-left: 1.4rem; }
+ol.steps li { margin-bottom: 0.75rem; padding-left: 0.2rem; }
+figure { margin: 0; }
+figure svg { width: 100%; height: auto; max-width: 28rem; display: block; margin: 0 auto; }
+figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; }
+svg .n { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+svg .d { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
+svg .p { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 5 4; }
+svg .t { fill: var(--fg); font: 600 13px var(--font); }
+svg .s { fill: var(--muted); font: 12px var(--font); }
+svg .a { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+svg .a.dash { stroke-dasharray: 5 4; }
+svg .head { fill: var(--muted); }
+
+.chips { list-style: none; padding: 0; margin: 0 0 1rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chips li { font-family: var(--mono); font-size: 0.85rem; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 0.15rem 0.5rem; }
+.chips li.end { border-color: var(--warn-line); color: var(--warn); background: var(--warn-bg); }
+
+.scroll { overflow-x: auto; max-width: 100%; }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { text-align: left; vertical-align: top; padding: 0.55rem 0.75rem 0.55rem 0; border-bottom: 1px solid var(--line); }
+th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+td:first-child { white-space: nowrap; }
+.note { font-size: 0.9rem; color: var(--muted); }
+@media (max-width: 40rem) {
+  table.stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
+  table.stack tr { border-bottom: 1px solid var(--line); padding: 0.6rem 0; }
+  table.stack td { border: 0; padding: 0.1rem 0; white-space: normal; }
+  table.stack td:first-child { font-weight: 600; margin-bottom: 0.2rem; }
+  table.ev td:last-child { color: var(--muted); font-size: 0.85rem; }
+  table.stack td:first-child code { font-weight: 400; }
+}
+
+.limits { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 10px; padding: 1.25rem 1rem 0.5rem; }
+.limits h2 { margin-bottom: 0.25rem; }
+.limits ul { margin: 0 0 1rem; padding-left: 1.25rem; }
+.limits li { margin-bottom: 0.5rem; }
+.limits code { background: transparent; border: 1px solid var(--line); }
+
+footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding: 1.5rem 0 2.5rem; color: var(--muted); font-size: 0.9rem; }
+footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; }
+
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+
+.hero { padding-bottom: 0; }
+.ex { border-top: 1px solid var(--line); margin-top: 2.75rem; padding-top: 2.25rem; }
+.ex:first-of-type { border-top: 0; margin-top: 0; }
+.ex h2 { display: flex; align-items: baseline; gap: 0.6rem; }
+.ex .n { font: 600 0.9rem var(--mono); color: var(--accent); border: 1px solid var(--line-strong); border-radius: 6px; padding: 0.05rem 0.45rem; }
+.ex .problem { max-width: 42rem; }
+pre.t { margin-bottom: 0.75rem; }
+pre.t .p { user-select: none; -webkit-user-select: none; color: var(--muted); }
+pre.t .c { color: var(--muted); }
+pre.t .ok { color: var(--ok); }
+.ex .lim { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.9rem; margin: 0 0 0.75rem; max-width: 42rem; }
+.ex .lim code { background: transparent; border: 1px solid var(--line); }
+.ex .links { margin: 0; color: var(--muted); }
+.run { margin-top: 1.5rem; max-width: 42rem; }
+nav a[aria-current="page"] { color: var(--fg); font-weight: 600; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./">cancho-hooks</a>
+    <nav aria-label="Pages">
+      <ul>
+        <li><a href="./">Overview</a></li>
+        <li><a href="examples.html" aria-current="page">Examples</a></li>
+        <li><a href="evidence.html">Evidence</a></li>
+        <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">Status</a></li>
+      </ul>
+    </nav>
+    <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
+  </div>
+</header>
+
+<main id="main">
+<div class="wrap">
+  <section class="hero" aria-labelledby="h-title">
+    <h1 id="h-title" style="font-size:clamp(1.6rem,5vw,2.25rem)">Examples</h1>
+    <p class="lede">Seven situations, each a script you can run. What you read is what the script printed, and CI checks that it still is.</p>
+    <p class="small muted run">You need the built service, bash, curl and python3; examples 1 and 4 also need a PostgreSQL they may empty. Each script starts its own service on a free port and stops it. <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/receiver.py"><code>receiver.py</code></a> is the receiver: it verifies every signature. Start with the <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a>.</p>
+  </section>
+
+  <section class="ex" id="customers" data-card="1" aria-labelledby="h-customers">
+    <h2 id="h-customers"><span class="n">1</span>Send your customers webhooks</h2>
+    <p class="problem">Each customer gets an endpoint of its own: its own secret, filter, header and limits. An event reaches only the endpoints that subscribe, every delivery is signed, and a secret can be rotated while the customer's receiver goes on verifying.</p>
+    <pre class="t" data-example="1" tabindex="0"><code><span class="c"># two customers: acme wants invoices, at most 2 requests at once and 10 a second; globex wants everything</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/endpoints -H "Authorization: Bearer $ADMIN" -d '{"host":"127.0.0.1","port":'$ACME_PORT',"types":["invoice.*"],"headers":{"X-Customer":"acme"},"concurrency":2,"rate":10}'
+{"id":0,"host":"127.0.0.1","scheme":"http","port":…,"secret":"whsec_…","from":"now","cursor":0} [201]
+<span class="c"># each secret is in the answer that made the endpoint and in no other; it goes to the customer, who keeps it</span>
+<span class="p">$ </span>curl -s $URL/endpoints -H "Authorization: Bearer $ADMIN"
+[{"id":0,"port":…,"types":["invoice.*"],"headers":["X-Customer"],…"concurrency":2,"rate":10},{"id":1,…"types":[],…
+<span class="c"># an invoice goes to both; a new user goes to globex only</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"invoice.paid","invoice":"INV-1001","amount":4900}'
+{"id":1} [202]
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"user.created","user":"u_77"}'
+{"id":2} [202]
+acme evt_1 signature ok (1 signature) {"type":"invoice.paid","invoice":"INV-1001","amount":4900} X-Customer=acme
+globex evt_1 signature ok (1 signature) {"type":"invoice.paid","invoice":"INV-1001","amount":4900} X-Customer=globex
+globex evt_2 signature ok (1 signature) {"type":"user.created","user":"u_77"} X-Customer=globex
+<span class="p">$ </span>curl -s $URL/stats -H "Authorization: Bearer $ADMIN" | grep -oE '"(delivered|failed|filtered)":[0-9]+'
+"delivered":3
+"failed":0
+"filtered":1</code></pre>
+    <pre class="t" data-example="1" tabindex="0"><code><span class="c"># acme rotates its secret: deliveries are signed with the new one and, for a day (keep_old), with the old one too</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X PATCH $URL/endpoints/$ACME_ID -H "Authorization: Bearer $ADMIN" -d '{"rotate":true,"keep_old":true}'
+{"id":0,…"secret":"whsec_…","secret_old_until":…} [200]
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"invoice.paid","invoice":"INV-1002","amount":1500}'
+{"id":3} [202]
+acme evt_3 signature ok (2 signatures) {"type":"invoice.paid","invoice":"INV-1002","amount":1500} X-Customer=acme
+<span class="c"># acme switches its receiver to the new secret, at its own time</span>
+<span class="p">$ </span>echo "$ACME_NEW" &gt; acme.secret
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"invoice.paid","invoice":"INV-1003","amount":700}'
+{"id":4} [202]
+acme evt_4 signature ok (2 signatures) {"type":"invoice.paid","invoice":"INV-1003","amount":700} X-Customer=acme
+<span class="c"># when acme is ready it ends the overlap, and only the new signature is sent</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X PATCH $URL/endpoints/$ACME_ID -H "Authorization: Bearer $ADMIN" -d '{"keep_old_ms":0}'
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"invoice.paid","invoice":"INV-1004","amount":300}'
+acme evt_5 signature ok (1 signature) {"type":"invoice.paid","invoice":"INV-1004","amount":300} X-Customer=acme
+<span class="p">$ </span>curl -s $URL/stats -H "Authorization: Bearer $ADMIN" | grep -oE '"(delivered|failed)":[0-9]+'
+"delivered":9
+"failed":0
+<span class="ok">ok: no delivery failed, rotation included</span></code></pre>
+    <p class="lim"><strong>Limits.</strong> Delivery is at least once: a receiver can be sent an event again and the <code>webhook-id</code> is then the same. Creating endpoints while the service runs needs PostgreSQL and an admin token. The limits (concurrency 2, rate 10) are shown in the list; example 5 shows concurrency at work.</p>
+    <p class="links small">Run it: <code>examples/01-saas-customers.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/01-saas-customers.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/endpoints.md">Endpoints, filters, rotation, headers</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The HTTP API</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Pace</a></p>
+  </section>
+
+  <section class="ex" id="payments" data-card="2" aria-labelledby="h-payments">
+    <h2 id="h-payments"><span class="n">2</span>Payments that must not be lost or doubled</h2>
+    <p class="problem">The 202 comes after the event is on disk. A client that asks twice with the same <code>Idempotency-Key</code> gets the same id, not a second event. Kill the service hard and the event is still delivered when it is back, with the same <code>webhook-id</code> every time it is sent.</p>
+    <pre class="t" data-example="2" tabindex="0"><code><span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -H 'Idempotency-Key: order-1042' -d '{"type":"payment.captured","order":1042,"amount":4900}'
+{"id":1} [202]
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -H 'Idempotency-Key: order-1042' -d '{"type":"payment.captured","order":1042,"amount":4900}'
+{"id":1} [202]
+<span class="ok">ok: the same id comes back: one event</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -H 'Idempotency-Key: order-1042' -d '{"type":"payment.captured","order":1042,"amount":9900}'
+{"error":"this Idempotency-Key was used for a different event"} [422]
+<span class="c"># the 202 came after the event was flushed to disk. Now the service dies, hard, before it has delivered anything</span>
+<span class="p">$ </span>kill -9 $SVC_PID
+<span class="p">$ </span>hooks --config hooks.conf --port $PORT --dir $DATA --schedule 500,500,500,500,500,500 --retry-jitter 0 &amp;
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -H 'Idempotency-Key: order-1042' -d '{"type":"payment.captured","order":1042,"amount":4900}'
+{"id":1} [202]
+<span class="ok">ok: still the same id</span>
+<span class="c"># the shop's server comes back</span>
+<span class="p">$ </span>python3 examples/receiver.py --name shop --port $SHOP_PORT --secret-file shop.secret &amp;
+shop evt_1 signature ok (1 signature) {"type":"payment.captured","order":1042,"amount":4900}
+<span class="ok">ok: it arrived, once, although the service was killed and the shop was down</span>
+<span class="c"># a repeat of a delivery has the same webhook-id (evt_1): the receiver drops it. Here the service is asked to send the event again</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events/1/replay -H "Authorization: Bearer $ADMIN"
+{"event":1,"endpoints":[0]} [202]
+shop evt_1 signature ok (1 signature) duplicate</code></pre>
+    <p class="lim"><strong>Limits.</strong> Delivery is at least once, not exactly once: a repeat is possible, and the receiver drops it by <code>webhook-id</code>, as the one here does. The demo shortens the retry delays; the default first retry is 5 seconds.</p>
+    <p class="links small">Run it: <code>examples/02-payments.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/02-payments.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">POST /events</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Idempotency, how it works</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">What is tested</a></p>
+  </section>
+
+  <section class="ex" id="down" data-card="3" aria-labelledby="h-down">
+    <h2 id="h-down"><span class="n">3</span>A customer&#x27;s endpoint is down</h2>
+    <p class="problem">The service retries on a schedule. When it runs out, the event is a dead letter of that endpoint: kept, listed, and sent again in bulk when the customer is back.</p>
+    <pre class="t" data-example="3" tabindex="0"><code><span class="p">$ </span>hooks --config hooks.conf --port $PORT --dir $DATA --schedule 200,300,400 --retry-jitter 0 &amp;
+<span class="p">$ </span>for i in 1 2 3; do curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d "{\"type\":\"order.shipped\",\"order\":$i}"; done
+{"id":1} [202]
+{"id":2} [202]
+{"id":3} [202]
+<span class="p">$ </span>curl -s "$URL/endpoints/0/dead?limit=2"
+{"endpoint":0,"order":"desc","held":3,…"dead":[{"event":3,"type":"order.shipped","attempts":4,"reason":"connect_refused",…
+<span class="c"># the customer is back</span>
+<span class="p">$ </span>python3 examples/receiver.py --name customer --port $CUSTOMER_PORT --secret-file customer.secret &amp;
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/endpoints/0/replay-dead -H "Authorization: Bearer $ADMIN"
+{"endpoint":0,"taken":3,"remaining":0,"waiting":3,"next":3} [202]
+customer evt_1 signature ok (1 signature) {"type":"order.shipped","order":1}
+customer evt_2 signature ok (1 signature) {"type":"order.shipped","order":2}
+customer evt_3 signature ok (1 signature) {"type":"order.shipped","order":3}
+<span class="p">$ </span>curl -s "$URL/endpoints/0/dead"
+{"endpoint":0,"order":"desc","held":0,…"dead":[],"next":null}</code></pre>
+    <p class="lim"><strong>Limits.</strong> The demo uses <code>--schedule 200,300,400</code> (four attempts in about a second). The default is nine retries over about three days: 5 s, 5 min, 30 min, 2 h, and so on up to 24 h between the last two attempts. An endpoint lists at most 2,048 dead letters; an older one is replayed by its event id.</p>
+    <p class="links small">Run it: <code>examples/03-endpoint-down.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/03-endpoint-down.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Retries, dead letters, bulk replay</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The routes</a></p>
+  </section>
+
+  <section class="ex" id="cron" data-card="4" aria-labelledby="h-cron">
+    <h2 id="h-cron"><span class="n">4</span>A report every Monday, with no scheduler</h2>
+    <p class="problem">A schedule is a cron expression in UTC. The service makes an ordinary event on it, so a fire is signed, retried and replayable like any other.</p>
+    <pre class="t" data-example="4" tabindex="0"><code><span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/schedules -H "Authorization: Bearer $ADMIN" -d '{"expr":"0 6 * * 1","type":"report.due","body":{"report":"weekly"}}'
+{"id":1,"expr":"0 6 * * 1",…"next_fire_at":"…"} [201]
+<span class="ok">ok: the next fire is a Monday, 06:00:00 UTC</span>
+<span class="c"># part two: the same, with seconds, so that it can be watched (a fire every 2 seconds)</span>
+<span class="p">$ </span>hooks --config hooks.conf --port $PORT --dir $DATA --cron-seconds 1 &amp;
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/schedules -H "Authorization: Bearer $ADMIN" -d '{"expr":"*/2 * * * * *","type":"report.due","body":{"report":"weekly"}}'
+<span class="c"># nothing else sends events: these are the fires</span>
+reports evt_1 signature ok (1 signature) {"type":"report.due","schedule":2,"scheduled_at":…,"body":{"report":"weekly"}}
+reports evt_2 signature ok (1 signature) {"type":"report.due","schedule":2,"scheduled_at":…,"body":{"report":"weekly"}}
+<span class="p">$ </span>curl -s $URL/stats | grep -o '"cron_fired":[0-9]*'
+<span class="ok">ok: the fires the service counted are the verified deliveries the receiver has: none lost, none doubled</span>
+<span class="c"># a fire is an event like any other: it can be sent again, with the same webhook-id</span>
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events/1/replay -H "Authorization: Bearer $ADMIN"
+{"event":1,"endpoints":[0]} [202]
+reports evt_1 signature ok (1 signature) duplicate</code></pre>
+    <p class="lim"><strong>Limits.</strong> Five fields, numbers only, UTC. The second half runs the service with <code>--cron-seconds 1</code>, a mode for demos and tests that adds a seconds field, so that a fire can be watched in seconds instead of on Monday. One service per database: a second one reading the same schedules would fire them too. Needs PostgreSQL and an admin token.</p>
+    <p class="links small">Run it: <code>examples/04-cron.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/04-cron.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/cron.md">Schedules</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The routes</a></p>
+  </section>
+
+  <section class="ex" id="systems" data-card="5" aria-labelledby="h-systems">
+    <h2 id="h-systems"><span class="n">5</span>One event, several internal systems</h2>
+    <p class="problem">Three systems read the same stream, each with the types it needs and a pace of its own. A slow one waits its turn and does not hold up the others.</p>
+    <pre class="t" data-example="5" tabindex="0"><code><span class="p">$ </span>cat &gt; $DATA/endpoints.conf &lt;&lt;EOF
+0 127.0.0.1 $BILLING_PORT $(cat billing.secret) types=invoice.*
+1 127.0.0.1 $AUDIT_PORT $(cat audit.secret)
+2 127.0.0.1 $SEARCH_PORT $(cat search.secret) types=invoice.*,user.* concurrency=1
+EOF
+<span class="p">$ </span>python3 examples/receiver.py --name search --port $SEARCH_PORT --secret-file search.secret --delay 1.5 &amp;
+<span class="p">$ </span>for t in invoice.paid user.created invoice.refunded invoice.paid; do curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d "{\"type\":\"$t\"}"; done
+<span class="c"># what each receiver got, and when it had it all (from the first event posted)</span>
+billing: 3 deliveries (invoice.*), done after … ms
+audit:   4 deliveries (everything), done after … ms
+search:  4 deliveries (invoice.*, user.*; 1.5 s each, one at a time), done after … ms
+<span class="ok">ok: the two fast receivers were done in less than half the time the slow one needed</span></code></pre>
+    <p class="lim"><strong>Limits.</strong> One process, up to 64 attempts in flight together. The times above are from one machine and one run: the script only requires that the fast ones finish in under half the slow one's time.</p>
+    <p class="links small">Run it: <code>examples/05-several-systems.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/05-several-systems.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Pace: concurrency and rate</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/endpoints.md">endpoints.conf</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/capacity.md">Capacity</a></p>
+  </section>
+
+  <section class="ex" id="erase" data-card="6" aria-labelledby="h-erase">
+    <h2 id="h-erase"><span class="n">6</span>Erase and expire personal data</h2>
+    <p class="problem">Erase one event on request: its body leaves the files, the endpoint never gets it and reading it answers 410. Or set a maximum age, which drops events that an endpoint that is down would otherwise keep for ever.</p>
+    <pre class="t" data-example="6" tabindex="0"><code><span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events -d '{"type":"customer.updated","email":"ana@example.com"}'
+{"id":1} [202]
+<span class="p">$ </span>grep -rl ana@example.com $DATA | sed "s|^$DATA/||"
+events.seg
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X DELETE $URL/events/1 -H "Authorization: Bearer $ADMIN"
+{"id":1,"erased":true} [200]
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' $URL/events/1
+{"error":"the event was erased (DELETE /events/:id)"} [410]
+<span class="p">$ </span>(grep -rl ana@example.com $DATA || echo 'ana@example.com: in no file') | sed "s|^$DATA/||"
+ana@example.com: in no file
+<span class="c"># what is not erased: the event's type (and its id, its size and its idempotency key if it had one)</span>
+<span class="p">$ </span>grep -rao customer.updated $DATA | sed "s|^$DATA/||"
+events.seg:customer.updated
+<span class="c"># the customer's server comes back: it gets the event that is left, and never the erased one</span>
+customer evt_2 signature ok (1 signature) {"type":"order.created","email":"ben@example.com"}
+<span class="ok">ok: only the event that was not erased arrived</span></code></pre>
+    <pre class="t" data-example="6" tabindex="0"><code><span class="c"># part two. Events that nothing may keep: an endpoint that is down pins them (retention only drops what is final everywhere)</span>
+<span class="p">$ </span>curl -s -o /dev/null -w '%{http_code}\n' $URL/events/1
+200
+<span class="c"># the same data, with a maximum age of 3 seconds (the real setting is --max-age-days; this is its knob for tests)</span>
+<span class="p">$ </span>hooks --config hooks.conf --port $PORT --dir $DATA --segment-bytes 262144 --schedule 3600000 --max-age-ms 3000 &amp;
+<span class="p">$ </span>curl -s -o /dev/null -w '%{http_code}\n' $URL/events/1
+410
+<span class="p">$ </span>curl -s $URL/stats | grep -oE '"(events_expired|segments_expired)":[0-9]+'
+"events_expired":…
+"segments_expired":…
+<span class="ok">ok: the expired events are counted, not hidden</span></code></pre>
+    <p class="lim"><strong>Limits.</strong> Not erased: the event's type, id, size and idempotency key; the history rows (they hold no body); backups taken before the erasure; and the copies the receivers already have. The service does not index bodies by person, so an access request needs the event ids. Not legal advice; the page says what the service does.</p>
+    <p class="links small">Run it: <code>examples/06-erase-and-expire.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/06-erase-and-expire.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/privacy.md">Privacy and audit: what is held, what is erased, what is not</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/retention.md">Retention and the maximum age</a></p>
+  </section>
+
+  <section class="ex" id="agent" data-card="7" aria-labelledby="h-agent">
+    <h2 id="h-agent"><span class="n">7</span>Let an agent look</h2>
+    <p class="problem"><code>hooks-mcp</code> lets an AI agent read events, dead letters and attempts over MCP. Without <code>--allow-write</code> the tools that change anything are not even offered.</p>
+    <pre class="t" data-example="7" tabindex="0"><code><span class="p">$ </span>hooks-mcp --url $URL &lt; requests.jsonl &gt; replies.jsonl; echo "$(wc -l &lt; replies.jsonl) replies"
+5 replies
+<span class="p">$ </span>grep '"id":2,' replies.jsonl | grep -o '"name":"hooks_[a-z_]*"'
+"name":"hooks_health"
+"name":"hooks_stats"
+"name":"hooks_get_event"
+"name":"hooks_list_endpoints"
+"name":"hooks_list_dead_letters"
+"name":"hooks_get_attempts"
+<span class="p">$ </span>grep -E '"id":[345],' replies.jsonl
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"id\":1,\"event\":{\"type\":\"order.shipped\",\"order\":7}}"}],"isError":false}}
+{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"{\"endpoint\":0,…
+{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Invalid params: unknown tool"}}
+<span class="p">$ </span>curl -s -w ' [%{http_code}]\n' $URL/events/2
+{"error":"no such event"} [404]</code></pre>
+    <p class="lim"><strong>Limits.</strong> An event's body goes to the agent's model: decide that before giving it the tool. It speaks plain HTTP to a service on this machine, or through a tunnel; it is not given secrets, endpoint changes or erasure.</p>
+    <p class="links small">Run it: <code>examples/07-agent.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/07-agent.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/agents.md">The service for an AI agent</a></p>
+  </section>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <ul>
+      <li><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a></li>
+      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a></li>
+      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/examples.md">The mechanisms, by hand</a></li>
+      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design document</a></li>
+      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">EUPL-1.2</a></li>
+    </ul>
+    <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Signatures follow the Standard Webhooks specification.</p>
+  </div>
+</footer>
+</body>
+</html>

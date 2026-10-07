@@ -280,7 +280,15 @@ jobs:
 
       - name: The shell scripts
         working-directory: hooks
-        run: shellcheck scripts/*.sh scripts/soak/*.sh deploy/*.sh
+        run: shellcheck -x scripts/*.sh scripts/soak/*.sh deploy/*.sh examples/*.sh
+
+      # Seven use cases as scripts (examples/), each run against the service and exiting 0 only if every expectation it prints held; the page docs/examples.html
+      # is then held to what they printed (every block marked data-example="N" is lines of script N's output, in order), and receiver.py to the reference library.
+      - name: "The examples (each script against the service; the page docs/examples.html is only what they printed; the receiver agrees with the reference library; the checks can fail)"
+        working-directory: hooks
+        run: |
+          which psql || (sudo apt-get update -q && sudo apt-get install -y -q postgresql-client)
+          HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/examples_test.py build/hooks
 
       # The checker of the soak test (docs/soak.md) against synthetic ledgers that are mutated: every mutation must be caught under its own tag. Seconds; no service.
       - name: The soak harness's checker catches what it must
