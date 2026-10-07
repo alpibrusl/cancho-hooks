@@ -51,7 +51,7 @@ jobs:
         working-directory: hooks
         run: ../lex-sys/target/release/lex-sys fmt --check src tools
 
-      # The service is linked against OpenSSL (src/tls.ls; scripts/cc-ssl.sh adds -lssl -lcrypto) and its tests of https use the `openssl` command to make certificates.
+      # The service is linked against OpenSSL (src/ossl.ls; scripts/cc-ssl.sh adds -lssl -lcrypto) and its tests of https use the `openssl` command to make certificates.
       - name: OpenSSL (the development files to link against, and the command the tests make certificates with)
         run: |
           dpkg -s libssl-dev >/dev/null 2>&1 || (sudo apt-get update -q && sudo apt-get install -y -q libssl-dev openssl)

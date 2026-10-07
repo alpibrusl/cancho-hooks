@@ -4,7 +4,7 @@
     python3 scripts/make_pure.py [<out-dir>]       (default pure/build/src)
 
 `lex-sys` has no function values and no effect polymorphism (lex-sys `docs/effect-polymorphism.md`), so the 11 functions that carry an `Ffi("libssl")` row
-cannot be written once for both backends. This script writes the other one. It copies every file of `src/` except `src/tls.ls` (the OpenSSL module) into
+cannot be written once for both backends. This script writes the other one. It copies every file of `src/` except `src/ossl.ls` (the OpenSSL module) into
 <out-dir>, with the changes listed in `PATCHES`, and adds `pure/tlsx.ls` (the module that takes its place). The result is not committed, so there is no copy
 to drift from `src/`.
 
@@ -16,7 +16,7 @@ What the changes do, in short:
 - the `Ffi("libcrypto,libssl")` or `Ffi("libssl")` of a function becomes the engine (`tls.Engine`, `lex-sys`'s `packages/tls`) in the same place, and the two
   `ffi(...)` entries leave every row. `attempt.advance` also takes the time (the certificates' dates) and `main` opens the engine once, seeds it and loads the
   trust store (`tlsx.setup`), and closes it at the end;
-- every `tls.` of `attempt.ls` and `hooks.ls` (the OpenSSL module) is `tlsx.` (the adapter);
+- every `ossl.` of `attempt.ls` and `hooks.ls` (the OpenSSL module) is `tlsx.` (the adapter), and `import ossl;` imports lex-sys's `tls` and `tlsx`;
 - `main` holds no foreign library: the `Ffi` it is given is released at once (libssl and libcrypto were the only ones it narrowed to).
 """
 import os
@@ -56,9 +56,9 @@ def rows_and_types(text, name, sole, tail, lead, typed_both, typed_ssl):
 
 
 def attempt(text):
-    # The module that was `tls` is `tlsx`; `tls` is lex-sys's package, named only for `tls.Engine`.
-    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 43, "attempt.ls: calls of the TLS module")
-    text = exact(text, "import tls;\n", "import tls; import tlsx;\n", 1, "attempt.ls: imports") if "import tls;\n" in text else \
+    # The module that was `ossl` (OpenSSL) is `tlsx`; `tls` is lex-sys's package, named only for `tls.Engine`.
+    text = regex(text, r"\bossl\.(?=\w)", "tlsx.", 43, "attempt.ls: calls of the TLS module")
+    text = exact(text, "import ossl;\n", "import tls; import tlsx;\n", 1, "attempt.ls: imports") if "import ossl;\n" in text else \
         exact(text, "import std.conns;\n", "import std.conns;\nimport tls; import tlsx;\n", 1, "attempt.ls: imports")
     # `advance` takes the time for the certificates' dates (`tlsx.open`), the other functions only the engine.
     text = exact(text, 'pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab:',
@@ -95,8 +95,8 @@ def attempt(text):
 
 
 def hooks(text):
-    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 6, "hooks.ls: calls of the TLS module")
-    text = exact(text, "import tls;\n", "import tls; import tlsx;\n", 1, "hooks.ls: imports")
+    text = regex(text, r"\bossl\.(?=\w)", "tlsx.", 6, "hooks.ls: calls of the TLS module")
+    text = exact(text, "import ossl;\n", "import tls; import tlsx;\n", 1, "hooks.ls: imports")
     text = start_tls(text)
     # The TLS functions of the delivery loop.
     text = exact(text, "attempt.advance(ffi, atab, poller,", "attempt.advance(engine, clock_unix_ms(clock), atab, poller,", 1, "hooks.ls: advance")
@@ -153,7 +153,7 @@ def main():
     os.makedirs(out)
     src = os.path.join(ROOT, "src")
     for name in sorted(os.listdir(src)):
-        if not name.endswith(".ls") or name == "tls.ls":
+        if not name.endswith(".ls") or name == "ossl.ls":
             continue
         text = open(os.path.join(src, name)).read()
         if name in PATCHES:
@@ -162,8 +162,8 @@ def main():
             except Mismatch as e:
                 raise SystemExit(f"make_pure: src/{name} is no longer what the changes expect:\n  {e}\n"
                                  "  (scripts/make_pure.py lists each change and how many places it must find)")
-        elif re.search(r"\btls\.", text):
-            raise SystemExit(f"make_pure: src/{name} uses `tls.` and has no changes listed for it")
+        elif re.search(r"\bossl\.|^import ossl;", text, re.M):
+            raise SystemExit(f"make_pure: src/{name} uses `ossl` (the OpenSSL module) and has no changes listed for it")
         open(os.path.join(out, name), "w").write(text)
     shutil.copy(os.path.join(ROOT, "pure", "src", "tlsx.ls"), os.path.join(out, "tlsx.ls"))
     print(f"{out}: {len(os.listdir(out))} files")

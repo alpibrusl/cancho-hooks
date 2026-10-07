@@ -190,7 +190,7 @@ def main():
     s = K.TlsServer(*good, mode="tls11")
     took = one("3. a receiver that offers TLS 1.1 at most", s, pki, "tls_handshake")
     # The system's OpenSSL configuration (Debian's and Ubuntu's) already refuses TLS 1.1, which would make the service's own minimum redundant here. With a configuration that
-    # allows everything down to TLS 1.0 at security level 0 only the service's own minimum (src/tls.ls: TLS 1.2) stands between it and this receiver.
+    # allows everything down to TLS 1.0 at security level 0 only the service's own minimum (src/ossl.ls: TLS 1.2) stands between it and this receiver.
     permissive = os.path.join(pki.dir, "permissive.cnf")
     with open(permissive, "w") as f:
         f.write("openssl_conf = default_conf\n[default_conf]\nssl_conf = ssl_sect\n[ssl_sect]\nsystem_default = system_default_sect\n[system_default_sect]\nMinProtocol = TLSv1\nCipherString = DEFAULT:@SECLEVEL=0\n")

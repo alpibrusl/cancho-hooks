@@ -8,13 +8,13 @@ import tls;
 import tls_record;
 
 // `tlsx` -- the TLS client of an `https` endpoint when the service is built with lex-sys's own TLS (`packages/tls`, lex-sys epic #197) and not OpenSSL
-// (`docs/pure-tls.md`). It has the functions of `src/tls.ls` that `attempt.ls` calls, so the attempt's state machine is the same, and takes the engine where
-// `src/tls.ls` takes the `Ffi`. It is not in `src/`: the pure build (`scripts/make_pure.py`) puts it beside the transformed copies of the other sources.
+// (`docs/pure-tls.md`). It has the functions of `src/ossl.ls` that `attempt.ls` calls, so the attempt's state machine is the same, and takes the engine where
+// `src/ossl.ls` takes the `Ffi`. It is not in `src/`: the pure build (`scripts/make_pure.py`) puts it beside the transformed copies of the other sources.
 //
 // **The authority is none.** Nothing here is foreign: the engine is lex-sys code, the socket is the `Conn` in the attempt's `std.conns.Table` as before, and the
 // bytes move between the two here, as `tests/programs/tls_many.ls` of lex-sys does for 64 connections on one poller.
 //
-// The state of a connection is `fields()` integers in the caller's array, from index `b`, in the same places as `src/tls.ls` keeps them where they have the same
+// The state of a connection is `fields()` integers in the caller's array, from index `b`, in the same places as `src/ossl.ls` keeps them where they have the same
 // meaning:
 //
 //     [live, ciphertext received and not yet taken: from, to (in the connection's `net` bytes), ciphertext sent of the pending chunk, ciphertext in the pending chunk,
@@ -73,7 +73,7 @@ pub fn stage_of[&a](tt: &a [int], b: int) -> [] int {
     return tt[b + 6];
 }
 
-// For a failed connection, the number `attempt.handshake_code` reads, which is what `src/tls.ls` holds: the `X509_V_ERR_*` number for the certificate failures (the
+// For a failed connection, the number `attempt.handshake_code` reads, which is what `src/ossl.ls` holds: the `X509_V_ERR_*` number for the certificate failures (the
 // OpenSSL column of `docs/tls-pure.md` section 8 of lex-sys), -1 if the peer closed, 16,777,216 for any other protocol failure (OpenSSL's error numbers are that or
 // more), and for a socket failure -1000 minus the `errno`.
 pub fn detail_of[&a](tt: &a [int], b: int) -> [] int {

@@ -1,10 +1,10 @@
 edition 5;
 
-module tls;
+module ossl;
 
 import std.conns;
 
-// `tls` -- the TLS client of an `https` endpoint: OpenSSL driven in steps, for one thread and one `Poller` (`docs/design.md` section 40).
+// `ossl` -- the TLS client of an `https` endpoint: OpenSSL driven in steps, for one thread and one `Poller` (`docs/design.md` section 40).
 //
 // **This is foreign code.** Every function below that reaches OpenSSL names its library, `libssl` (`SSL_*`, `TLS_*`) or `libcrypto` (`BIO_*`, `ERR_*`,
 // `X509_*`), and the authority report (`scripts/check-authority.sh`, `docs/authority.json`) lists the exact `library:symbol` pairs the service can call.

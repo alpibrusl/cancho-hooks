@@ -6,7 +6,7 @@ import std.conns;
 import dns;
 import destination;
 import state;
-import tls;
+import ossl;
 
 // `attempt` -- delivery attempts that do not hold the loop (`docs/design.md` sections 16 and 40).
 //
@@ -32,7 +32,7 @@ import tls;
 //
 // An attempt's per-slot numbers are `stride()` integers in one array, `at`, followed by the environment (`env_size()` integers: the TLS context, the name
 // server, the policy, the saved sessions). The bytes of a slot are `slot_bytes()` in one byte array: the request (`req_max()`), the host name (`name_max()`),
-// what is read from the socket (`tls.net_max()`) and the ciphertext or the DNS message in flight (`tls.out_max()`). The part of the response kept is
+// what is read from the socket (`ossl.net_max()`) and the ciphertext or the DNS message in flight (`ossl.out_max()`). The part of the response kept is
 // `resp_max()` bytes per slot, enough for `HTTP/1.1 NNN`.
 
 pub fn slots() -> [] int {
@@ -301,7 +301,7 @@ fn starts_room() -> [] int {
 
 // The per-slot numbers: state, endpoint, event, deadline, request bytes sent, response bytes held, request length, flags (1 TLS, 2 resolving), the address the
 // connection goes to (packed, 0 until known), the port, the length of the host name, DNS bytes sent, DNS bytes received, the DNS query's id, its length,
-// then `tls.fields()` integers of TLS state, then the kept connection's (section 53): whether this attempt's connection came from the pool, the body's framing
+// then `ossl.fields()` integers of TLS state, then the kept connection's (section 53): whether this attempt's connection came from the pool, the body's framing
 // (`m_*`), the body bytes still to come, the chunk parser's state, the body bytes so far, when the connection was made (`clock_ms`, 0 until the next
 // `sweep_parked` sees it), how many requests it has carried, and the key it is pooled under.
 fn f_reused() -> [] int {
@@ -448,7 +448,7 @@ fn most_sessions() -> [] int {
     return state.max_endpoints();
 }
 
-// Set what the attempts share: the TLS context (`tls.context`, 0 if there is none), the name server's address (packed, 0: names cannot be resolved) and port,
+// Set what the attempts share: the TLS context (`ossl.context`, 0 if there is none), the name server's address (packed, 0: names cannot be resolved) and port,
 // whether private addresses are allowed, and whether sessions are kept for resumption. Called once, before the first attempt.
 pub fn configure[&a](at: &!a [int], ctx: int, ns: int, ns_port: int, private: bool, resume: bool, keep: bool) -> [] int {
     at[env_at() + e_keep()] = 0;
@@ -495,7 +495,7 @@ pub fn drop_session[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], e: int) -> [ff
     if e < 0 || e >= most_sessions() {
         return 0;
     }
-    tls.free_session(ffi, at[env_at() + e_sessions() + e]);
+    ossl.free_session(ffi, at[env_at() + e_sessions() + e]);
     at[env_at() + e_sessions() + e] = 0;
     at[env_at() + e_keys() + e] = 0;
     return 0;
@@ -521,7 +521,7 @@ pub fn close_tls[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int]) -> [ffi("libssl")
         drop_session(ffi, at, e);
         e = e + 1;
     }
-    tls.free_context(ffi, at[env_at() + e_ctx()]);
+    ossl.free_context(ffi, at[env_at() + e_ctx()]);
     at[env_at() + e_ctx()] = 0;
     return 0;
 }
@@ -594,7 +594,7 @@ pub fn status_of[&h](head: &h [byte], n: int) -> [] int {
     return code;
 }
 
-// What a failed handshake means: the `X509_V_ERR_*` number `tls.detail_of` holds, or another number when verification was not what failed.
+// What a failed handshake means: the `X509_V_ERR_*` number `ossl.detail_of` holds, or another number when verification was not what failed.
 pub fn handshake_code(detail: int) -> [] int {
     if detail == 9 || detail == 10 {
         return cert_expired();
@@ -713,7 +713,7 @@ pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab0: conns.Table, poll
         let counter = at[env_at() + e_counter()] + 1;
         at[env_at() + e_counter()] = counter;
         let query_id = (counter * 40503 + deadline) % 65536;
-        qlen = dns.build_query(name, query_id, req[base + io_at()..base + io_at() + tls.out_max()], 2);
+        qlen = dns.build_query(name, query_id, req[base + io_at()..base + io_at() + ossl.out_max()], 2);
         if qlen < 0 {
             borrow mut table as &!ct in {
                 conns.close(ct, slot);
@@ -766,7 +766,7 @@ pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab0: conns.Table, poll
     at[b + f_dsent()] = 0;
     at[b + f_dgot()] = 0;
     var k = 0;
-    while k < tls.fields() {
+    while k < ossl.fields() {
         at[b + f_tls() + k] = 0;
         k = k + 1;
     }
@@ -817,8 +817,8 @@ fn reuse[&p, &q, &e, &a, &r](tab: conns.Table, poller: &!p Poller, host: &q [byt
     var watched = 0 - 1;
     borrow mut table as &!ct in {
         if secure {
-            tls.watching(at, b + f_tls(), 0);
-            watched = tls.want(ct, poller, at, b + f_tls(), found, token0 + found, 2);
+            ossl.watching(at, b + f_tls(), 0);
+            watched = ossl.want(ct, poller, at, b + f_tls(), found, token0 + found, 2);
         } else {
             watched = conns.rewatch(ct, poller, found, token0 + found, 2);
         }
@@ -966,10 +966,10 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
                         session = at[env_at() + e_sessions() + e];
                     }
                 }
-                if tls.open(ffi, at[env_at() + e_ctx()], at, tb, req[base + name_at()..base + name_at() + at[b + f_name()]], session) != 0 {
+                if ossl.open(ffi, at[env_at() + e_ctx()], at, tb, req[base + name_at()..base + name_at() + at[b + f_name()]], session) != 0 {
                     return tls_error();
                 }
-                tls.watching(at, tb, 2);
+                ossl.watching(at, tb, 2);
                 at[b] = handshaking();
             } else {
                 at[b] = sending();
@@ -1026,15 +1026,15 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
                 }
             }
         } else if at[b] == handshaking() {
-            let hs = tls.handshake(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot);
-            if hs == tls.pending() {
+            let hs = ossl.handshake(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + ossl.out_max()], req[base + net_at()..base + net_at() + ossl.net_max()], slot, token0 + slot);
+            if hs == ossl.pending() {
                 return pending();
             }
-            if hs == tls.failed() {
-                return handshake_code(tls.detail_of(at, tb));
+            if hs == ossl.failed() {
+                return handshake_code(ossl.detail_of(at, tb));
             }
             at[env_at() + e_handshakes()] = at[env_at() + e_handshakes()] + 1;
-            if tls.resumed(at, tb) {
+            if ossl.resumed(at, tb) {
                 at[env_at() + e_resumed()] = at[env_at() + e_resumed()] + 1;
             }
             at[b] = sending();
@@ -1042,12 +1042,12 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
         } else if at[b] == sending() {
             let total = at[b + 6];
             if secure {
-                let k = tls.write(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot, token0 + slot, req[base + at[b + 4]..base + total]);
+                let k = ossl.write(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + ossl.out_max()], slot, token0 + slot, req[base + at[b + 4]..base + total]);
                 if k > 0 {
                     at[b + 4] = at[b + 4] + k;
                     if at[b + 4] >= total {
                         at[b] = reading();
-                        tls.want(tab, poller, at, tb, slot, token0 + slot, 1);
+                        ossl.want(tab, poller, at, tb, slot, token0 + slot, 1);
                     }
                     progress = true;
                 } else if k == 0 - 1 {
@@ -1081,7 +1081,7 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
             let held = at[b + 5];
             var k = 0;
             if secure {
-                k = tls.read(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + held..base + head_max()]);
+                k = ossl.read(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + ossl.out_max()], req[base + net_at()..base + net_at() + ossl.net_max()], slot, token0 + slot, req[base + held..base + head_max()]);
             } else {
                 match conns.read(tab, slot, req[base + held..base + head_max()]) {
                     Received::Data(n) => {
@@ -1118,11 +1118,11 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
                             // `close_notify` (OpenSSL will not resume a session whose connection was freed without it: `sessions_test`).
                             at[b] = reading();
                             if secure {
-                                tls.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot);
+                                ossl.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + ossl.out_max()], slot);
                             }
                         }
                     } else if secure {
-                        tls.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot);
+                        ossl.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + ossl.out_max()], slot);
                     }
                     return code;
                 }
@@ -1156,7 +1156,7 @@ fn keep_session[&f, &a, &r](ffi: &f Ffi("libssl"), at: &!a [int], req: &!r [byte
     if at[env_at() + e_resume()] != 1 || e < 0 || e >= most_sessions() {
         return 0;
     }
-    let saved = tls.save_session(ffi, at, b + f_tls());
+    let saved = ossl.save_session(ffi, at, b + f_tls());
     if saved == 0 {
         return 0;
     }
@@ -1184,7 +1184,7 @@ fn close[&f, &t, &a](ffi: &f Ffi("libssl"), tab: &!t conns.Table, at: &!a [int],
 }
 
 fn drop_tls[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], slot: int) -> [ffi("libssl")] int {
-    tls.drop(ffi, at, slot * stride() + f_tls());
+    ossl.drop(ffi, at, slot * stride() + f_tls());
     return 0;
 }
 
@@ -1202,7 +1202,7 @@ fn gone[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], slot: int, code: int) -> [
     }
     drop_tls(ffi, at, slot);
     var k = 0;
-    while k < tls.fields() {
+    while k < ossl.fields() {
         at[b + f_tls() + k] = 0;
         k = k + 1;
     }
@@ -1288,8 +1288,8 @@ fn drain[&f, &t, &p, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Tab
             var watched = 0;
             if secure {
                 // Registered again whatever the TLS module last noted: an idle connection woken for writable would read as the receiver's doing.
-                tls.watching(at, b + f_tls(), 0);
-                watched = tls.want(tab, poller, at, b + f_tls(), slot, token0 + slot, 1);
+                ossl.watching(at, b + f_tls(), 0);
+                watched = ossl.want(tab, poller, at, b + f_tls(), slot, token0 + slot, 1);
             } else {
                 watched = conns.rewatch(tab, poller, slot, token0 + slot, 1);
             }
@@ -1303,7 +1303,7 @@ fn drain[&f, &t, &p, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Tab
         var k = 0;
         if into_head {
             if secure {
-                k = tls.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + at[b + 5]..base + head_max()]);
+                k = ossl.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + ossl.out_max()], req[base + net_at()..base + net_at() + ossl.net_max()], slot, token0 + slot, req[base + at[b + 5]..base + head_max()]);
             } else {
                 match conns.read(tab, slot, req[base + at[b + 5]..base + head_max()]) {
                     Received::Data(n) => {
@@ -1325,7 +1325,7 @@ fn drain[&f, &t, &p, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Tab
             }
         } else {
             if secure {
-                k = tls.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + head_max()..base + head_max() + 8192]);
+                k = ossl.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + ossl.out_max()], req[base + net_at()..base + net_at() + ossl.net_max()], slot, token0 + slot, req[base + head_max()..base + head_max() + 8192]);
             } else {
                 match conns.read(tab, slot, req[base + head_max()..base + head_max() + 8192]) {
                     Received::Data(n) => {
@@ -1680,7 +1680,7 @@ fn quit[&f, &t, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Table, a
     let b = slot * stride();
     if at[b + f_flags()] % 2 == 1 && at[b] != draining() {
         let base = slot * slot_bytes();
-        tls.shutdown(ffi, tab, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], slot);
+        ossl.shutdown(ffi, tab, at, b + f_tls(), req[base + io_at()..base + io_at() + ossl.out_max()], slot);
     }
     return close(ffi, tab, at, slot);
 }

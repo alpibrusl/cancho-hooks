@@ -1,5 +1,5 @@
 # The service with lex-sys's own TLS in place of OpenSSL (docs/pure-tls.md). It is a project of its own, because a project's libraries are built into every
-# program of it: lex-sys's `tls` package and this service's OpenSSL module are both called `tls`, and the pure build needs a newer compiler than the default one
+# program of it (lex-sys's `tls` package and this service's OpenSSL module were both called `tls`; the latter is now `ossl`), and the pure build needs a newer compiler than the default one
 # (`std.gcm`, `std.ecdh` and the packages are newer than the pin of the default project). `scripts/make_pure.py` writes `build/src`; `scripts/build.sh` runs it.
 
 [package]

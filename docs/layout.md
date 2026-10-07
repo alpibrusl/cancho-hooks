@@ -30,7 +30,7 @@ src/dead.ls        the table of each endpoint's dead letters: sorted by event id
 src/bulk.ls        what the requests about dead letters ask for: the page of the list, the body of the bulk replay
 src/wire.ls        the request of one attempt: the headers, one signature or two, the Host
 src/attempt.ls     one delivery attempt as a state machine on the poller: resolving a name, connecting, the TLS handshake, sending, reading
-src/tls.ls         the TLS client: OpenSSL driven in steps over memory BIOs (the foreign calls of libssl and libcrypto), the trust store, sessions
+src/ossl.ls        the TLS client: OpenSSL driven in steps over memory BIOs (the foreign calls of libssl and libcrypto), the trust store, sessions
 src/dns.ls         the DNS client's bytes: the query for an A record, the answer (pure, total on any bytes)
 src/resolve.ls     which name server to ask: `dns-server`, or /etc/resolv.conf
 src/destination.ls where a delivery may go: addresses, names, the ranges, the scheme in the host
