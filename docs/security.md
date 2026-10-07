@@ -59,7 +59,7 @@ The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/le
 * **Small pages for the process** are no longer asked for by the service: it called libc's `prctl` once (design.md section 46); the test harnesses now ask for them for the processes they start, which is all the measurement needs.
 * **How the service learns it was asked to stop** is not foreign either: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability (`Signals("INT,TERM")`, `src/ops.ls`) and
   watches the claim in the same poller as its sockets, so a stop wakes the loop at once.
-* **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/tls.ls`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,
+* **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/ossl.ls`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,
   `SSL_CTX_set_verify`, `SSL_CTX_set_default_verify_paths`, `SSL_CTX_load_verify_file`, `TLS_client_method`, `SSL_new`, `SSL_free`, `SSL_set_bio`, `SSL_set_connect_state`,
   `SSL_do_handshake`, `SSL_read`, `SSL_write`, `SSL_shutdown`, `SSL_get_error`, `SSL_ctrl`, `SSL_get0_param`, `SSL_get_verify_result`, `SSL_session_reused`, `SSL_get1_session`,
   `SSL_set_session`, `SSL_SESSION_is_resumable`, `SSL_SESSION_free`; `libcrypto` `BIO_s_mem`, `BIO_new`, `BIO_read`, `BIO_write`, `ERR_clear_error`, `ERR_get_error`,

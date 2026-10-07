@@ -59,7 +59,7 @@ COPY sql ./sql
 COPY scripts/cc-ssl.sh ./scripts/cc-ssl.sh
 # The binary is normalized as scripts/release.sh does (no symbols, no build-id: the only bytes that differ between two builds of
 # the same sources), so the image holds the same bytes as bin/hooks in the release tarball when the toolchain is the same.
-# CC adds -lssl -lcrypto to the link (the project file has no linking options for a program): the service calls OpenSSL (src/tls.ls).
+# CC adds -lssl -lcrypto to the link (the project file has no linking options for a program): the service calls OpenSSL (src/ossl.ls).
 RUN CC=/src/hooks/scripts/cc-ssl.sh lex-sys build \
  && test -x build/hooks \
  && ldd build/hooks > /ldd.txt \

@@ -1728,7 +1728,7 @@ changed from the spike and why, what was measured, and what is not verified.
 
 * **OpenSSL, in the process** (production.md P1.7, the default taken): `libssl` and `libcrypto` through `Ffi`, 32 functions, each declared under its own library (section 40.7). The TLS of lex-sys
   itself (`packages/tls`, lex-sys epic #197) replaces it when it can verify a certificate chain (#206: today it accepts a leaf only if it is pinned byte for byte) and has been reviewed by
-  someone else (#209: "not independently reviewed"). Nothing in the service outside `src/tls.ls` knows it is OpenSSL.
+  someone else (#209: "not independently reviewed"). Nothing in the service outside `src/ossl.ls` knows it is OpenSSL.
 * **Names are resolved by the service itself, on the poller** (`src/dns.ls`, the DNS client's bytes; the exchange is a phase of `src/attempt.ls`), over TCP, to one name server. Not `getaddrinfo` (it
   blocks the loop for as long as the answer takes: 302 ms for a 300 ms answer in the spike; and the connect resolves a second time, so a check before it is not a check of what is dialled). Not a thread:
   the spike built that too, and what it cost in the language (a payload of one pointer, no way to wait for a thread on a poller, four named workers, a fixed loopback port) is more than a resolver of
@@ -1770,7 +1770,7 @@ resolving (the name server) -> redial +                                         
 Each state waits for the poller under the same token (`token0 + slot`), with the one deadline of the attempt (`deadline-ms`) over all of it. TLS is OpenSSL as a state machine over **two memory BIOs**
 per connection: the bytes read from the socket go into one, the bytes OpenSSL wants sent come out of the other, and the sockets stay lex-sys `Conn`s in the attempt's `std.conns.Table`. So OpenSSL
 never touches a descriptor (`conn_write` is `MSG_NOSIGNAL`: a peer that closed is an error code and not a `SIGPIPE`), the one place that touches the kernel is the one the type system governs, and
-a slot is watched writable only while ciphertext waits for the kernel and readable otherwise. The verification, in `src/tls.ls`:
+a slot is watched writable only while ciphertext waits for the kernel and readable otherwise. The verification, in `src/ossl.ls`:
 
 * `SSL_CTX_set_verify(SSL_VERIFY_PEER)`, **no way to turn it off** (the spike had one for comparison; it is not here), the minimum protocol TLS 1.2, `SSL_MODE_ENABLE_PARTIAL_WRITE | RELEASE_BUFFERS`, the library's
   own session cache off.
@@ -1927,7 +1927,7 @@ assertion was either made about the new rule or kept.
 ### 40.10 Mutants
 
 47 mutants of the new code were killed and 2 were not: **49 in all, run on a copy of the tree, each built and run against the test files it names, the file restored and compared with `cmp` after each** (`scripts/mutate.py`, the list in `tests/mutants/https.py`; it has 49 entries). The first run killed 40 of 45; the four that survived were each a hole in a test, and were closed by tests, not excused (marked below). One does not compile (the checker's row check: a function that
-declares `ffi("libssl")` and no longer performs it is refused), which is the foreign-authority rows doing their job; its replacement is a mutant of `tls.drop` itself. One survives and is redundant by design.
+declares `ffi("libssl")` and no longer performs it is refused), which is the foreign-authority rows doing their job; its replacement is a mutant of `ossl.drop` itself. One survives and is redundant by design.
 
 | area | mutants (killed by) |
 |---|---|
@@ -1935,7 +1935,7 @@ declares `ffi("libssl")` and no longer performs it is refused), which is the for
 | the pin | the connection made to the name server's address, not the answer's (names); the "resolving" flag kept after the redial (names) |
 | failure codes | not-yet-valid not told from expired, the host-name codes, the unknown-issuer code, the "other verification failure" code, the handshake deadline's code, the lookup deadline's code, a refused connection to the name server read as a connection failure (https, names) |
 | TLS | verification off; host name not set; SNI not set; trust file ignored; system store added to the file's; **minimum protocol TLS 1.0 (survived the first run: the system's configuration refuses TLS 1.1 as well; killed by a test that runs the service under a configuration that allows it)**; **a write that would block reported as done (survived: loopback never blocks; killed by the partial-I/O test)**; **the peer's end of stream in the handshake taken as "wait" (survived: the test reset the connection and never ended it; killed by a receiver that closes with a FIN)**; a write that waits reported as a failure (killed by the partial-I/O test); a lookup that stops sending after a partial write, one that parses half an answer (killed by the same, on the name server's connection) |
-| sessions | never saved; the old session not freed on replacement (3,000 deliveries); `drop_session` a no-op; the drop on `PATCH`/`DELETE` not called (a secret change then resumes); `tls.drop` replaced (the SSL objects leak: 134 MiB more); **the key (name and port) not compared: survives** (a `PATCH` of the host or port drops the session as well, so the second check is never the only one; it is there for the day that is forgotten) |
+| sessions | never saved; the old session not freed on replacement (3,000 deliveries); `drop_session` a no-op; the drop on `PATCH`/`DELETE` not called (a secret change then resumes); `ossl.drop` replaced (the SSL objects leak: 134 MiB more); **the key (name and port) not compared: survives** (a `PATCH` of the host or port drops the session as well, so the second check is never the only one; it is there for the day that is forgotten) |
 | names and hosts | the last label may be all digits; an address under `https` allowed; any address allowed when open; the guard against a scheme prefix in `host`; the stored host's length; the scheme lost on a `PATCH` of the host; the scheme of a `PATCH` ignored; `Host` always `receiver`; the scheme of the table always 0 (the unit tests and the API test) |
 | reasons, settings, bytes | the SSRF reason mapped to another; the deadline statuses; the counters' offset in `ops.ls` back to 24 (the overlap this work found); a damaged answer's length not checked (traps in the fuzz); a name server of `0.0.0.0` taken (twice); `tls-resume`'s default |
 

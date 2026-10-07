@@ -20,15 +20,16 @@ into, and CI runs the `bounded` stage on the pure build.
 
 The two builds pin **different compilers**: the pure one needs `std.gcm`, `std.ecdh` and the packages, which are newer than the default's pin. It takes the same flags and
 settings as the default one. (A first version added `tls` to the one project file; that collided, because a project's libraries are built into *every* program of it, and
-lex-sys's `tls` package and this service's own OpenSSL module are both called `tls`. The pure build is a project of its own, `pure/lex-sys.toml`.)
+lex-sys's `tls` package and this service's own OpenSSL module were both called `tls`. The pure build is a project of its own, `pure/lex-sys.toml`. The OpenSSL module
+is now `ossl` (`src/ossl.ls`), so the names no longer collide: a build of the default service that also depends on lex-sys's `tls`, as lexsys-pg's pool over TLS does, is not refused.)
 
 ## How it is made
 
 `lex-sys` has no function values and no effect polymorphism (lex-sys `docs/effect-polymorphism.md`), so the 11 functions that carry an `Ffi("libssl")` row cannot be
 written once for both backends. `scripts/make_pure.py` writes the other one, into `pure/build/src` (not committed, so no copy can drift):
 
-- **`pure/src/tlsx.ls`**, the adapter, is the module that takes the place of `src/tls.ls`. It has the functions `attempt.ls` calls, in the same shape, over `packages/tls`'s
-  engine: it moves bytes between the attempt's `Conn` and the engine as `src/tls.ls` does between the `Conn` and OpenSSL's memory BIOs (the loop of lex-sys's
+- **`pure/src/tlsx.ls`**, the adapter, is the module that takes the place of `src/ossl.ls`. It has the functions `attempt.ls` calls, in the same shape, over `packages/tls`'s
+  engine: it moves bytes between the attempt's `Conn` and the engine as `src/ossl.ls` does between the `Conn` and OpenSSL's memory BIOs (the loop of lex-sys's
   `tests/programs/tls_many.ls`, 64 connections on one poller). `tlsx.setup` seeds the engine from `/dev/urandom` and loads the trust store.
 - **The engine takes the `Ffi`'s place**: in each of the 11 functions `ffi: &f Ffi("libssl")` is `engine: &!f tls.Engine`, in the same position, and the `ffi(...)` entries
   leave the rows. `attempt.advance` also takes the time, for the certificates' dates. `main` opens the engine once (it holds 64 slots), seeds it, loads the trust store and closes

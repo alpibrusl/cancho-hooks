@@ -176,7 +176,7 @@ sbom = {
         "from": "ldd on the build host; the target host supplies its own copies, which must be this glibc or newer",
         "entries": libc,
     },
-    "statically_linked_native_code": "none known beyond the foreign symbols the compiler's authority report lists, pinned in docs/authority.json (scripts/check-authority.sh): libc (statx, src/perm.ls), and libssl and libcrypto for the TLS client of an https endpoint (src/tls.ls), which are the dynamic libraries above; not verified by this script",
+    "statically_linked_native_code": "none known beyond the foreign symbols the compiler's authority report lists, pinned in docs/authority.json (scripts/check-authority.sh): libc (statx, src/perm.ls), and libssl and libcrypto for the TLS client of an https endpoint (src/ossl.ls), which are the dynamic libraries above; not verified by this script",
     "not_listed": [
         "the Rust toolchain that built the compiler (named by the compiler repository's rust-toolchain.toml at the pinned commit)",
         "the crates the compiler was built from (its Cargo.lock at the pinned commit)",

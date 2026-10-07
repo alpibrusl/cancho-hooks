@@ -68,7 +68,7 @@ import jitter;
 import lim;
 import dead;
 import bulk;
-import tls;
+import ossl;
 import destination;
 import resolve;
 
@@ -5545,7 +5545,7 @@ fn parse_check[&h, &t](heap: &!h Heap, text: &t [byte], open: bool) -> [heap] in
     return count;
 }
 
-// The TLS client's context (`tls.context`): the system's trust store, or exactly the file `cafile` names (empty: the system's). 0 if it cannot be made.
+// The TLS client's context (`ossl.context`): the system's trust store, or exactly the file `cafile` names (empty: the system's). 0 if it cannot be made.
 fn start_tls[&f, &c](libssl: &f Ffi("libssl"), cafile: &c [byte]) -> [ffi("libssl")] int {
     region r {
         let path = alloc_slice[r](len(cafile) + 1, byte_of(0));
@@ -5555,15 +5555,15 @@ fn start_tls[&f, &c](libssl: &f Ffi("libssl"), cafile: &c [byte]) -> [ffi("libss
             i = i + 1;
         }
         if len(cafile) == 0 {
-            return tls.context(libssl, path[0..0]);
+            return ossl.context(libssl, path[0..0]);
         }
-        return tls.context(libssl, path);
+        return ossl.context(libssl, path);
     }
 }
 
 fn main(world: World) -> [] int {
     let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    // The only foreign authority the service holds: libssl and libcrypto, the TLS client of an `https` endpoint (`src/tls.ls`); the pure build has none
+    // The only foreign authority the service holds: libssl and libcrypto, the TLS client of an `https` endpoint (`src/ossl.ls`); the pure build has none
     // (`scripts/make_pure.py`). `scripts/check-authority.sh` pins the exact list of symbols. The modes of the data directory are lex-sys builtins
     // (`src/perm.ls`), and how the service learns that it was asked to stop is not foreign either: a claim on `SIGINT` and `SIGTERM` (`src/ops.ls`).
     let ssl = narrow(ffi, "libcrypto,libssl");
@@ -5905,7 +5905,7 @@ fn main(world: World) -> [] int {
                                                             rt_say_start(iwr, lw);
                                                         }
                                                     }
-                                                    // The TLS client's trust store is read once, here (`src/tls.ls`): a store that cannot be read is a refusal to start, never a
+                                                    // The TLS client's trust store is read once, here (`src/ossl.ls`): a store that cannot be read is a refusal to start, never a
                                                     // client that does not verify. And the name server for the names of endpoints (`src/resolve.ls`). (Not in `compact-now`, which serves nothing.)
                                                     var tls_ctx = 0;
                                                     var ns = config.dns_server(cfg);
@@ -6035,7 +6035,7 @@ fn main(world: World) -> [] int {
                                                                     status = 11;
                                                                     log.close(dl);
                                                                     borrow ssl as &lt in {
-                                                                        tls.free_context(lt, tls_ctx);
+                                                                        ossl.free_context(lt, tls_ctx);
                                                                     }
                                                                 }
                                                             }
