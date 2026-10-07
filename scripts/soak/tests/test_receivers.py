@@ -130,6 +130,22 @@ def main():
         check("an answer planned for 0.3 s that went out 2 s late is not an acknowledgement", out["r"][0] == 204 and not rec[6] & F_EFF and rec[9] - rec[0] > 1.8, f"{out} {rec}")
         check("and the receivers say their own loop was the cause", stats["late_unplanned"] == 1 and stats["late_max_ms"] > 1800, str(stats))
 
+        # 2b. a request that waited in the kernel's buffer while the loop was stalled: it is read late, answered at once, and marked as a risk (the service's clock was running)
+        out2 = {}
+
+        def go2():
+            time.sleep(0.2)
+            out2["r"] = request(r.ports[2], 22)
+
+        t2 = threading.Thread(target=go2)
+        t2.start()
+        r.cmd(0, {"op": "stall", "seconds": 1.5})
+        t2.join()
+        time.sleep(0.2)
+        rec = [x for x in r.records() if x[2] == 22][0]
+        check("a request read after a stalled loop is marked as a risk, and a prompt one is not", rec[6] & F_RISK and out2["r"][0] == 204
+              and not [x for x in r.records() if x[2] == 11][0][6] & F_RISK, str(rec))
+
         # 3. an answer that is slow by plan, within the deadline, is an acknowledgement and is marked as a risk
         r.cmd(0, {"op": "mode", "label": "healthy1", "mode": "slow", "until": time.time() + 60, "delay": 0.8})
         st, dt = request(r.ports[1], 13)

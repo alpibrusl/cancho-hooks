@@ -43,6 +43,7 @@ EFF_MAX_DELAY = 1.6      # an answer later than this is past the service's deadl
 # the end-to-end latency of the first delivery is read only at endpoints that do not fail on purpose (a retry's is the schedule's delay, a replay's is its age)
 LAT_CLASSES = ("oracle", "healthy", "healthy2", "filter", "https", "rate", "slow")
 TS_TOLERANCE = 300       # Standard Webhooks: five minutes
+STALL_RISK_S = 0.25      # a request read this long after the loop's last turn is marked as a risk
 WRITE_QUEUE = 50000      # records waiting for the writer thread: past this the event loop writes the record itself (counted), which is slower but never loses the order "record, then answer"
 WRITE_BATCH = 512
 
@@ -210,6 +211,8 @@ class Receivers:
         self.bind_failures = 0       # a bind that failed with "Address already in use" (each is retried; none is ignored: `bind_stuck` in the stats lists the ones that last)
         self.late_unplanned = 0      # answers that were due within half a second and went out more than a second late: the receiver's own loop was the cause
         self.late_max = 0.0
+        self.stall_end = -1e9
+        self.last_tick = time.monotonic()    # the ticker's last turn: a request read long after it was a request that waited for a stalled loop
         self.conn_lost = 0           # answers that could not be sent because the service had closed the connection
 
     # ---- the ledger
@@ -287,6 +290,9 @@ class Receivers:
         while True:
             await asyncio.sleep(period)
             m = time.monotonic()
+            if m - self.last_tick - period > STALL_RISK_S:
+                self.stall_end = m          # requests read in the next half second waited in the kernel's buffer for this stall
+            self.last_tick = m
             self.lag_max = max(self.lag_max, m - last - period)
             last = m
             now = time.time()
@@ -535,6 +541,12 @@ class Conn(asyncio.Protocol):
             ep.n_bad += 1
         # Whether the answer counts is decided when it is sent, not now: `delay` is what was planned, and a loop that is late (or a service that gave up) makes an answer that was planned as
         # prompt a late one, which the service counts as a timeout. The record carries both times; it is in the file before the answer goes out.
+        # A request that is read just after the loop was stalled was in the kernel's buffer for as long as the stall: the service's clock had been running all that time, and an answer that
+        # is prompt by this receiver's clock may be a timeout by the service's. Such a record is marked as a risk (F_RISK), as a slow answer is, so that the repeat that follows is
+        # attributed to the receivers' stall (which the guard reports) and not to the service.
+        mono = time.monotonic()
+        if mono - r.last_tick - 0.05 > STALL_RISK_S or mono - r.stall_end < 0.5:
+            flags |= F_RISK
         if delay > 0:
             r.loop.call_later(delay, self.finish, now, flags, status, delay, ev, n, src, typ_code, e2e)
         else:
