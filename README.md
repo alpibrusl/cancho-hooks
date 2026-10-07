@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/cancho-hooks-logo.jpg" alt="cancho-hooks" width="220"></p>
+
 # cancho-hooks
 
 [![ci](https://github.com/alpibrusl/cancho-hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/cancho-hooks/actions/workflows/ci.yml)

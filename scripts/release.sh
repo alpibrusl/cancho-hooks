@@ -87,6 +87,8 @@ cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy
 cp "$here"/scripts/backup.sh "$here"/scripts/restore.sh "$here"/scripts/logcheck.py "$here"/scripts/release.sh "$root/scripts/"
 cp "$here"/sql/schema.sql "$here"/sql/queries.sql "$root/sql/"
 cp "$here"/docs/runbook.md "$here"/docs/design.md "$here"/docs/production.md "$root/docs/"
+# the logo the README shows
+mkdir -p "$root/docs/assets" && cp "$here/docs/assets/cancho-hooks-logo.jpg" "$root/docs/assets/"
 cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/cancho.toml "$root/"
 chmod 0755 "$root"/bin/* "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
 
