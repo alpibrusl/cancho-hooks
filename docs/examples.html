@@ -290,7 +290,7 @@ customer evt_2 signature ok (1 signature) {"type":"order.shipped","order":2}
 customer evt_3 signature ok (1 signature) {"type":"order.shipped","order":3}
 <span class="p">$ </span>curl -s "$URL/endpoints/0/dead"
 {"endpoint":0,"order":"desc","held":0,…"dead":[],"next":null}</code></pre>
-    <p class="lim"><strong>Limits.</strong> The demo uses <code>--schedule 200,300,400</code> (four attempts in about a second). The default is nine retries over a day: 5 s, 5 min, 30 min, 2 h, and so on. An endpoint lists at most 2,048 dead letters; an older one is replayed by its event id.</p>
+    <p class="lim"><strong>Limits.</strong> The demo uses <code>--schedule 200,300,400</code> (four attempts in about a second). The default is nine retries over about three days: 5 s, 5 min, 30 min, 2 h, and so on up to 24 h between the last two attempts. An endpoint lists at most 2,048 dead letters; an older one is replayed by its event id.</p>
     <p class="links small">Run it: <code>examples/03-endpoint-down.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/03-endpoint-down.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Retries, dead letters, bulk replay</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The routes</a></p>
   </section>
 
