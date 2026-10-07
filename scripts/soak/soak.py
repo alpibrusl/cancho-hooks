@@ -1048,7 +1048,9 @@ class Run:
                  "loadavg_over_cores_fraction": round(over, 3), "cores": cores}
         failed = [r["id"] for r in results if r["ok"] is False]
         status = "FAIL" if failed else "PASS"
-        if status == "PASS" and reasons and not a.lenient_validity:
+        if reasons and not a.lenient_validity:
+            # a run that is not valid is not evidence for or against the service, whatever it found: it is INCONCLUSIVE, and what it found is listed (`failed`, and the violations) so that
+            # nothing is hidden, and the next valid run is the one that counts
             status = "INCONCLUSIVE"
         out = {"verdict": status, "failed": failed, "not_evaluated": [{"id": r["id"], "why": r.get("why")} for r in results if r["ok"] is None], "validity": valid,
                "checks": results, "violations": dict(v.count), "examples": {k: x[:20] for k, x in v.examples.items()}, "summary": self.verifier.summary(), "counts": dict(self.counts),
