@@ -46,6 +46,7 @@ import destination;
 //     dns-server   the name server that resolves the names of endpoints, `ip` or `ip:port` (IPv4)   default the first `nameserver` of /etc/resolv.conf, port 53 (section 40)
 //     tls-ca-file  the PEM file of certificates an `https` endpoint's chain must lead to, instead of the system's   default none: the system's trust store (section 40)
 //     tls-resume   `1`: keep a TLS session for each `https` endpoint and resume it; `0`: a full handshake every time   default 1 (section 40)
+//     keep-alive   `1`: keep connections to an endpoint for its next requests; `0`: one connection a delivery, closed after its status line   default 1 (section 53)
 //
 // They come from three places and the **last one that names a setting wins**: the defaults above, then the file given with
 // `--config`, then the flags in the order they were written. All three go through `set`, so a value is judged by one rule
@@ -64,7 +65,7 @@ import destination;
 //     cfg[31] dns-server address (packed, 0 until set)   cfg[32] its port (53 until set)   cfg[33] tls-ca-file length   cfg[34] tls-resume (0 or 1; 1 until set)
 //     cfg[35] history-days (0 to 36500; 30 until set)   cfg[36] audit-log (0 or 1; 1 until set)   cfg[37] audit-log-bytes (65536 to 2^40; 67108864)
 //     cfg[38] audit-log-files (1 to 100; 8)   cfg[39] max-age-days (0 to 36500; 0)   cfg[47] max-age-ms (the tests' knob; 0)
-//     cfg[48] encryption-key-file length   cfg[49] encryption-key-file-old length
+//     cfg[48] encryption-key-file length   cfg[49] encryption-key-file-old length   cfg[50] keep-alive (0 or 1; 1 until set)
 //     (`tests/config_test.ls` sets every numeric setting to a value of its own and reads each back: two settings on one index fail it)
 //
 //     blob[0 .. 2048] the directory, blob[2048 .. 2304] the schedule, then the database's host (256), user (64), database (64)
@@ -357,6 +358,22 @@ pub fn tls_resume[&c](cfg: &c [int]) -> [] bool {
     return cfg[34] == 1;
 }
 
+pub fn keep_alive[&c](cfg: &c [int]) -> [] bool {
+    return cfg[50] == 1;
+}
+
+// What the attempts keep: 1 TLS sessions (`tls-resume`), 2 connections (`keep-alive`), as one number for `run`.
+pub fn links[&c](cfg: &c [int]) -> [] int {
+    var n = 0;
+    if tls_resume(cfg) {
+        n = 1;
+    }
+    if keep_alive(cfg) {
+        n = n + 2;
+    }
+    return n;
+}
+
 pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     var i = 0;
     while i < size() {
@@ -372,6 +389,7 @@ pub fn defaults[&c](cfg: &!c [int]) -> [] int {
     cfg[22] = 86400000;
     cfg[32] = 53;
     cfg[34] = 1;
+    cfg[50] = 1;
     cfg[35] = 30;
     cfg[36] = 1;
     cfg[37] = 67108864;
@@ -745,6 +763,14 @@ pub fn set[&c, &b, &k, &v](cfg: &!c [int], blob: &!b [byte], key: &k [byte], val
             why = why_value();
         } else {
             cfg[49] = keep(value, blob, old_key_file_at());
+        }
+    } else if bytes.equal(key, "keep-alive") {
+        if bytes.equal(value, "1") {
+            cfg[50] = 1;
+        } else if bytes.equal(value, "0") {
+            cfg[50] = 0;
+        } else {
+            why = why_value();
         }
     } else if bytes.equal(key, "tls-resume") {
         if bytes.equal(value, "1") {

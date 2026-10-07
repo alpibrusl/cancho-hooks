@@ -38,7 +38,7 @@ BUILD = ["scripts/build.sh", "--pure"] if PURE else ["scripts/build.sh"]
 BUILD = [w.replace("{LEX}", lex) for w in namespace.get("BUILD", BUILD)]
 BIN = "pure/build/hooks-pure" if PURE else "build/hooks"
 TESTS = {"unit": [lex, "test"]}
-for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation", "pure", "mcp"):
+for name in ("https", "names", "sessions", "api", "ssrf", "reason", "metrics", "config", "patch", "slots", "delete", "breaker", "retry", "scan", "replay", "gone", "layout", "dead", "limits", "pgre", "retention", "cancel", "isolation", "pure", "mcp", "keepalive"):
     TESTS[name] = ["python3", f"tests/{'https_api' if name == 'api' else name}_test.py", BIN]
 if PURE:
     # `tests/https_test.py` always fails on the pure build (the check that SSL_CERT_FILE is honoured, which it is not), so a failure of it is no sign of a mutant killed.

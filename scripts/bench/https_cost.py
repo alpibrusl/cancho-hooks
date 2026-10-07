@@ -12,6 +12,8 @@ after: the difference over the deliveries, in microseconds (the median of REPS r
     http, name        the same through a name: one lookup (DNS over TCP, to a name server of the script's own) per delivery
     https, full       a name, TLS, a full handshake every time (`tls-resume 0`)
     https, resumed    a name, TLS, the endpoint's session resumed (after the first delivery of each endpoint)
+    http, kept        a name, plain HTTP, on a connection kept from the endpoint's last delivery (docs/design.md section 53)
+    https, kept       a name, TLS, the same: no handshake but the endpoint's first
 
 at E = 1 and E = 10 endpoints behind one receiver. The cost of the ingest of an event, of the logs and of the history is in every row (the service is whole); the first column's number is
 the floor. Not a benchmark of anyone else's service: a measurement of this one on whatever machine runs it, and the machine is part of the result (`nproc`, the CPU model, are printed).
@@ -30,6 +32,7 @@ _args = sys.argv[1:]
 sys.argv = sys.argv[:1]
 import opslib as L  # noqa: E402
 import tlskit as K  # noqa: E402
+from keepkit import Receiver  # noqa: E402
 
 BIN = os.environ.get("HOOKS_BIN") or os.path.join(ROOT, "build", "hooks")
 DELIVERIES = int(_args[0]) if _args else 600
@@ -56,10 +59,17 @@ def row(kind, endpoints, pki, cert):
     d = L.free_dir("hooks-cost-")
     secret = L.secret()
     tls = kind.startswith("https")
-    srv = K.TlsServer(*cert) if tls else None
-    sink = None if tls else K.Sink("127.0.0.1")
-    port = srv.port if tls else sink.port
-    host = {"http, address": "127.0.0.1", "http, name": "hooks.test", "https, full": "https://hooks.test", "https, resumed": "https://hooks.test"}[kind]
+    kept = kind.endswith("kept")
+    # The receivers of the other rows answer `Connection: close`; the `kept` rows' keep the connection.
+    if kept:
+        srv = Receiver(tls_cert=cert if tls else None)
+        sink = None
+    else:
+        srv = K.TlsServer(*cert) if tls else None
+        sink = None if tls else K.Sink("127.0.0.1")
+    port = srv.port if srv else sink.port
+    host = {"http, address": "127.0.0.1", "http, name": "hooks.test", "https, full": "https://hooks.test", "https, resumed": "https://hooks.test",
+            "http, kept": "hooks.test", "https, kept": "https://hooks.test"}[kind]
     with open(os.path.join(d, "endpoints.conf"), "w") as f:
         for i in range(endpoints):
             f.write(f"{i + 1} {host} {port} {secret}\n")
@@ -76,7 +86,7 @@ def row(kind, endpoints, pki, cert):
     L.wait_for(lambda: svc.stats()["delivered"] >= endpoints, 30)
     time.sleep(0.2)
     before = cpu_seconds(svc.proc.pid)
-    handshakes0 = (srv.handshakes, srv.resumed) if tls else (0, 0)
+    handshakes0 = (srv.handshakes, getattr(srv, "resumed", 0)) if tls else (0, 0)
     t0 = time.time()
     for n in range(1, events + 1):
         svc.post_event(n, extra=PAD)
@@ -87,7 +97,7 @@ def row(kind, endpoints, pki, cert):
     n_done = endpoints * events
     res = None
     if tls:
-        res = (srv.handshakes - handshakes0[0], srv.resumed - handshakes0[1])
+        res = (srv.handshakes - handshakes0[0], getattr(srv, "resumed", 0) - handshakes0[1])
     svc.stop()
     dns.close()
     (srv or sink).close()
@@ -106,7 +116,7 @@ def main():
     cert = pki.leaf("hooks.test")
     print(f"{'kind':16} {'endpoints':>9} {'deliveries':>10} {'CPU per delivery, median (least to most)':>42} {'wall':>8}  handshakes (resumed)")
     for endpoints in (1, 10):
-        for kind in ("http, address", "http, name", "https, full", "https, resumed"):
+        for kind in ("http, address", "http, name", "https, full", "https, resumed", "http, kept", "https, kept"):
             if os.environ.get("KINDS") and kind not in os.environ["KINDS"].split(";"):
                 continue
             runs = [row(kind, endpoints, pki, cert) for _ in range(REPS)]

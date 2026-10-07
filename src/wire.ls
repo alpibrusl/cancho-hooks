@@ -17,7 +17,6 @@ import sign;
 //     webhook-signature: v1,<signature under the secret>[ v1,<signature under the previous secret>]
 //     <the endpoint's custom headers, one `Name: value` each>
 //     Content-Length: <n>
-//     Connection: close
 //
 // `webhook-id` is `evt_<id>`, the same for every attempt at the event, so a receiver can drop a repeat. While a rotation overlaps (the endpoint
 // has a previous secret that has not expired), the signature header carries **both** signatures, the new one first, separated by a space, as
@@ -86,7 +85,8 @@ pub fn request[&h, &b, &k, &x, &o](heap: &!h Heap, id: int, body: &b [byte], key
         }
         q = buffer.append(heap, q, "Content-Length: ");
         q = buffer.push_nat(heap, q, len(body));
-        q = buffer.append(heap, q, "\r\nConnection: close\r\n\r\n");
+        // No `Connection: close`: the connection may be kept for the endpoint's next request (`docs/design.md` section 53).
+        q = buffer.append(heap, q, "\r\n\r\n");
         q = buffer.append(heap, q, body);
     }
     return q;

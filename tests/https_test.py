@@ -134,8 +134,8 @@ def main():
     check("1. the protocol is TLS 1.2 or 1.3", rec["version"] in ("TLSv1.2", "TLSv1.3"), str(rec["version"]))
     hdr = dict(rec["headers"])
     check("1. the Host header is the name and the port (not `receiver`)", hdr["Host"] == f"hooks.test:{srv.port}", str(hdr))
-    check("1. the request is the one http carries: path, content type, ids", rec["request"] == "POST /hook HTTP/1.1" and hdr["Content-Type"] == "application/json" and hdr["webhook-id"] == "evt_1"
-          and hdr["Connection"] == "close", str(rec))
+    check("1. the request is the one http carries: path, content type, ids, and no `Connection: close` (kept connections, design 53.2)", rec["request"] == "POST /hook HTTP/1.1"
+          and hdr["Content-Type"] == "application/json" and hdr["webhook-id"] == "evt_1" and "Connection" not in hdr, str(rec))
     try:
         Webhook(c.secret).verify(rec["body"], hdr)
         verified = True

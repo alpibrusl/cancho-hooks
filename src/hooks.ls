@@ -3187,6 +3187,10 @@ fn conclude[&f, &g, &d, &k, &t, &a](ffi: &f Ffi("libssl"), done: &!g log.Log, dv
     let id = attempt.event_of(at, slot);
     let latency = clock_ms(clock) - (attempt.deadline_of(at, slot) - dv[c_deadline()]);
     attempt.finish(ffi, atab, at, slot);
+    if code == 410 {
+        // The endpoint is being disabled: its kept connections go (section 53.5).
+        attempt.retire(at, e);
+    }
     return finish_attempt(done, dv, clock, e, id, code, latency);
 }
 
@@ -3547,11 +3551,18 @@ fn delivery_turn[&f, &h, &l, &g, &w, &d, &b, &n, &k, &p, &a, &r, &s, &e](ffi: &f
                     }
                 }
             }
+        } else if attempt.parked(at, slot) {
+            // A kept connection (section 53): the rest of a response, or an idle one the receiver closed.
+            borrow mut table as &!tw in {
+                attempt.tend(ffi, tw, poller, at, req, slot, token0);
+            }
         }
         j = j + 1;
     }
     borrow mut table as &!tw in {
         written = written + sweep(ffi, done, dv, clock, tw, at);
+        // The kept connections (section 53): idle and lifetime bounds, the doomed, and room for this turn's starts.
+        attempt.sweep_parked(ffi, tw, at, req, clock_ms(clock));
     }
     // A deleted endpoint's slot is free once its last attempt has ended (`finish_drains`).
     written = written + finish_drains(done, dv);
@@ -3890,7 +3901,7 @@ fn say_unreadable[&i, &s](out: &!i Io, status: int, detail: int, state: &s [byte
 // *held*; after the turn's last request one `flush` covers every append of the turn, and then each held request is answered
 // `202`. If the flush fails nothing is acknowledged: each gets a `503` and the log refuses everything after
 // (`lexsys-log` design section 5).
-fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h Heap, router: &r web.Api, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int, ssl: &c Ffi("libcrypto,libssl"), tls_ctx: int, ns: int, ns_port: int, resume: bool) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libcrypto"), ffi("libssl"), err_write] int {
+fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h Heap, router: &r web.Api, clock: &k Clock, listener: &!l Listener, lg: &!g evlog.Ev, done0: log.Log, window: &!w [byte], net: &n Net(""), blob: &!x [byte], dv: &!v [int], ix: &!i [int], arena: &!a [byte], sg: &!j [int], io: &!o Io, pl0: pool.Pool, claim: SignalWatch, dir: &y [byte], stop_ms: int, dbhost: &e [byte], dbport: int, ssl: &c Ffi("libcrypto,libssl"), tls_ctx: int, ns: int, ns_port: int, links: int) -> [heap, conn_accept, conn_read, conn_write, poll, clock, file_read, file_write, fs_read(""), fs_write(""), net_out(""), ffi("libcrypto"), ffi("libssl"), err_write] int {
     // The outcomes log is owned here, by value: a snapshot replaces it (`compact.ls`), and a resource can only be replaced by its owner.
     var done = done0;
     match poller_new() {
@@ -3920,7 +3931,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
             // What the attempts share (`docs/design.md` section 40): the TLS context (the trust store is read once, here, never per attempt), the name server, the
             // address policy, and whether sessions are kept.
             borrow mut at as &!aw0 in {
-                attempt.configure(contents(aw0), tls_ctx, ns, ns_port, dv[c_private()] == 1, resume);
+                // `links`: 1 keep TLS sessions (`tls-resume`), 2 keep connections (`keep-alive`, section 53).
+                attempt.configure(contents(aw0), tls_ctx, ns, ns_port, dv[c_private()] == 1, links % 2 == 1, links / 2 % 2 == 1);
             }
             let req = box_slice(heap, attempt.req_size(), byte_of(0));
             let resp = box_slice(heap, attempt.resp_size(), byte_of(0));
@@ -4474,6 +4486,8 @@ fn run[&h, &r, &k, &l, &g, &w, &n, &x, &v, &i, &a, &j, &o, &y, &e, &c](heap: &!h
                                     if changed >= 0 {
                                         borrow mut at as &!aw2 in {
                                             attempt.drop_session(ssl, contents(aw2), changed);
+                                            // and its kept connections (section 53.5)
+                                            attempt.retire(contents(aw2), changed);
                                         }
                                     }
                                     borrow created as &cb in {
@@ -5995,7 +6009,7 @@ fn main(world: World) -> [] int {
                                                                                             match signals_watch(sr) {
                                                                                                 Watching::Ok(claim) => {
                                                                                                     borrow ssl as &lb in {
-                                                                                                        status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), lb, tls_ctx, ns, config.dns_port(cfg), config.tls_resume(cfg));
+                                                                                                        status = run(h, r, c, lh, lw, dl, buffer.room(wb), nn, contents(bw), contents(dvw), contents(ixw), contents(arw), contents(sgw), iw, hpool, claim, dir_buf[0..dir_len], config.stop_deadline_ms(cfg), cblob[config.pg_host_at()..config.pg_host_at() + config.pg_host_len(cfg)], config.pg_port(cfg), lb, tls_ctx, ns, config.dns_port(cfg), config.links(cfg));
                                                                                                     }
                                                                                                 }
                                                                                                 Watching::Failed(e) => {

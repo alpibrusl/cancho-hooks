@@ -200,9 +200,10 @@ def main():
     ok = wait_for(lambda: len(all_dead(svc, a)[0]) == total, 40)
     ents, top = all_dead(svc, a, "asc")
     check("3. after %d kills and restarts every one of the 300 events is a dead letter, once" % kills, ok and [e["event"] for e in ents] == list(range(1, total + 1)), str((len(ents), top["held"])))
-    check("3. each has 2 attempts and its reason, and its type", all(e["attempts"] == 2 and e["reason"] == "status_5xx" and e["type"] == TYPES[e["event"] % 3] for e in ents), str(ents[:2]))
+    check("3. each has 2 attempts and its reason, and its type", all(e["attempts"] == 2 and e["reason"] == "status_5xx" and e["type"] == TYPES[e["event"] % 3] for e in ents), str([e for e in ents if not (e["attempts"] == 2 and e["reason"] == "status_5xx" and e["type"] == TYPES[e["event"] % 3])]))
     live = {(a, e["event"]): [e["attempts"], e["died_at"], 12] for e in ents}
-    check("3. the list is what the log says", live == log_dead(d), "")
+    _ld = log_dead(d)
+    check("3. the list is what the log says", live == _ld, str([(k, live.get(k), _ld.get(k)) for k in set(live) | set(_ld) if live.get(k) != _ld.get(k)][:10]))
     kill9(svc)
     svc = start(d, schedule="40")
     again, _ = all_dead(svc, a, "asc")

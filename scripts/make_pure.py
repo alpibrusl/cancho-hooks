@@ -57,7 +57,7 @@ def rows_and_types(text, name, sole, tail, lead, typed_both, typed_ssl):
 
 def attempt(text):
     # The module that was `tls` is `tlsx`; `tls` is lex-sys's package, named only for `tls.Engine`.
-    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 28, "attempt.ls: calls of the TLS module")
+    text = regex(text, r"\btls\.(?!Engine\b)(?=\w)", "tlsx.", 43, "attempt.ls: calls of the TLS module")
     text = exact(text, "import tls;\n", "import tls; import tlsx;\n", 1, "attempt.ls: imports") if "import tls;\n" in text else \
         exact(text, "import std.conns;\n", "import std.conns;\nimport tls; import tlsx;\n", 1, "attempt.ls: imports")
     # `advance` takes the time for the certificates' dates (`tlsx.open`), the other functions only the engine.
@@ -89,8 +89,8 @@ def attempt(text):
 """, 1, "attempt.ls: keep_session")
     # The OpenSSL context is not there; the engine is closed by `main`.
     text = exact(text, "    tlsx.free_context(ffi, at[env_at() + e_ctx()]);\n", "    // (no context to free: `main` closes the engine)\n", 1, "attempt.ls: free_context")
-    text = rows_and_types(text, "attempt.ls", sole=4, tail=0, lead=2, typed_both=0, typed_ssl=4)
-    text = regex(text, r"\bffi\b", "engine", 7, "attempt.ls: the remaining `ffi` arguments")
+    text = rows_and_types(text, "attempt.ls", sole=7, tail=0, lead=10, typed_both=4, typed_ssl=7)
+    text = regex(text, r"\bffi\b", "engine", 23, "attempt.ls: the remaining `ffi` arguments")
     return text
 
 
@@ -100,7 +100,7 @@ def hooks(text):
     text = start_tls(text)
     # The TLS functions of the delivery loop.
     text = exact(text, "attempt.advance(ffi, atab, poller,", "attempt.advance(engine, clock_unix_ms(clock), atab, poller,", 1, "hooks.ls: advance")
-    text = regex(text, r"\b(attempt\.finish|conclude|settle|sweep)\(ffi,", r"\1(engine,", 6, "hooks.ls: calls in the delivery loop")
+    text = regex(text, r"\b(attempt\.finish|attempt\.tend|attempt\.sweep_parked|conclude|settle|sweep)\(ffi,", r"\1(engine,", 8, "hooks.ls: calls in the delivery loop")
     text = exact(text, 'ssl: &c Ffi("libcrypto,libssl")', "ssl: &!c tls.Engine", 1, "hooks.ls: run's parameter")
     text = regex(text, r'\[ffi\("(?:libcrypto|libssl)"\)\]', "[]", 0, "hooks.ls: a row that was only ffi")
     text = regex(text, r'ffi\("(?:libcrypto|libssl)"\), ', "", 8, "hooks.ls: ffi entries followed by others")
