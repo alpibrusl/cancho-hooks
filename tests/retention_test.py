@@ -1109,7 +1109,13 @@ def stage_stall():
     # 40 to 70 ms measured (0.5 to 0.96 s before `state.put_outcome` stopped losing its region: docs/cancho-log-retention.md gap 6); every other step
     # is a few milliseconds. The gate leaves room for a loaded machine.
     check("stall: no step held the loop for more than 300 ms, the largest state there can be (measured: %d ms)" % s["maintenance_ms_max"], s["maintenance_ms_max"] <= 300, str(s["maintenance_ms_max"]))
-    check("stall: and a request waited for it at most 400 ms (measured: %.0f ms)" % lat[-1], lat[-1] <= 400, str(lat[-1]))
+    # What bounds the loop is the line above: the service measures its own longest step (`maintenance_ms_max`), and that is the gate that caught the
+    # region loss (0.5 to 0.96 s). The longest PROBE is the worst of several hundred requests on a machine that is not ours: on a shared CI runner it was
+    # 528 ms with the loop's own step inside its bound (CI run 37629892445), where eight runs on a quiet machine gave a longest probe of 14 to 112 ms, a
+    # 99th percentile of 4 to 12 ms and a longest step of 14 to 22 ms. So the requests are judged by what they mostly saw (the 99th percentile) and by a
+    # loose cap on the worst, which still fails a loop that is held for a second.
+    check("stall: and the requests waited for it little: 99th percentile at most 100 ms (measured: %.1f ms)" % p(0.99), p(0.99) <= 100, str(p(0.99)))
+    check("stall: and none waited a second (the longest probe, measured: %.0f ms)" % lat[-1], lat[-1] <= 1000, str(lat[-1]))
     shutil.rmtree(d, ignore_errors=True)
 
 
