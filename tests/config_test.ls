@@ -548,6 +548,16 @@ fn test_name_server_trust_store_and_resumption() -> [] int {
         test.assert(config.tls_resume(cfg));
         test.assert(config.set(cfg, blob, "tls-resume", "yes") != 0);
         test.assert(config.tls_resume(cfg));
+        // `keep-alive` (`docs/design.md` section 53): on until set, 0 or 1 only, and with `tls-resume` in `links`.
+        test.assert(config.keep_alive(cfg));
+        test.assert_eq(config.links(cfg), 3);
+        test.assert_eq(config.set(cfg, blob, "keep-alive", "0"), 0);
+        test.assert(!config.keep_alive(cfg));
+        test.assert_eq(config.links(cfg), 1);
+        test.assert(config.set(cfg, blob, "keep-alive", "2") != 0);
+        test.assert(!config.keep_alive(cfg));
+        test.assert_eq(config.set(cfg, blob, "keep-alive", "1"), 0);
+        test.assert(config.keep_alive(cfg));
         test.assert_eq(config.parse_file("dns-server = 192.168.1.1:5300\ntls-resume = 0\n", cfg, blob), 0);
         test.assert_eq(config.dns_port(cfg), 5300);
         test.assert(!config.tls_resume(cfg));

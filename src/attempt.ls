@@ -50,7 +50,7 @@ pub fn resp_max() -> [] int {
 }
 
 fn stride() -> [] int {
-    return 24;
+    return 32;
 }
 
 // The bytes after the request in a slot: the name the certificate must carry, the scratch for what is read from the socket, the ciphertext or DNS buffer.
@@ -75,7 +75,7 @@ pub fn slot_bytes() -> [] int {
 }
 
 fn env_at() -> [] int {
-    return 1536;
+    return 2048;
 }
 
 // The environment: 16 integers, then a saved session and the key it was saved for, for each endpoint slot there can be (`most_sessions()`: it was 64, and an endpoint
@@ -85,7 +85,7 @@ pub fn env_size() -> [] int {
 }
 
 pub fn at_size() -> [] int {
-    return 1536 + env_size();
+    return 2048 + env_size();
 }
 
 pub fn req_size() -> [] int {
@@ -258,9 +258,101 @@ fn redialing() -> [] int {
     return 7;
 }
 
+// A kept connection (`docs/design.md` section 53): *draining*, the rest of a response after its status line (the attempt has ended and its outcome is
+// recorded; what follows only decides whether the connection is kept), *idle*, in the pool for the endpoint's next attempt, and *doomed*, to be closed by the
+// next `sweep_parked` (its endpoint changed, or the slots are wanted). None of them is an attempt: `busy` is false for them and `parked` true.
+fn draining() -> [] int {
+    return 8;
+}
+
+fn idle() -> [] int {
+    return 9;
+}
+
+fn doomed() -> [] int {
+    return 10;
+}
+
+// The bounds of section 53.3 and 53.2.
+fn idle_ms() -> [] int {
+    return 30000;
+}
+
+fn life_ms() -> [] int {
+    return 300000;
+}
+
+fn most_uses() -> [] int {
+    return 1000;
+}
+
+fn head_max() -> [] int {
+    return 8192;
+}
+
+fn body_max() -> [] int {
+    return 65536;
+}
+
+// The slots kept free for a turn's starts (`hooks.most_starts`): idle connections never take them.
+fn starts_room() -> [] int {
+    return 16;
+}
+
 // The per-slot numbers: state, endpoint, event, deadline, request bytes sent, response bytes held, request length, flags (1 TLS, 2 resolving), the address the
 // connection goes to (packed, 0 until known), the port, the length of the host name, DNS bytes sent, DNS bytes received, the DNS query's id, its length,
-// then `tls.fields()` integers of TLS state.
+// then `tls.fields()` integers of TLS state, then the kept connection's (section 53): whether this attempt's connection came from the pool, the body's framing
+// (`m_*`), the body bytes still to come, the chunk parser's state, the body bytes so far, when the connection was made (`clock_ms`, 0 until the next
+// `sweep_parked` sees it), how many requests it has carried, and the key it is pooled under.
+fn f_reused() -> [] int {
+    return 24;
+}
+
+fn f_mode() -> [] int {
+    return 25;
+}
+
+fn f_left() -> [] int {
+    return 26;
+}
+
+fn f_chunk() -> [] int {
+    return 27;
+}
+
+fn f_body() -> [] int {
+    return 28;
+}
+
+fn f_born() -> [] int {
+    return 29;
+}
+
+fn f_uses() -> [] int {
+    return 30;
+}
+
+fn f_key() -> [] int {
+    return 31;
+}
+
+// The framings of a response body (section 53.2): not known yet, a `Content-Length`, `chunked`, none (a `204` or `304`).
+fn m_unknown() -> [] int {
+    return 0;
+}
+
+fn m_length() -> [] int {
+    return 1;
+}
+
+fn m_chunked() -> [] int {
+    return 2;
+}
+
+fn m_none() -> [] int {
+    return 3;
+}
+
 fn f_flags() -> [] int {
     return 7;
 }
@@ -331,6 +423,19 @@ fn e_resumed() -> [] int {
     return 7;
 }
 
+// 1 when connections are kept (`keep-alive`, section 53), the connections dialled, and the attempts that went on a kept one.
+fn e_keep() -> [] int {
+    return 8;
+}
+
+fn e_dialled() -> [] int {
+    return 9;
+}
+
+fn e_kept() -> [] int {
+    return 10;
+}
+
 fn e_sessions() -> [] int {
     return 16;
 }
@@ -345,7 +450,11 @@ fn most_sessions() -> [] int {
 
 // Set what the attempts share: the TLS context (`tls.context`, 0 if there is none), the name server's address (packed, 0: names cannot be resolved) and port,
 // whether private addresses are allowed, and whether sessions are kept for resumption. Called once, before the first attempt.
-pub fn configure[&a](at: &!a [int], ctx: int, ns: int, ns_port: int, private: bool, resume: bool) -> [] int {
+pub fn configure[&a](at: &!a [int], ctx: int, ns: int, ns_port: int, private: bool, resume: bool, keep: bool) -> [] int {
+    at[env_at() + e_keep()] = 0;
+    if keep {
+        at[env_at() + e_keep()] = 1;
+    }
     at[env_at() + e_ctx()] = ctx;
     at[env_at() + e_ns()] = ns;
     at[env_at() + e_ns_port()] = ns_port;
@@ -371,7 +480,17 @@ pub fn resumed[&a](at: &a [int]) -> [] int {
     return at[env_at() + e_resumed()];
 }
 
+// How many connections have been dialled, and how many attempts went on a kept one (section 53).
+pub fn dialled[&a](at: &a [int]) -> [] int {
+    return at[env_at() + e_dialled()];
+}
+
+pub fn kept[&a](at: &a [int]) -> [] int {
+    return at[env_at() + e_kept()];
+}
+
 // Forget the saved session of endpoint slot `e` (its host, port, scheme or secret changed, or it was deleted): the next attempt makes a full handshake.
+// (Not its kept connections: `keep_session` calls this to replace a session with the newer one. A change of the endpoint calls `retire` as well.)
 pub fn drop_session[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], e: int) -> [ffi("libssl")] int {
     if e < 0 || e >= most_sessions() {
         return 0;
@@ -379,6 +498,19 @@ pub fn drop_session[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], e: int) -> [ff
     tls.free_session(ffi, at[env_at() + e_sessions() + e]);
     at[env_at() + e_sessions() + e] = 0;
     at[env_at() + e_keys() + e] = 0;
+    return 0;
+}
+
+// The kept connections of endpoint slot `e` are not offered again and are closed by the next `sweep_parked` (a change, a delete, a `410`: section 53.5).
+pub fn retire[&a](at: &!a [int], e: int) -> [] int {
+    var slot = 0;
+    while slot < slots() {
+        let b = slot * stride();
+        if at[b] >= draining() && at[b + 1] == e {
+            at[b] = doomed();
+        }
+        slot = slot + 1;
+    }
     return 0;
 }
 
@@ -395,7 +527,12 @@ pub fn close_tls[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int]) -> [ffi("libssl")
 }
 
 pub fn busy[&a](at: &a [int], slot: int) -> [] bool {
-    return slot >= 0 && slot < slots() && at[slot * stride()] != 0;
+    return slot >= 0 && slot < slots() && at[slot * stride()] != 0 && at[slot * stride()] < draining();
+}
+
+// Is the slot a kept connection (draining, idle or doomed) rather than an attempt (section 53)?
+pub fn parked[&a](at: &a [int], slot: int) -> [] bool {
+    return slot >= 0 && slot < slots() && at[slot * stride()] >= draining();
 }
 
 pub fn endpoint_of[&a](at: &a [int], slot: int) -> [] int {
@@ -496,7 +633,11 @@ fn dotted[&o](out: &!o [byte], a: int) -> [] int {
 // `slot` is where the attempt lives, or -1 if it could not be started, in which case `code` says why (`no_connect()` for a connection that failed at once or could
 // not be watched, `ssrf_refused()` for a destination that is not allowed, `dns_failed()` for a name with no name server to ask, `no_send()` for a request too large
 // for the slot; and nothing is left to clean up). With `slot >= 0` the code is `pending()`.
-pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab: conns.Table, poller: &!p Poller, net: &n Net(""), host: &q [byte], port: int, request: &e [byte], at: &!a [int], req: &!r [byte], token0: int, endpoint: int, id: int, deadline: int) -> [heap, net_out(""), poll] (conns.Table, int, int) {
+pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab0: conns.Table, poller: &!p Poller, net: &n Net(""), host: &q [byte], port: int, request: &e [byte], at: &!a [int], req: &!r [byte], token0: int, endpoint: int, id: int, deadline: int) -> [heap, net_out(""), poll] (conns.Table, int, int) {
+    let (tab, kept_slot, kept_code) = reuse(tab0, poller, host, port, request, at, req, token0, endpoint, id, deadline);
+    if kept_slot >= 0 {
+        return (tab, kept_slot, kept_code);
+    }
     var held = 0;
     borrow tab as &tt in {
         held = conns.live(tt);
@@ -629,7 +770,78 @@ pub fn begin[&h, &n, &q, &r, &a, &p, &e](heap: &!h Heap, tab: conns.Table, polle
         at[b + f_tls() + k] = 0;
         k = k + 1;
     }
+    at[b + f_reused()] = 0;
+    at[b + f_born()] = 0;
+    at[b + f_uses()] = 1;
+    at[b + f_key()] = pool_key(name, port, secure);
+    at[env_at() + e_dialled()] = at[env_at() + e_dialled()] + 1;
     return (table, slot, pending());
+}
+
+// The key a connection is pooled under: the name (or address) and port it was made to, and whether it is TLS.
+fn pool_key[&n](name: &n [byte], port: int, secure: bool) -> [] int {
+    var k = name_key(name, port) * 2;
+    if secure {
+        k = k + 1;
+    }
+    return k;
+}
+
+// `begin` on a kept connection (section 53): the most recently idle one of this endpoint, made to this host and port in the same scheme, if there is one.
+// The request is copied in and the attempt starts at *sending*, its connection (and TLS session) as it was. Answers the table and `(slot, pending())`, or
+// `(-1, 0)` when there is none to take.
+fn reuse[&p, &q, &e, &a, &r](tab: conns.Table, poller: &!p Poller, host: &q [byte], port: int, request: &e [byte], at: &!a [int], req: &!r [byte], token0: int, endpoint: int, id: int, deadline: int) -> [poll] (conns.Table, int, int) {
+    if at[env_at() + e_keep()] != 1 || len(request) > req_max() {
+        return (tab, 0 - 1, 0);
+    }
+    let secure = destination.is_https(host);
+    let key = pool_key(destination.bare(host), port, secure);
+    var found = 0 - 1;
+    var slot = 0;
+    while slot < slots() {
+        let b = slot * stride();
+        // The newest idle one: its deadline (when it would be closed for idleness) is the latest.
+        if at[b] == idle() && at[b + 1] == endpoint && at[b + f_key()] == key && at[b + f_uses()] < most_uses() {
+            if found < 0 || at[b + 3] > at[found * stride() + 3] {
+                found = slot;
+            }
+        }
+        slot = slot + 1;
+    }
+    if found < 0 {
+        return (tab, 0 - 1, 0);
+    }
+    var table = tab;
+    let b = found * stride();
+    let base = found * slot_bytes();
+    var watched = 0 - 1;
+    borrow mut table as &!ct in {
+        if secure {
+            tls.watching(at, b + f_tls(), 0);
+            watched = tls.want(ct, poller, at, b + f_tls(), found, token0 + found, 2);
+        } else {
+            watched = conns.rewatch(ct, poller, found, token0 + found, 2);
+        }
+    }
+    if watched != 0 {
+        at[b] = doomed();
+        return (table, 0 - 1, 0);
+    }
+    var i = 0;
+    while i < len(request) {
+        req[base + i] = request[i];
+        i = i + 1;
+    }
+    at[b] = sending();
+    at[b + 2] = id;
+    at[b + 3] = deadline;
+    at[b + 4] = 0;
+    at[b + 5] = 0;
+    at[b + 6] = len(request);
+    at[b + f_reused()] = 1;
+    at[b + f_uses()] = at[b + f_uses()] + 1;
+    at[env_at() + e_kept()] = at[env_at() + e_kept()] + 1;
+    return (table, found, pending());
 }
 
 // The name in `slot` has been resolved and judged (`advance` answered `resolved()`): close the connection to the name server and connect to the address that was
@@ -841,7 +1053,7 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
                 } else if k == 0 - 1 {
                     return pending();
                 } else {
-                    return no_send();
+                    return gone(ffi, at, slot, no_send());
                 }
             } else {
                 match conns.write(tab, slot, req[base + at[b + 4]..base + total]) {
@@ -859,56 +1071,77 @@ pub fn advance[&f, &t, &p, &a, &r, &s](ffi: &f Ffi("libcrypto,libssl"), tab: &!t
                         return pending();
                     }
                     Sent::Failed(err) => {
-                        return no_send();
+                        return gone(ffi, at, slot, no_send());
                     }
                 }
             }
         } else if at[b] == reading() {
-            let rbase = slot * resp_max();
+            // The response is read into the slot's request buffer, which is spent once the request is sent: the status line, and on a kept connection the
+            // rest of the head and the body after it (section 53.2).
+            let held = at[b + 5];
+            var k = 0;
             if secure {
-                let k = tls.read(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, resp[rbase + at[b + 5]..rbase + resp_max()]);
-                if k > 0 {
-                    at[b + 5] = at[b + 5] + k;
-                    let code = status_of(resp[rbase..rbase + resp_max()], at[b + 5]);
-                    if code >= 100 {
-                        keep_session(ffi, at, req, slot);
-                        tls.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot);
-                        return code;
-                    }
-                    if at[b + 5] >= 12 {
-                        return bad_response();
-                    }
-                    progress = true;
-                } else if k == 0 - 1 {
-                    return pending();
-                } else if k == 0 - 2 {
-                    return reset();
-                } else {
-                    return closed_early();
-                }
+                k = tls.read(ffi, tab, poller, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + held..base + head_max()]);
             } else {
-                match conns.read(tab, slot, resp[rbase + at[b + 5]..rbase + resp_max()]) {
-                    Received::Data(k) => {
-                        at[b + 5] = at[b + 5] + k;
-                        let code = status_of(resp[rbase..rbase + resp_max()], at[b + 5]);
-                        if code >= 100 {
-                            return code;
-                        }
-                        if at[b + 5] >= 12 {
-                            return bad_response();
-                        }
-                        progress = true;
+                match conns.read(tab, slot, req[base + held..base + head_max()]) {
+                    Received::Data(n) => {
+                        k = n;
                     }
                     Received::End => {
-                        return closed_early();
+                        k = 0 - 3;
                     }
                     Received::Again => {
-                        return pending();
+                        k = 0 - 1;
                     }
                     Received::Failed(err) => {
-                        return reset();
+                        k = 0 - 2;
                     }
                 }
+            }
+            if k > 0 {
+                at[b + 5] = held + k;
+                let code = status_of(req[base..base + head_max()], at[b + 5]);
+                if code >= 100 {
+                    if secure {
+                        keep_session(ffi, at, req, slot);
+                    }
+                    if at[env_at() + e_keep()] == 1 {
+                        // The outcome is decided; the rest of the response decides whether the connection is kept.
+                        at[b] = draining();
+                        at[b + f_mode()] = m_unknown();
+                        at[b + f_left()] = 0;
+                        at[b + f_chunk()] = 0;
+                        at[b + f_body()] = 0;
+                        drain(ffi, tab, poller, at, req, slot, token0);
+                        if at[b] == doomed() {
+                            // Not a connection to keep (its framing, or `Connection: close`): end it now, as one that is not kept always was, with
+                            // `close_notify` (OpenSSL will not resume a session whose connection was freed without it: `sessions_test`).
+                            at[b] = reading();
+                            if secure {
+                                tls.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot);
+                            }
+                        }
+                    } else if secure {
+                        tls.shutdown(ffi, tab, at, tb, req[base + io_at()..base + io_at() + tls.out_max()], slot);
+                    }
+                    return code;
+                }
+                if at[b + 5] >= 12 {
+                    return bad_response();
+                }
+                progress = true;
+            } else if k == 0 - 1 {
+                return pending();
+            } else if k == 0 - 2 {
+                if at[b + 5] == 0 {
+                    return gone(ffi, at, slot, reset());
+                }
+                return reset();
+            } else {
+                if at[b + 5] == 0 {
+                    return gone(ffi, at, slot, closed_early());
+                }
+                return closed_early();
             }
         }
     }
@@ -934,10 +1167,520 @@ fn keep_session[&f, &a, &r](ffi: &f Ffi("libssl"), at: &!a [int], req: &!r [byte
     return 0;
 }
 
-// End the attempt in `slot`: free its TLS state, close its connection and free the slot.
+// End the attempt in `slot`. A connection that is being drained to be kept stays (section 53); otherwise its TLS state is freed, the connection closed
+// and the slot freed.
 pub fn finish[&f, &t, &a](ffi: &f Ffi("libssl"), tab: &!t conns.Table, at: &!a [int], slot: int) -> [ffi("libssl")] int {
-    tls.drop(ffi, at, slot * stride() + f_tls());
+    if at[slot * stride()] == draining() || at[slot * stride()] == idle() {
+        return 0;
+    }
+    return close(ffi, tab, at, slot);
+}
+
+fn close[&f, &t, &a](ffi: &f Ffi("libssl"), tab: &!t conns.Table, at: &!a [int], slot: int) -> [ffi("libssl")] int {
+    drop_tls(ffi, at, slot);
     conns.close(tab, slot);
     at[slot * stride()] = 0;
     return 0;
+}
+
+fn drop_tls[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], slot: int) -> [ffi("libssl")] int {
+    tls.drop(ffi, at, slot * stride() + f_tls());
+    return 0;
+}
+
+// ---------------------------------------------------------------------
+// Kept connections (`docs/design.md` section 53)
+// ---------------------------------------------------------------------
+
+// The race of section 53.4: an attempt on a kept connection failed before a byte of a response came. The receiver closed it while it was idle, so the attempt
+// is not ended: it is made again at once on a new connection to the same address (`redial`, as after a name is resolved), once. On a new connection the
+// failure is `code`, as it always was.
+fn gone[&f, &a](ffi: &f Ffi("libssl"), at: &!a [int], slot: int, code: int) -> [ffi("libssl")] int {
+    let b = slot * stride();
+    if at[b + f_reused()] != 1 {
+        return code;
+    }
+    drop_tls(ffi, at, slot);
+    var k = 0;
+    while k < tls.fields() {
+        at[b + f_tls() + k] = 0;
+        k = k + 1;
+    }
+    at[b + 4] = 0;
+    at[b + 5] = 0;
+    at[b + f_reused()] = 0;
+    at[b + f_born()] = 0;
+    at[b + f_uses()] = 1;
+    at[b] = redialing();
+    at[env_at() + e_dialled()] = at[env_at() + e_dialled()] + 1;
+    return resolved();
+}
+
+// The poller woke a kept connection: move a draining one along, and close an idle one that the receiver closed or wrote to (an idle connection has nothing
+// to read). Answers nothing the caller acts on: a kept connection has no outcome.
+pub fn tend[&f, &t, &p, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Table, poller: &!p Poller, at: &!a [int], req: &!r [byte], slot: int, token0: int) -> [ffi("libcrypto"), ffi("libssl"), conn_read, conn_write, poll] int {
+    let b = slot * stride();
+    if at[b] == draining() {
+        return drain(ffi, tab, poller, at, req, slot, token0);
+    }
+    if at[b] == idle() {
+        let base = slot * slot_bytes();
+        var k = 0;
+        if at[b + f_flags()] % 2 == 1 {
+            // Not read: an end the TLS library would read as a truncation could make it refuse to resume the session (OpenSSL does). Whatever woke an
+            // idle connection, it is not kept.
+            k = 0 - 3;
+        } else {
+            match conns.read(tab, slot, req[base..base + 16]) {
+                Received::Data(n) => {
+                    k = n;
+                }
+                Received::End => {
+                    k = 0 - 3;
+                }
+                Received::Again => {
+                    k = 0 - 1;
+                }
+                Received::Failed(err) => {
+                    k = 0 - 2;
+                }
+            }
+        }
+        if k != 0 - 1 {
+            at[b] = doomed();
+        }
+    }
+    return 0;
+}
+
+// Read and discard the rest of the response on a draining connection, as far as it has come, by the framing its head gives (section 53.2). A response whose
+// framing is not one this keeps, or that is longer than the bounds, or more than one response, dooms the connection; a complete one makes it idle, watched
+// for readable.
+fn drain[&f, &t, &p, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Table, poller: &!p Poller, at: &!a [int], req: &!r [byte], slot: int, token0: int) -> [ffi("libcrypto"), ffi("libssl"), conn_read, conn_write, poll] int {
+    let b = slot * stride();
+    let base = slot * slot_bytes();
+    let secure = at[b + f_flags()] % 2 == 1;
+    var going = true;
+    while going && at[b] == draining() {
+        if at[b + f_mode()] == m_unknown() {
+            let end = head_end(req[base..base + head_max()], at[b + 5]);
+            if end > 0 {
+                let mode = framing(req[base..base + end], at, b);
+                if mode < 0 {
+                    at[b] = doomed();
+                    return 0;
+                }
+                at[b + f_mode()] = mode;
+                // What came after the head is the first of the body.
+                if !feed_body(at, b, req[base + end..base + at[b + 5]]) {
+                    at[b] = doomed();
+                    return 0;
+                }
+            } else if at[b + 5] >= head_max() {
+                at[b] = doomed();
+                return 0;
+            }
+        }
+        if at[b] == draining() && at[b + f_mode()] != m_unknown() && body_done(at, b) {
+            at[b] = idle();
+            // Idle from now: `sweep_parked` gives it its idle deadline at the next turn.
+            at[b + 3] = 0;
+            var watched = 0;
+            if secure {
+                // Registered again whatever the TLS module last noted: an idle connection woken for writable would read as the receiver's doing.
+                tls.watching(at, b + f_tls(), 0);
+                watched = tls.want(tab, poller, at, b + f_tls(), slot, token0 + slot, 1);
+            } else {
+                watched = conns.rewatch(tab, poller, slot, token0 + slot, 1);
+            }
+            if watched != 0 {
+                at[b] = doomed();
+            }
+            return 0;
+        }
+        // More to read: the head into the buffer after what is held, the body into the scratch after the head's room.
+        let into_head = at[b + f_mode()] == m_unknown();
+        var k = 0;
+        if into_head {
+            if secure {
+                k = tls.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + at[b + 5]..base + head_max()]);
+            } else {
+                match conns.read(tab, slot, req[base + at[b + 5]..base + head_max()]) {
+                    Received::Data(n) => {
+                        k = n;
+                    }
+                    Received::End => {
+                        k = 0 - 3;
+                    }
+                    Received::Again => {
+                        k = 0 - 1;
+                    }
+                    Received::Failed(err) => {
+                        k = 0 - 2;
+                    }
+                }
+            }
+            if k > 0 {
+                at[b + 5] = at[b + 5] + k;
+            }
+        } else {
+            if secure {
+                k = tls.read(ffi, tab, poller, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], req[base + net_at()..base + net_at() + tls.net_max()], slot, token0 + slot, req[base + head_max()..base + head_max() + 8192]);
+            } else {
+                match conns.read(tab, slot, req[base + head_max()..base + head_max() + 8192]) {
+                    Received::Data(n) => {
+                        k = n;
+                    }
+                    Received::End => {
+                        k = 0 - 3;
+                    }
+                    Received::Again => {
+                        k = 0 - 1;
+                    }
+                    Received::Failed(err) => {
+                        k = 0 - 2;
+                    }
+                }
+            }
+            if k > 0 && !feed_body(at, b, req[base + head_max()..base + head_max() + k]) {
+                at[b] = doomed();
+                return 0;
+            }
+        }
+        if k == 0 - 1 {
+            going = false;
+        } else if k <= 0 {
+            // The receiver closed, or the connection failed: nothing to keep.
+            at[b] = doomed();
+            return 0;
+        }
+    }
+    return 0;
+}
+
+// Where the head of `h` ends (just after the blank line), or 0 if it has not all come.
+fn head_end[&h](h: &h [byte], n: int) -> [] int {
+    var i = 3;
+    while i < n {
+        if int_of(h[i - 3]) == 13 && int_of(h[i - 2]) == 10 && int_of(h[i - 1]) == 13 && int_of(h[i]) == 10 {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn lower(c: int) -> [] int {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32;
+    }
+    return c;
+}
+
+// Does the header line `h[at..end]` have the name `name` (lowercase, without the colon)? Answers where its value starts, past the colon and spaces, or -1.
+fn header_value[&h, &n](h: &h [byte], at: int, end: int, name: &n [byte]) -> [] int {
+    let k = len(name);
+    if end - at < k + 1 || int_of(h[at + k]) != ':' {
+        return 0 - 1;
+    }
+    var i = 0;
+    while i < k {
+        if lower(int_of(h[at + i])) != int_of(name[i]) {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    var v = at + k + 1;
+    while v < end && (int_of(h[v]) == ' ' || int_of(h[v]) == 9) {
+        v = v + 1;
+    }
+    return v;
+}
+
+// Is `h[v..end]`, without trailing spaces, `word` (lowercase), compared without case?
+fn value_is[&h, &w](h: &h [byte], v: int, end: int, word: &w [byte]) -> [] bool {
+    var e = end;
+    while e > v && (int_of(h[e - 1]) == ' ' || int_of(h[e - 1]) == 9) {
+        e = e - 1;
+    }
+    if e - v != len(word) {
+        return false;
+    }
+    var i = 0;
+    while i < len(word) {
+        if lower(int_of(h[v + i])) != int_of(word[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The framing of a response whose head is `h` (status line and headers, ending in the blank line), or -1 for one this does not keep (section 53.2): not
+// `HTTP/1.1`, a `1xx`, `Connection: close` (or any `Connection` naming close), a `Transfer-Encoding` that is not exactly `chunked`, a length with it, two
+// `Content-Length`s, one that is not all digits or is over `body_max()`, or a body that only the end of the connection would end. Sets the length to come.
+fn framing[&h, &a](h: &h [byte], at: &!a [int], b: int) -> [] int {
+    if int_of(h[7]) != '1' {
+        return 0 - 1;
+    }
+    let code = status_of(h, len(h));
+    if code < 200 {
+        return 0 - 1;
+    }
+    var length = 0 - 1;
+    var chunked = false;
+    var line = 0;
+    while line < len(h) && int_of(h[line]) != 10 {
+        line = line + 1;
+    }
+    line = line + 1;
+    while line < len(h) - 2 {
+        var end = line;
+        while end < len(h) && int_of(h[end]) != 13 {
+            end = end + 1;
+        }
+        let cl = header_value(h, line, end, "content-length");
+        let te = header_value(h, line, end, "transfer-encoding");
+        let cn = header_value(h, line, end, "connection");
+        if cl >= 0 {
+            var n = 0;
+            var digits = 0;
+            var v = cl;
+            while v < end && int_of(h[v]) >= '0' && int_of(h[v]) <= '9' && n <= body_max() {
+                n = n * 10 + (int_of(h[v]) - '0');
+                digits = digits + 1;
+                v = v + 1;
+            }
+            while v < end && (int_of(h[v]) == ' ' || int_of(h[v]) == 9) {
+                v = v + 1;
+            }
+            if digits == 0 || v != end || n > body_max() || length >= 0 {
+                return 0 - 1;
+            }
+            length = n;
+        }
+        if te >= 0 {
+            if !value_is(h, te, end, "chunked") || chunked {
+                return 0 - 1;
+            }
+            chunked = true;
+        }
+        if cn >= 0 {
+            // A list of tokens: any `close` in it closes.
+            var v = cn;
+            while v + 5 <= end {
+                if lower(int_of(h[v])) == 'c' && lower(int_of(h[v + 1])) == 'l' && lower(int_of(h[v + 2])) == 'o' && lower(int_of(h[v + 3])) == 's' && lower(int_of(h[v + 4])) == 'e' {
+                    return 0 - 1;
+                }
+                v = v + 1;
+            }
+        }
+        line = end + 2;
+    }
+    if code == 204 || code == 304 {
+        if length > 0 || chunked {
+            return 0 - 1;
+        }
+        return m_none();
+    }
+    if chunked && length >= 0 {
+        return 0 - 1;
+    }
+    if chunked {
+        return m_chunked();
+    }
+    if length >= 0 {
+        at[b + f_left()] = length;
+        return m_length();
+    }
+    return 0 - 1;
+}
+
+// Has the body all come?
+fn body_done[&a](at: &a [int], b: int) -> [] bool {
+    let mode = at[b + f_mode()];
+    if mode == m_none() {
+        return true;
+    }
+    if mode == m_length() {
+        return at[b + f_left()] == 0;
+    }
+    return at[b + f_chunk()] == 9;
+}
+
+// Take `d`, the next bytes of the body, by the framing: false if it breaks it (more bytes than a length said, bytes after the end, a chunk size that is not
+// hexadecimal, a body over `body_max()`). A chunked body is parsed a byte at a time; its state is `f_chunk`:
+//     0 the size's digits   1 an extension, skipped to its CR   2 the LF after the size   3 the data   4 the CR after the data   5 its LF
+//     6 a trailer line's start   7 a trailer line   8 the LF ending a trailer line, or the last one   9 the end
+fn feed_body[&a, &d](at: &!a [int], b: int, d: &d [byte]) -> [] bool {
+    let mode = at[b + f_mode()];
+    if len(d) == 0 {
+        return true;
+    }
+    if mode == m_none() {
+        return false;
+    }
+    if mode == m_length() {
+        if len(d) > at[b + f_left()] {
+            return false;
+        }
+        at[b + f_left()] = at[b + f_left()] - len(d);
+        return true;
+    }
+    var i = 0;
+    while i < len(d) {
+        let c = int_of(d[i]);
+        let st = at[b + f_chunk()];
+        if st == 0 {
+            var digit = 0 - 1;
+            if c >= '0' && c <= '9' {
+                digit = c - '0';
+            } else if lower(c) >= 'a' && lower(c) <= 'f' {
+                digit = lower(c) - 'a' + 10;
+            }
+            if digit >= 0 {
+                at[b + f_left()] = at[b + f_left()] * 16 + digit;
+                if at[b + f_body()] + at[b + f_left()] > body_max() {
+                    return false;
+                }
+            } else if c == ';' {
+                at[b + f_chunk()] = 1;
+            } else if c == 13 {
+                at[b + f_chunk()] = 2;
+            } else {
+                return false;
+            }
+            i = i + 1;
+        } else if st == 1 {
+            if c == 13 {
+                at[b + f_chunk()] = 2;
+            }
+            i = i + 1;
+        } else if st == 2 {
+            if c != 10 {
+                return false;
+            }
+            if at[b + f_left()] == 0 {
+                at[b + f_chunk()] = 6;
+            } else {
+                at[b + f_body()] = at[b + f_body()] + at[b + f_left()];
+                at[b + f_chunk()] = 3;
+            }
+            i = i + 1;
+        } else if st == 3 {
+            var take = len(d) - i;
+            if take > at[b + f_left()] {
+                take = at[b + f_left()];
+            }
+            at[b + f_left()] = at[b + f_left()] - take;
+            i = i + take;
+            if at[b + f_left()] == 0 {
+                at[b + f_chunk()] = 4;
+            }
+        } else if st == 4 {
+            if c != 13 {
+                return false;
+            }
+            at[b + f_chunk()] = 5;
+            i = i + 1;
+        } else if st == 5 {
+            if c != 10 {
+                return false;
+            }
+            at[b + f_chunk()] = 0;
+            i = i + 1;
+        } else if st == 6 {
+            if c == 13 {
+                at[b + f_chunk()] = 8;
+                at[b + f_left()] = 1;
+            } else {
+                at[b + f_chunk()] = 7;
+            }
+            i = i + 1;
+        } else if st == 7 {
+            if c == 13 {
+                at[b + f_chunk()] = 8;
+                at[b + f_left()] = 0;
+            }
+            i = i + 1;
+        } else if st == 8 {
+            if c != 10 {
+                return false;
+            }
+            // `f_left` 1: the blank line that ends the trailers, so the body has ended; 0: a trailer line, and another may follow.
+            if at[b + f_left()] == 1 {
+                at[b + f_chunk()] = 9;
+            } else {
+                at[b + f_chunk()] = 6;
+            }
+            i = i + 1;
+        } else {
+            // Bytes after the end: a second response nobody asked for.
+            return false;
+        }
+    }
+    return true;
+}
+
+// Each turn, with the clock: give a kept connection its idle deadline and its birth time when it has none, close the ones that are doomed, past their idle
+// deadline, older than `life_ms()`, worn out (`most_uses()`) or draining past the attempt's deadline, and close the least recently idle while fewer than
+// `starts_room()` slots are free, so that the pool never takes a slot from an attempt (section 53.3). Answers how many it closed.
+pub fn sweep_parked[&f, &t, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Table, at: &!a [int], req: &!r [byte], now: int) -> [ffi("libcrypto"), ffi("libssl"), conn_write] int {
+    var closed = 0;
+    var held = 0;
+    var slot = 0;
+    while slot < slots() {
+        let b = slot * stride();
+        if at[b] != 0 {
+            if at[b + f_born()] == 0 {
+                at[b + f_born()] = now;
+            }
+            if at[b] == idle() && at[b + 3] == 0 {
+                at[b + 3] = now + idle_ms();
+            }
+            var close_it = at[b] == doomed();
+            if at[b] == idle() && (now >= at[b + 3] || now - at[b + f_born()] >= life_ms() || at[b + f_uses()] >= most_uses()) {
+                close_it = true;
+            }
+            if at[b] == draining() && now >= at[b + 3] {
+                close_it = true;
+            }
+            if close_it {
+                quit(ffi, tab, at, req, slot);
+                closed = closed + 1;
+            } else {
+                held = held + 1;
+            }
+        }
+        slot = slot + 1;
+    }
+    while slots() - held < starts_room() {
+        var oldest = 0 - 1;
+        slot = 0;
+        while slot < slots() {
+            let b = slot * stride();
+            if at[b] == idle() && (oldest < 0 || at[b + 3] < at[oldest * stride() + 3]) {
+                oldest = slot;
+            }
+            slot = slot + 1;
+        }
+        if oldest < 0 {
+            return closed;
+        }
+        quit(ffi, tab, at, req, oldest);
+        closed = closed + 1;
+        held = held - 1;
+    }
+    return closed;
+}
+
+// Close a kept connection. Over TLS, `close_notify` first (it is not waited for): a TLS library may refuse to resume a session whose connection ended
+// without one (OpenSSL does: `sessions_test` found it), and it is the clean end of a connection whose last response was read whole.
+fn quit[&f, &t, &a, &r](ffi: &f Ffi("libcrypto,libssl"), tab: &!t conns.Table, at: &!a [int], req: &!r [byte], slot: int) -> [ffi("libcrypto"), ffi("libssl"), conn_write] int {
+    let b = slot * stride();
+    if at[b + f_flags()] % 2 == 1 && at[b] != draining() {
+        let base = slot * slot_bytes();
+        tls.shutdown(ffi, tab, at, b + f_tls(), req[base + io_at()..base + io_at() + tls.out_max()], slot);
+    }
+    return close(ffi, tab, at, slot);
 }

@@ -214,6 +214,10 @@ jobs:
         working-directory: hooks
         run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/sessions_test.py build/hooks
 
+      - name: Kept connections (reuse, each framing, the race of a closed connection, the bounds, a burst, a PATCH and a 410; docs/design.md section 53)
+        working-directory: hooks
+        run: HOOKS_PG=127.0.0.1:5432:postgres:hooks HOOKS_PG_PASSWORD=pgpass python3 tests/keepalive_test.py build/hooks
+
       - name: Replay an event to one endpoint or all
         working-directory: hooks
         run: python3 tests/replay_test.py build/hooks
@@ -417,6 +421,10 @@ jobs:
       - name: What only the pure service does (a trust store too large, no environment, close_notify, resumption, the ClientHello's psk_key_exchange_modes)
         working-directory: hooks
         run: python3 tests/pure_test.py pure/build/hooks-pure
+
+      - name: Kept connections on the pure service (docs/design.md section 53; the PATCH check is the test job's, with the database)
+        working-directory: hooks
+        run: python3 tests/keepalive_test.py pure/build/hooks-pure
 
       - name: Retention and a power cut on the pure service (its fsync shim is in pure/build; without it the cut took flushed records and the restart was refused, status 18)
         working-directory: hooks

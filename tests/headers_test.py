@@ -95,8 +95,8 @@ def main():
         check(f"1. the {label} carries each header, name and value as set (every visible ASCII character in one value)", got == hdrs, str(got))
         check(f"1. ... and nothing else: no header nobody set", len(custom(r)) == 3, str(custom(r)))
     names = [k for k, _ in r0["headers"]]
-    check("1. the standard ones are there once each, and in the order the delivery has always sent, with the custom ones after the signature",
-          names[:4] == ["Host", "Content-Type", "webhook-id", "webhook-timestamp"] and names[4] == "webhook-signature" and names[5:8] == list(hdrs) and names[8:] == ["Content-Length", "Connection"], str(names))
+    check("1. the standard ones are there once each, and in the order the delivery has always sent, with the custom ones after the signature (and no `Connection: close` since design 53)",
+          names[:4] == ["Host", "Content-Type", "webhook-id", "webhook-timestamp"] and names[4] == "webhook-signature" and names[5:8] == list(hdrs) and names[8:] == ["Content-Length"], str(names))
     check("1. Content-Type is still application/json, Host receiver", dict(r0["headers"])["Content-Type"] == "application/json" and dict(r0["headers"])["Host"] == "receiver")
     check("1. the library verifies the signature of a request that carries headers", verifies(r0, sec) and verifies(r1, sec))
     check("1. the retry is the same message (webhook-id) with its own timestamp and signature", dict(r0["headers"])["webhook-id"] == dict(r1["headers"])["webhook-id"])

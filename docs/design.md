@@ -2437,9 +2437,9 @@ Nothing here needed a foreign function, and no workaround for a gap was written 
 
 **What it cost.** The binary is 946 KB, 134 KB (16%) more than before (811 KB): the declaration layer, the schema nodes and the text of every description are in it, and `routes()` builds them at start. Resident memory after the retention test's 60,000 events is 9.1 MB against 8.8 MB. The per-request path is the same `std.route` lookup: five alternated rounds on the same machine (a 6-core arm64 Linux VM under Docker, `scripts/bench/run.py`, quiet) give the CPU per event of ingest on 64 connections of 4 us before and after (50,000 events), 6 us for one endpoint (20,000) with 26 to 28 us per delivery either way, and for ten endpoints 20 to 21 us per delivery either way; the ingest phase of the ten-endpoint run (5,000 events) is 14 us before and 16 us after, which is about 10 ms in an 80 ms window and appeared in none of the larger runs. It was not run down further.
 
-## 53. Keeping connections open to an endpoint (design, not built)
+## 53. Keeping connections open to an endpoint
 
-*Status: a design; its open questions (53.9) answered as proposed (2026-10-06), not yet built. Its claims are measured where it says so and arithmetic from measured parts where it says that; the build measures each and corrects this section in place.*
+*Status: built (2026-10-07), on by default (`keep-alive 0` turns it off); what building it found and the results are 53.11, and the sections it corrected say so in place. The soak of 53.8 is still to run.*
 
 ### 53.1 Why
 
@@ -2453,7 +2453,7 @@ Every attempt dials, sends the request with `Connection: close`, reads the statu
 
 The pure build's resumed delivery is still six times OpenSSL's, and what is left of it is not the record cipher (lex-sys's AES-GCM is now on the CPU's instructions, lex-sys#334) but the handshake's public-key arithmetic: one X25519 exchange per resumption, about 0.55 ms on the Apple M4, and two ECDSA verifications per full handshake, about 0.8 ms each. Making those faster is arithmetic work in lex-sys. Not doing them is this section.
 
-**What a kept connection would cost, as arithmetic:** a plain-`http` delivery is 26 to 28 µs of the service's CPU for one endpoint with a new TCP connection each time (52, `scripts/bench/run.py`); on a kept TLS connection a delivery is that, less the connect and close, plus sealing one request record and opening one response record (a few µs for a few hundred bytes on the hardware path, lex-sys#334). That puts a kept `https` delivery at **about 30 to 40 µs on either build**, against 1,400 (pure, resumed) and 250 (OpenSSL, resumed). Not measured; 53.8's first gate measures it.
+**What a kept connection would cost, as arithmetic:** a plain-`http` delivery is 26 to 28 µs of the service's CPU for one endpoint with a new TCP connection each time (52, `scripts/bench/run.py`); on a kept TLS connection a delivery is that, less the connect and close, plus sealing one request record and opening one response record (a few µs for a few hundred bytes on the hardware path, lex-sys#334). That puts a kept `https` delivery at **about 30 to 40 µs on either build**, against 1,400 (pure, resumed) and 250 (OpenSSL, resumed). Not measured; 53.8's first gate measures it. *Measured (53.11): 33 to 133 µs on the OpenSSL build and 67 to 117 µs on the pure build, for 10 and 1 endpoints; the estimate was low by up to 3 times, and the saving holds: 12 to 22 times less than a resumed delivery on the pure build.*
 
 It also removes, per delivery: a TCP handshake and a TLS round trip from the receiver's latency, a connection the receiver must accept, and the TIME_WAIT socket the service leaves behind.
 
@@ -2466,10 +2466,10 @@ It also removes, per delivery: a TCP handshake and a TLS round trip from the rec
 
 ### 53.3 The pool
 
-- **Keyed by endpoint slot, and by the name, port, scheme and address** the connection was made to (the key `attempt.keep_session` already uses for sessions, plus the address), so a connection is never given to another endpoint, or to the same endpoint after its host changed.
+- **Keyed by endpoint slot, and by the name, port, scheme and address** the connection was made to (the key `attempt.keep_session` already uses for sessions, plus the address), so a connection is never given to another endpoint, or to the same endpoint after its host changed. *As built: by endpoint slot, name, port and scheme (`attempt.pool_key`), not the address; a change of the name's address is honoured when the connection ends, within the 5 minutes below. A `PATCH` closes the endpoint's connections in any case (53.5).*
 - **Per endpoint, at most as many idle connections as it may have attempts in flight** (`epx.max_concurrency()`, 8, or the endpoint's own `concurrency`): a burst finds a connection for each attempt, as it finds a ticket for each since lex-sys#310.
-- **In the attempt table, not beside it.** An idle connection keeps its slot of `std.conns` and, over TLS, its TLS state: in the OpenSSL build an `SSL`, in the pure build its slot of the engine (a slot of the 64 the engine has, `attempt.slots()`). So **idle connections and attempts share the 64 slots**. A new attempt that finds no free slot closes the **least recently used idle** connection of *another* endpoint first, and only then waits as today: the pool may never refuse a delivery a slot that the service without a pool would have given it.
-- **Watched while idle** for readable on the server's poller, as attempts are: a receiver that closes an idle connection (FIN or RST), or sends bytes nobody asked for, has that connection closed at once.
+- **In the attempt table, not beside it.** An idle connection keeps its slot of `std.conns` and, over TLS, its TLS state: in the OpenSSL build an `SSL`, in the pure build its slot of the engine (a slot of the 64 the engine has, `attempt.slots()`). So **idle connections and attempts share the 64 slots**. A new attempt that finds no free slot closes the **least recently used idle** connection of *another* endpoint first, and only then waits as today: the pool may never refuse a delivery a slot that the service without a pool would have given it. *As built: the eviction runs ahead instead, each turn (`attempt.sweep_parked`): while fewer than 16 slots are free, the least recently used idle connection of any endpoint is closed. So kept connections hold at most 48 slots and a new attempt always finds a free one; `keepalive_test.py` stage 9 delivers to 70 endpoints with none failed.*
+- **Watched while idle** for readable on the server's poller, as attempts are: a receiver that closes an idle connection (FIN or RST), or sends bytes nobody asked for, has that connection closed at once. *As built: an idle TLS connection that wakes is closed without being read: reading a peer's close through the TLS library could make it mark the session not resumable (53.11).*
 - **Bounded in time:** an idle connection is closed after **30 s** idle (below nginx's default keep-alive timeout of 75 s; Go's `net/http` server has none unless one is set; Node.js's default of 5 s is below it, and 53.4 is what makes that safe), and any connection after **5 minutes** or **1,000 requests**, whichever comes first. So a change of the name's address is honoured within 5 minutes, no connection lives for ever, and a TLS verification is relied on for at most 5 minutes after it was made (lex-sys's resumption relies on one for an hour, its `docs/tls-resumption.md` §3 rule 4). Closing at the certificate's `notAfter` as well would need a new libssl call in the OpenSSL build (its authority report would change), so the 5 minutes are the bound instead.
 
 ### 53.4 A connection the receiver closed: the race
@@ -2510,7 +2510,29 @@ The change is in `src/attempt.ls` (states *draining* and *idle*, the pool, the e
 
 ### 53.10 Not done here
 
-The code. The pin of the pure build's lex-sys to a commit with the hardware AES (lex-sys#334): a separate change, which lowers the record cost of 53.1 but not the handshake this section removes. Making X25519 and ECDSA faster in lex-sys (the other half of the gap to OpenSSL).
+~~The code.~~ *Built: 53.11.* The pin of the pure build's lex-sys to a commit with the hardware AES (lex-sys#334): a separate change, which lowers the record cost of 53.1 but not the handshake this section removes. Making X25519 and ECDSA faster in lex-sys (the other half of the gap to OpenSSL).
+
+### 53.11 What building it found, and the results
+
+**Two bugs, both found by the tests before the build was done:**
+- **OpenSSL would not resume a session whose connection ended without `close_notify`.** Kept connections are closed by the service (idle, lifetime, eviction) or end at the status line when not kept; ending them with `close(2)` alone made `sessions_test.py` see full handshakes where it expected resumptions. Every TLS connection the service closes now sends `close_notify` first (`attempt.quit`, and at the status line when a response is not kept), and an idle TLS connection that wakes is closed without being read (53.3).
+- **A burst made 141 connections for 200 deliveries.** Saving a new session for resumption (`attempt.keep_session`) dropped the old one through `drop_session`, which also retired the endpoint's kept connections, so each delivery of a burst closed the others' connections. `drop_session` no longer retires; the `PATCH` and `DELETE` paths retire explicitly (53.5). The same burst now makes at most 8 connections (`keepalive_test.py` stage 11).
+
+**Cost** (`scripts/bench/https_cost.py`, 600 deliveries a row, the median of 3 runs; a 6-vCPU Linux VM on an Apple M4 Max, in Docker; CPU per delivery for 1 / 10 endpoints):
+
+| | OpenSSL build | pure build |
+|---|---|---|
+| `http`, a name, a new connection | 183 / 83 µs | 133 / 67 µs |
+| `http`, kept | 133 / 17 µs | 83 / 17 µs |
+| `https`, a full handshake | 1,033 / 450 µs | 3,600 / 3,117 µs |
+| `https`, resumed | 367 / 233 µs | 1,483 / 1,450 µs |
+| **`https`, kept** | **133 / 33 µs** | **117 / 67 µs** |
+
+So a kept `https` delivery costs about what a plain `http` one does, on both builds, and the pure build's gap to OpenSSL closes for every delivery but an endpoint's first. The one-endpoint rows carry the service's per-turn floor over fewer deliveries a turn, which is why they are higher. Handshakes: 2 and 11 to 18 for 600 deliveries (the first of each endpoint, and those after an eviction or a close by the receiver).
+
+**Tests:** `tests/keepalive_test.py`, 18 stages, each with its control (53.8), passes on both builds; stage 12's `PATCH` check needs the database and is skipped without it (the CI job of the pure build has none). The existing suites pass on both builds as they did on `main`, with two tests changed because they asserted the `Connection: close` this section removes (`https_test.py`, `headers_test.py`). **`dead_test.py`'s stage 3 (300 events, `kill -9` three times) failed once on the pure build**, with an entry whose attempts, reason or type was not the expected one, and passed the next 15 runs; the entry was not printed and the failure has not been reproduced. It is the gate 53.8 names (kill -9 with connections open), and it stays open until it is explained. **Mutants:** `tests/mutants/keepalive.py`, 24, of the reuse test, the framing, the drain, the bounds, the eviction, the retry of 53.4 and the retirement: **20 killed, 4 argued equivalent** (the file says why). The first run counted all 24 killed, wrongly: 11 had died on a database the test could not reach, not on a check. Run with the database, 11 survived, and 7 of them were gaps in `keepalive_test.py`, closed by stages 13 to 18: two endpoints behind one receiver (without the endpoint in the reuse test, outcomes were put on the wrong endpoint: 12 delivered and 3 dead for 10 and 10), the retry of 53.4 made more than once, a framing that breaks or a stalled body closed at the deadline or never, a chunked body's last bytes coming late, bytes on an idle connection, and `close_notify` on what the service closes.
+
+**Not done:** the soak (53.8) before relying on the default in production; a `DELETE` check in `keepalive_test.py` (its path is the `PATCH`'s, which is checked).
 
 ## 54. The log checker in lex-sys
 
