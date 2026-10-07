@@ -74,6 +74,11 @@ jobs:
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh
 
       # `hooks-mcp` (docs/agents.md) holds no foreign function and no `Ffi`: its report is pinned in docs/authority-mcp.json (the same way, `--mcp`).
+      # `hooks-logcheck` (tools/logcheck.ls) reads the logs and, for `trim`, cuts a torn tail: its report is pinned in docs/authority-logcheck.json too.
+      - name: The authority report of hooks-logcheck is the committed one (no foreign function; it reads the data directory, and only trim writes it)
+        working-directory: hooks
+        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh --logcheck
+
       - name: The authority report of hooks-mcp is the committed one (no foreign function; the console, the network, the clock, the token file)
         working-directory: hooks
         run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/check-authority.sh --mcp
@@ -305,6 +310,10 @@ jobs:
       - name: Refuse corruption (a delivery log ahead of its events log, damage in the middle of a log, a torn tail still recovered, --repair-logs)
         working-directory: hooks
         run: python3 tests/corrupt_test.py build/hooks
+
+      - name: Native log checker (hooks-logcheck agrees with scripts/logcheck.py on clean and damaged logs, trim cuts the same bytes, reads leave the files untouched)
+        working-directory: hooks
+        run: python3 tests/logcheck_test.py build/hooks
 
       - name: /metrics against a known workload (ingest, group commits, attempts by outcome and reason, lag, history), /readyz
         working-directory: hooks

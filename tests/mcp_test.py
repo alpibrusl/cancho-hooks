@@ -1268,9 +1268,17 @@ def stage7():
     K.post_event(svc, 1, "t")
     K.wait_for(lambda: K.get(svc, "/stats")["replays"] == 0 and K.get(svc, "/stats")["delivered"] + K.get(svc, "/stats")["failed"] >= 1, 10)
     st, _ = K.req(svc, "POST", f"/events/1/replay/{a}", b"")
-    K.wait_for(lambda: K.get(svc, "/stats")["replays"] == 1 and bad.count() >= 3, 15)
+    # the replay's first attempt is the third request, and its own retry comes 40 ms later: wait until that has been made too (the fourth), so that
+    # what is left is the ten-minute wait
+    K.wait_for(lambda: K.get(svc, "/stats")["replays"] == 1 and bad.count() >= 4, 15)
     m = Mcp(url=f"http://127.0.0.1:{svc.port}", write=True, extra=["--token-file", tf])
-    isb, text = m.tool("hooks_cancel_replay", {"event_id": 1, "endpoint_id": a})
+    # An attempt that is still on the wire (the answer being read) makes the service say 409, "ask again when it has ended": a client does, and so
+    # does this test (CI runs 37535955659 and 37535933162 asked in the instant of the 40 ms retry).
+    for _ in range(50):
+        isb, text = m.tool("hooks_cancel_replay", {"event_id": 1, "endpoint_id": a})
+        if not (isb and text.startswith("HTTP 409")):
+            break
+        time.sleep(0.1)
     check("7. hooks_cancel_replay of a waiting replay: cancelled 1", not isb and json.loads(text) == {"event": 1, "endpoint": a, "cancelled": 1, "busy": 0}, text)
     check("7. ... the table of waiting replays is empty", K.get(svc, "/stats")["replays"] == 0, "")
     isb, text = m.tool("hooks_cancel_replay", {"event_id": 1, "endpoint_id": a})

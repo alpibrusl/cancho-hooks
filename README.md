@@ -4,7 +4,7 @@
 
 **Webhooks that survive failure.** A self-hosted delivery service: your events stay on your infrastructure. Post an event once: it is on disk before you get the answer, then signed ([Standard Webhooks](https://www.standardwebhooks.com)) and delivered to every subscribed endpoint, **at least once**, through crashes, outages and slow receivers. One small binary, written in [lex-sys](https://github.com/alpibrusl/lex-sys). The [project page](https://alpibrusl.github.io/lexsys-hooks/) has the pictures.
 
-**Status: alpha, not for production yet.** The API may still change. A 24-hour chaos soak and the capacity figures it gives are in progress; `https` uses OpenSSL until lex-sys's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
+**Status: alpha, not for production yet.** The API may still change. No 24-hour chaos soak has yet completed as a valid run (the third ended inconclusive at 15.8 hours when the test harness failed, not the service as far as is known: [docs/soak.md](docs/soak.md)), so the capacity figures it would give are not published; `https` uses OpenSSL until lex-sys's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
 
 ## What you get
 

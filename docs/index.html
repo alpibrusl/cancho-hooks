@@ -215,7 +215,7 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
   <p class="sub">Kill the process. Cut the database. Make receivers hang, reset and lie. Run it under load. Then a separate checker looks at every event for loss, repetition and bad signatures.</p>
   <figure class="figure wide">
     <img src="figures/soak.svg" alt="Timeline of a soak run: kills, database faults and bursts, and how far behind the endpoints that must keep up were; it rises in each fault and returns to nearly zero.">
-    <figcaption>A 24-hour chaos run in progress (run 3, first 4.7 hours). Each red tick is a <code>kill -9</code> as a power cut; each amber bar, a database cut, frozen or black-holed. Every rise returns to nearly zero. <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/soak.md">What it checks, and what the first two runs found</a>.</figcaption>
+    <figcaption>The first 4.7 hours of run 3, a 24-hour chaos run; it later ended inconclusive when the test harness itself ran out of capacity (see the soak notes). Each red tick is a <code>kill -9</code> as a power cut; each amber bar, a database cut, frozen or black-holed. Every rise returns to nearly zero. <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/soak.md">What it checks, and what the first two runs found</a>.</figcaption>
   </figure>
   <p class="note"><a href="evidence.html">The tests, what they found, and how each claim was measured</a></p>
   <div class="stats">
@@ -316,7 +316,7 @@ curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre
   <h2>Alpha: we are trying to break it before you deploy it</h2>
   <p class="note" style="margin:.2rem 0 .6rem">Alpha means the API may still change and nothing here is certified for production. Beta needs a clean 24-hour soak on the release candidate and an independent review of lex-sys&rsquo;s own TLS.</p>
   <ul>
-    <li>The 24-hour chaos soak is still running; the first two runs found two real bugs, both fixed. Until a clean run on the release candidate, it is not certified for production.</li>
+    <li>No 24-hour chaos run has completed validly yet: the first two found two real bugs (both fixed), and the third ended inconclusive at 15.8 hours when the test harness, not the service as far as is known, ran out of capacity. Until a clean run on the release candidate, it is not certified for production.</li>
     <li><code>https</code> uses OpenSSL until lex-sys&rsquo;s own TLS has been independently reviewed.</li>
     <li>One process on one core; put a reverse proxy in front for TLS on the service&rsquo;s own port.</li>
   </ul>

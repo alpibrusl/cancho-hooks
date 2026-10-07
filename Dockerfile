@@ -17,7 +17,8 @@
 # version but its checksum comes from the same server. To pin the base: `--build-arg BASE=ubuntu:24.04@sha256:<digest>`.
 # The runtime base must be the build base (the binary links the glibc of the image it was built in).
 #
-# THIS IMAGE HAS NOT BEEN BUILT BY CI. See docs/runbook.md "Container" for what was verified by hand and what was not.
+# .github/workflows/release.yml builds this image, waits for it to be healthy, posts an event, reads it back and stops it (a dry run on a push that
+# touches it; a push of a tag publishes it). See docs/runbook.md "Container" for what was verified by hand and what was not.
 ARG BASE=ubuntu:24.04
 
 FROM ${BASE} AS compiler
