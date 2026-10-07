@@ -312,8 +312,26 @@ class Peer:
 
 
 def closed_port():
-    """A port nothing listens on (bound and released a moment ago)."""
-    return chaos.free_port()
+    """A port nothing listens on, and that nothing is likely to be given: below the range the system hands out as ephemeral (Linux 32768 and up,
+    macOS 49152 and up), so it is never a source port of a connection, and a bind to port 0 never returns it; and one a connect to which is refused,
+    checked here. (A port bound and released a moment ago can be handed to another socket, including as the source port of a connection the service
+    itself makes: a connect to it then does not fail, and an attempt that should have been `connect_refused` timed out in the TLS handshake instead:
+    CI run 37632860045, `tests/https_test.py` check 3.)"""
+    import random
+    rng = random.SystemRandom()
+    for _ in range(200):
+        p = rng.randint(12000, 30000)
+        c = socket.socket()
+        c.settimeout(1.0)
+        try:
+            c.connect(("127.0.0.1", p))
+        except ConnectionRefusedError:
+            return p
+        except OSError:
+            pass
+        finally:
+            c.close()
+    raise RuntimeError("no port below the ephemeral range refused a connection (200 tried)")
 
 
 # ---- the logs, read independently of the service ----------------------------------------------------------------------
