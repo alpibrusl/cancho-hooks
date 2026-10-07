@@ -191,7 +191,9 @@ def test_receiver():
         ok_mine = rcv.verify([secret], f"evt_{i}", h["webhook-timestamp"], h["webhook-signature"], body)[0]
         wrong = rcv.verify([other], f"evt_{i}", h["webhook-timestamp"], h["webhook-signature"], body)[0]
         tampered = rcv.verify([secret], f"evt_{i}", h["webhook-timestamp"], h["webhook-signature"], body + b" ")[0]
-        two = h["webhook-signature"] + " " + signed(other, f"evt_{i}", body)["webhook-signature"]
+        # the second signature is made at the SAME second as the first: a fresh time.time() could be the next second, and then it is
+        # (rightly) a signature of another timestamp, which the receiver refuses (a flake of this check, CI run 37624285380)
+        two = h["webhook-signature"] + " " + signed(other, f"evt_{i}", body, when=int(h["webhook-timestamp"]))["webhook-signature"]
         both = rcv.verify([secret], f"evt_{i}", h["webhook-timestamp"], two, body)[0] and rcv.verify([other], f"evt_{i}", h["webhook-timestamp"], two, body)[0]
         if not (mine == h["webhook-signature"] and lib_ok and ok_mine and not wrong and not tampered and both):
             agree, detail = False, f"i={i} mine={mine} lib={h['webhook-signature']} {lib_ok} {ok_mine} {wrong} {tampered} {both}"
