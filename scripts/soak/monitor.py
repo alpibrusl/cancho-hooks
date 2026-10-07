@@ -310,6 +310,10 @@ class Watcher(threading.Thread):
             r.recv_stats = rs
             if rs.get("writer_errors"):
                 r.violate("P_receiver_ledger_write", errors=rs["writer_errors"])
+        else:
+            # a receiver process that does not answer its control port in 5 s has a loop that is stalled for at least that long: it counts as a loop 5 s late
+            row["recv_loop_lag_max_ms"] = 5000.0
+            r.counts["receivers_silent"] += 1
         cpu = time.process_time()
         pcpu = self.proc_cpu(r.probe.pid) if r.probe else 0.0
         main_pct = None
@@ -327,7 +331,7 @@ class Watcher(threading.Thread):
         self.proc_snap = (now, after)
         gap = now - self.last_sample_t - r.args.sample_s
         self.last_sample_t = now
-        stalled = gap > 5.0 or (row.get("recv_loop_lag_max_ms") or 0) > 5000 or (row.get("probe_max_ms") or 0) > 5000
+        stalled = gap > 5.0 or (row.get("recv_loop_lag_max_ms") or 0) >= 5000 or (row.get("probe_max_ms") or 0) > 5000
         if stalled:
             mine = {os.getpid(), r.svc.pid or 0, *(p.pid for p in r.receivers), r.probe.pid if r.probe else 0}
             top = guard.top_processes(before, after, now - snap_t, 3, mine)
