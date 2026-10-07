@@ -61,6 +61,7 @@ class EpInfo:
         self.svc_id = None
         self.c0 = None
         self.active = True
+        self.created_at = time.time()
         self.retired_at = 0.0       # when it was retired: the saved state forgets a retired endpoint after RETIRED_KEEP_S
         self.cursor = 0
 
@@ -325,13 +326,27 @@ class Run:
         self.recv({"op": "add", "spec": ep.spec()})
         return ep
 
-    def drop_endpoint(self, ep, keep_receiver=False):
+    def drop_endpoint(self, ep, verified_gone=True, quarantine=30.0, delay=12.0):
+        """The harness is done with an endpoint that was never (or is no longer) in the service: it is retired in the checker, and its receiver is taken away after `delay` (an attempt
+        may be on the wire). The port is given back for reuse only when the endpoint is known to be gone from the service and the table (`verified_gone`)."""
         ep.active = False
         ep.retired_at = time.time()
-        if not keep_receiver:
-            self.recv({"op": "remove", "label": ep.label})
         with self.vlock:
             self.verifier.retire(ep.label, time.time())
+        self.release_receiver(ep, verified_gone, quarantine, delay)
+
+    def release_receiver(self, ep, verified_gone, quarantine=30.0, delay=12.0):
+        if getattr(ep, "released", False):
+            return
+        ep.released = True
+
+        def later():
+            self.recv({"op": "remove", "label": ep.label})
+            if verified_gone:
+                self.free_ports.append((time.time() + quarantine, ep.port))
+            else:
+                self.log("harness-event", what="port-not-reused", port=ep.port, label=ep.label, why="the endpoint is not known to be gone")
+        threading.Timer(delay, later).start()
 
     # ---- state
     def save_state(self):
@@ -1177,12 +1192,27 @@ def calibrate(run):
     return 0
 
 
+def unit_tests():
+    """The offline tests of the harness's own parts (scripts/soak/tests/test_*.py): each is a program that exits 0 when its checks pass. Returns the names of those that failed."""
+    import glob
+    failed = []
+    for f in sorted(glob.glob(os.path.join(HERE, "tests", "test_*.py"))):
+        r = subprocess.run([sys.executable, f], capture_output=True, text=True)
+        print(r.stdout, end="")
+        if r.returncode != 0:
+            print(r.stderr[-1500:], end="")
+            failed.append(os.path.basename(f))
+    return failed
+
+
 def selftest(a):
     """The harness against itself (docs/soak.md): the checker on mutated ledgers, then three minutes on the real service clean (must pass) and with a fault injected (must fail)."""
     import selftest_ledger
     results = []
     rc = selftest_ledger.main()
     results.append(("the checker catches every mutation of the ledgers", rc == 0, ""))
+    bad = unit_tests()
+    results.append(("the harness's own parts pass their tests", not bad, ", ".join(bad)))
     if a.selftest_ledger:
         return 0 if rc == 0 else 1
     if not a.binary or not a.pg:
@@ -1244,7 +1274,7 @@ def main(argv=None):
     if a.selftest or a.selftest_ledger:
         if a.selftest_ledger and not a.selftest:
             import selftest_ledger
-            return selftest_ledger.main()
+            return 0 if selftest_ledger.main() == 0 and not unit_tests() else 1
         return selftest(a)
     finalize_args(a, p)
     return run_main(a)
