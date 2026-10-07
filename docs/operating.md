@@ -27,12 +27,12 @@ The `/metrics` series, readiness and health, stopping the service, building it a
 
 ## Requirements
 
-- The **lex-sys** compiler at the commit `lex-sys.toml` names (`[package] lex-sys`); `lex-sys build` refuses any other. It needs `clock_unix_ms` (the signing timestamp; lex-sys PR #190),
+- The **cancho** compiler at the commit `cancho.toml` names (`[package] cancho`); `cancho build` refuses any other. It needs `clock_unix_ms` (the signing timestamp; cancho PR #190),
   `tcp_connect_start` (attempts that do not wait; #191), a lock with an origin (#192), the project file (#193), and `std.hmac`, which signs
   every delivery and replaced this repository's own HMAC (#229; [`design.md`](design.md) section 30).
-- `git`: [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and lex-sys's `http-server` are not cloned by hand; they are dependencies in `lex-sys.toml`, pinned to a commit each, and `lex-sys build` fetches and checks them.
+- `git`: [`cancho-log`](https://github.com/alpibrusl/cancho-log) and cancho's `http-server` are not cloned by hand; they are dependencies in `cancho.toml`, pinned to a commit each, and `cancho build` fetches and checks them.
 - Rust, to build the compiler; `gcc`, to build the three small shims the tests preload (`fsync`, for the crash tests; `fstat` and `fstatat`, for the production profile's; `send` and `recv`, for the partial-I/O tests).
-- OpenSSL 3.0 or later: its development files (`libssl-dev`) to build, because the service is linked against `libssl` and `libcrypto` (`scripts/build.sh` does it; a plain `lex-sys build` stops at the link), and `libssl3` and `ca-certificates` to run it.
+- OpenSSL 3.0 or later: its development files (`libssl-dev`) to build, because the service is linked against `libssl` and `libcrypto` (`scripts/build.sh` does it; a plain `cancho build` stops at the link), and `libssl3` and `ca-certificates` to run it.
 
 ## A prebuilt binary
 
@@ -45,11 +45,11 @@ unzip hooks-linux-x86_64-*.zip && sha256sum -c hooks-linux-x86_64.sha256 && chmo
 ./hooks-linux-x86_64 --port 8080 --dir /var/lib/hooks
 ```
 
-A run's artifacts expire (90 days by default). A **release** has a stable URL: pushing a tag `v*` runs `.github/workflows/release.yml`, which builds the tarballs (x86-64 and arm64, from `scripts/release.sh`) and the container image, tries each as a downloader would (`scripts/release-smoke.sh`: checksum, unpack, start, post an event, read it back, stop; for the image, wait until healthy and do the same), attests the build provenance of the tarballs, and publishes them with a single `SHA256SUMS` as a GitHub Release (a pre-release when the tag has a `-`, as `v0.1.0-alpha.1`) and the image to `ghcr.io/alpibrusl/lexsys-hooks`. A push that only touches the files a release is made of runs the same build and checks and publishes nothing (a dry run). To check a download:
+A run's artifacts expire (90 days by default). A **release** has a stable URL: pushing a tag `v*` runs `.github/workflows/release.yml`, which builds the tarballs (x86-64 and arm64, from `scripts/release.sh`) and the container image, tries each as a downloader would (`scripts/release-smoke.sh`: checksum, unpack, start, post an event, read it back, stop; for the image, wait until healthy and do the same), attests the build provenance of the tarballs, and publishes them with a single `SHA256SUMS` as a GitHub Release (a pre-release when the tag has a `-`, as `v0.1.0-alpha.1`) and the image to `ghcr.io/alpibrusl/cancho-hooks`. A push that only touches the files a release is made of runs the same build and checks and publishes nothing (a dry run). To check a download:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify hooks-<version>-linux-x86_64.tar.gz --repo alpibrusl/lexsys-hooks
+gh attestation verify hooks-<version>-linux-x86_64.tar.gz --repo alpibrusl/cancho-hooks
 ```
 
 The attestation says the file was built by that workflow from the tagged commit; it does not say anyone has audited the code. The tarballs are not signed with a key of ours, the SBOM is the stub described above, `hooks-pure` and macOS are not built, and the image is x86-64 only.

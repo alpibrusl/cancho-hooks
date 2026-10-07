@@ -21,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # check -> (verdict on OpenSSL, verdict on the pure build, why)
 EXPECTED = {
     "6. the system's store honours SSL_CERT_FILE (no tls-ca-file): delivered, and no failure is counted":
-        ("ok", "FAIL", "the pure build reads no environment variable (lex-sys has no access to one without a foreign call), so SSL_CERT_FILE names nothing to it; "
+        ("ok", "FAIL", "the pure build reads no environment variable (cancho has no access to one without a foreign call), so SSL_CERT_FILE names nothing to it; "
                        "the trust store is tls-ca-file, or the system's bundle at a usual path"),
 }
 

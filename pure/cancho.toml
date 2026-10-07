@@ -1,0 +1,48 @@
+# The service with cancho's own TLS in place of OpenSSL (docs/pure-tls.md). It is a project of its own, because a project's libraries are built into every
+# program of it (cancho's `tls` package and this service's OpenSSL module were both called `tls`; the latter is now `ossl`), and the pure build needs a newer compiler than the default one
+# (`std.gcm`, `std.ecdh` and the packages are newer than the pin of the default project). `scripts/make_pure.py` writes `build/src`; `scripts/build.sh` runs it.
+
+[package]
+name = "hooks-pure"
+cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+
+[dependencies.log]
+git = "https://github.com/alpibrusl/cancho-log"
+rev = "71128de72692427b094429fc729d82435144b2e9"
+path = ".cancho-vcs/log"
+
+[dependencies.server]
+git = "https://github.com/alpibrusl/cancho"
+rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+path = "packages/http-server/.cancho-vcs"
+
+[dependencies.pg]
+git = "https://github.com/alpibrusl/cancho-pg"
+rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+path = ".cancho-vcs"
+
+[dependencies.pool]
+git = "https://github.com/alpibrusl/cancho-pg"
+rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+path = ".cancho-vcs-pool"
+
+[dependencies.schema]
+git = "https://github.com/alpibrusl/cancho-schema"
+rev = "5152851c7487315cb20f031c9c1c69216e5a2931"
+path = ".cancho-vcs"
+
+[dependencies.web]
+git = "https://github.com/alpibrusl/cancho-web"
+rev = "7f261354f74c322cecce9449650899091a2482a5"
+path = ".cancho-vcs"
+
+# cancho's own TLS client and the certificate verifier it needs (cancho epic #197).
+[dependencies.tls]
+git = "https://github.com/alpibrusl/cancho"
+rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+path = "packages/tls/.cancho-vcs/tls"
+
+[[bin]]
+name = "hooks-pure"
+sources = ["build/src"]
+std = true

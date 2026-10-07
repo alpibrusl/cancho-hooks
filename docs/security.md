@@ -51,25 +51,25 @@ read-token   = <32 random characters>   # the GETs: give it to dashboards and mo
 
 ## Authority
 
-The service keeps its two logs in [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) and talks to PostgreSQL through
-[`lexsys-pg`](https://github.com/alpibrusl/lexsys-pg). No `unsafe`, and foreign authority only through `Ffi`, per library, for exactly the symbols
+The service keeps its two logs in [`cancho-log`](https://github.com/alpibrusl/cancho-log) and talks to PostgreSQL through
+[`cancho-pg`](https://github.com/alpibrusl/cancho-pg). No `unsafe`, and foreign authority only through `Ffi`, per library, for exactly the symbols
 [`authority.json`](authority.json) lists, 32 in all (**the report is pinned in CI**: `scripts/check-authority.sh` regenerates it and fails on any difference, so a new foreign symbol is a red diff that only a commit of the new file turns green). **All 32 are OpenSSL's**; libc is not called through `Ffi` at all:
 
-* **The modes of the data directory** (the production profile, `src/perm.ls`) are lex-sys builtins: the directory is opened as a `Dir`, `dir_own_mode` reads its bits and `dir_mode` those of every entry in it, beneath the handle and never following a link (lex-sys `docs/directory-listing.md` §3.5; they replaced a call of libc's `statx`, lex-sys#243). That adds one capability to the report, `dir_read`.
+* **The modes of the data directory** (the production profile, `src/perm.cho`) are cancho builtins: the directory is opened as a `Dir`, `dir_own_mode` reads its bits and `dir_mode` those of every entry in it, beneath the handle and never following a link (cancho `docs/directory-listing.md` §3.5; they replaced a call of libc's `statx`, cancho#243). That adds one capability to the report, `dir_read`.
 * **Small pages for the process** are no longer asked for by the service: it called libc's `prctl` once (design.md section 46); the test harnesses now ask for them for the processes they start, which is all the measurement needs.
-* **How the service learns it was asked to stop** is not foreign either: it claims `SIGINT` and `SIGTERM` through lex-sys's signals capability (`Signals("INT,TERM")`, `src/ops.ls`) and
+* **How the service learns it was asked to stop** is not foreign either: it claims `SIGINT` and `SIGTERM` through cancho's signals capability (`Signals("INT,TERM")`, `src/ops.cho`) and
   watches the claim in the same poller as its sockets, so a stop wakes the loop at once.
-* **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/ossl.ls`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,
+* **libssl and libcrypto (OpenSSL), 32 functions**, for the TLS client of an `https` endpoint (`src/ossl.cho`, section 40): `libssl` `SSL_CTX_new`, `SSL_CTX_free`, `SSL_CTX_ctrl`,
   `SSL_CTX_set_verify`, `SSL_CTX_set_default_verify_paths`, `SSL_CTX_load_verify_file`, `TLS_client_method`, `SSL_new`, `SSL_free`, `SSL_set_bio`, `SSL_set_connect_state`,
   `SSL_do_handshake`, `SSL_read`, `SSL_write`, `SSL_shutdown`, `SSL_get_error`, `SSL_ctrl`, `SSL_get0_param`, `SSL_get_verify_result`, `SSL_session_reused`, `SSL_get1_session`,
   `SSL_set_session`, `SSL_SESSION_is_resumable`, `SSL_SESSION_free`; `libcrypto` `BIO_s_mem`, `BIO_new`, `BIO_read`, `BIO_write`, `ERR_clear_error`, `ERR_get_error`,
-  `X509_VERIFY_PARAM_set1_host`, `X509_VERIFY_PARAM_set_hostflags`. No socket reaches OpenSSL (it works on two memory buffers, and the sockets stay lex-sys connections), and no
+  `X509_VERIFY_PARAM_set1_host`, `X509_VERIFY_PARAM_set_hostflags`. No socket reaches OpenSSL (it works on two memory buffers, and the sockets stay cancho connections), and no
   function that does anything but TLS is declared. **OpenSSL is C code in the process, and the report cannot say what it does** with the bytes and the memory it is given. It is
-  the choice made to have `https` today; the TLS of lex-sys itself (`packages/tls`, lex-sys epic #197) replaces it when it can verify certificate chains (lex-sys #206) and
+  the choice made to have `https` today; the TLS of cancho itself (`packages/tls`, cancho epic #197) replaces it when it can verify certificate chains (cancho #206) and
   has been independently reviewed (#209), and the 32 symbols go with it.
 
-The authority report (`lex-sys authority`) therefore says `bounded: false`, with the symbols above under `unbounded_by`, each with the library the program says it is in (a library
-is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in lex-sys), and names the two signals. The second build, `hooks-pure` (lex-sys's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol and its report says `bounded: true`**; it is not the default until that TLS has been independently reviewed.
+The authority report (`cancho authority`) therefore says `bounded: false`, with the symbols above under `unbounded_by`, each with the library the program says it is in (a library
+is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in cancho), and names the two signals. The second build, `hooks-pure` (cancho's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol and its report says `bounded: true`**; it is not the default until that TLS has been independently reviewed.
 
 ## The audit log
 
@@ -77,7 +77,7 @@ is not an authority domain: the labels bound everything except what those symbol
 
 ## Bodies encrypted at rest
 
-With `encryption-key-file` (32 random bytes, or 64 hexadecimal digits: `openssl rand -hex 32 > hooks.key; chmod 600 hooks.key`) every event's body is stored sealed with ChaCha20-Poly1305 (RFC 8439, lex-sys's own implementation: no foreign call), with the event's id as associated data, so a sealed body cannot be moved to another record; it is opened only to be delivered or read with `GET /events/:id`. The record names the key by the start of its SHA-256, so a key can be **rotated**: start with the new key as `encryption-key-file` and the old one as `encryption-key-file-old` until retention (or `max-age-days`) has dropped the events the old one sealed. A start whose newest event is sealed by a key it was not given ends with status 47 and changes nothing. A log that began in the clear stays readable: events from before the key are read as they are.
+With `encryption-key-file` (32 random bytes, or 64 hexadecimal digits: `openssl rand -hex 32 > hooks.key; chmod 600 hooks.key`) every event's body is stored sealed with ChaCha20-Poly1305 (RFC 8439, cancho's own implementation: no foreign call), with the event's id as associated data, so a sealed body cannot be moved to another record; it is opened only to be delivered or read with `GET /events/:id`. The record names the key by the start of its SHA-256, so a key can be **rotated**: start with the new key as `encryption-key-file` and the old one as `encryption-key-file-old` until retention (or `max-age-days`) has dropped the events the old one sealed. A start whose newest event is sealed by a key it was not given ends with status 47 and changes nothing. A log that began in the clear stays readable: events from before the key are read as they are.
 
 **The key is the only way back to the bodies.** Keep it apart from the data directory and from its backups (a backup that holds the key protects nothing), and keep a copy of it as carefully as the backups themselves. Not encrypted: the event's type, its idempotency key and its id, the outcomes log, the history and the endpoints table (whose signing secrets the service needs in the clear). `docs/design.md` section 47.4.
 

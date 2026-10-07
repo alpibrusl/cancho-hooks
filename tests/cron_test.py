@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`src/cron.ls` against an independent implementation: Python's `datetime` for the calendar, sets for the fields, and a scan day
+"""`src/cron.cho` against an independent implementation: Python's `datetime` for the calendar, sets for the fields, and a scan day
 by day for the next and the last fire (docs/design.md section 32). The two do not share an algorithm or a line.
 
     python3 tests/cron_test.py build/cron_probe [cases]

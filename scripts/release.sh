@@ -1,9 +1,9 @@
 #!/bin/bash
 # Make a release: a tarball of the service and what an operator needs to run it, SHA256SUMS, and an SBOM *stub*.
 #
-#   LEX_SYS=/path/to/lex-sys scripts/release.sh [--version V] [--out DIR] [--no-build] [--allow-dirty] [--keep-symbols]
+#   CANCHO=/path/to/cancho scripts/release.sh [--version V] [--out DIR] [--no-build] [--allow-dirty] [--keep-symbols]
 #
-# It builds with `lex-sys build` (which refuses any compiler but the commit lex-sys.toml pins), then writes into --out (default dist/<name>/):
+# It builds with `cancho build` (which refuses any compiler but the commit cancho.toml pins), then writes into --out (default dist/<name>/):
 #
 #   hooks-<version>-<arch>.tar.gz          bin/hooks, bin/hooks-mcp, deploy/ (unit, settings sample, health check), scripts/ (backup, restore, logcheck),
 #                                          sql/schema.sql, docs/, README.md, LICENSE, Dockerfile, SBOM.json
@@ -56,9 +56,9 @@ name=hooks-$version-linux-$arch
 epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
 
 if [ "$build" = 1 ]; then
-  : "${LEX_SYS:?set LEX_SYS to the lex-sys compiler binary (the commit lex-sys.toml pins)}"
+  : "${CANCHO:?set CANCHO to the cancho compiler binary (the commit cancho.toml pins)}"
   rm -rf "$here/build/hooks" "$here/build/deps"
-  (cd "$here" && CC="$here/scripts/cc-ssl.sh" "$LEX_SYS" build) >&2 || die 4 "lex-sys build failed (OpenSSL's development files are needed to link: libssl-dev)"
+  (cd "$here" && CC="$here/scripts/cc-ssl.sh" "$CANCHO" build) >&2 || die 4 "cancho build failed (OpenSSL's development files are needed to link: libssl-dev)"
 fi
 [ -x "$here/build/hooks" ] || die 3 "build/hooks does not exist: build first, or drop --no-build"
 if [ "$build" = 0 ]; then echo "release: --no-build: packaging whatever build/hooks is (the SBOM records its hash, not how it was made)" >&2; fi
@@ -70,14 +70,14 @@ trap 'rm -rf "$stage"' EXIT
 root="$stage/$name"
 mkdir -p "$root/bin" "$root/deploy" "$root/scripts" "$root/sql" "$root/docs"
 cp "$here/build/hooks" "$root/bin/hooks"
-# The MCP server for agents (docs/agents.md) is a second program of the same project, built by the same `lex-sys build`.
+# The MCP server for agents (docs/agents.md) is a second program of the same project, built by the same `cancho build`.
 [ -x "$here/build/hooks-mcp" ] || die 3 "build/hooks-mcp does not exist: build first, or drop --no-build"
 cp "$here/build/hooks-mcp" "$root/bin/hooks-mcp"
-# The native log checker (tools/logcheck.ls): backup.sh and restore.sh find it beside bin/ and fall back to scripts/logcheck.py.
+# The native log checker (tools/logcheck.cho): backup.sh and restore.sh find it beside bin/ and fall back to scripts/logcheck.py.
 [ -x "$here/build/hooks-logcheck" ] || die 3 "build/hooks-logcheck does not exist: build first, or drop --no-build"
 cp "$here/build/hooks-logcheck" "$root/bin/hooks-logcheck"
 # What the compiler leaves in the binary that differs between two builds of the same sources is a temporary file's name with a process id
-# (a FILE symbol, `lex-sys-llvm-<pid>-0.ll`) and, in turn, the build-id note that hashes it. Without them the binary is bit-for-bit the same
+# (a FILE symbol, `cancho-llvm-<pid>-0.ll`) and, in turn, the build-id note that hashes it. Without them the binary is bit-for-bit the same
 # from build to build (measured: docs/runbook.md "Releases"), so that is what is shipped. --keep-symbols ships what the compiler wrote.
 if [ "$strip_it" = 1 ]; then
   command -v strip >/dev/null || die 2 "strip is needed (binutils), or --keep-symbols"
@@ -87,14 +87,14 @@ cp "$here"/deploy/hooks.service "$here"/deploy/hooks.conf.example "$here"/deploy
 cp "$here"/scripts/backup.sh "$here"/scripts/restore.sh "$here"/scripts/logcheck.py "$here"/scripts/release.sh "$root/scripts/"
 cp "$here"/sql/schema.sql "$here"/sql/queries.sql "$root/sql/"
 cp "$here"/docs/runbook.md "$here"/docs/design.md "$here"/docs/production.md "$root/docs/"
-cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/lex-sys.toml "$root/"
+cp "$here"/README.md "$here"/LICENSE "$here"/Dockerfile "$here"/cancho.toml "$root/"
 chmod 0755 "$root"/bin/* "$root/deploy/hooks-healthcheck.sh" "$root/deploy/hooks-entrypoint.sh" "$root"/scripts/*
 
 # The SBOM stub: read from the tools, and honest about what it does not list.
-python3 - "$here" "$root" "$name" "$version" "$commit" "$dirty" "${LEX_SYS:-}" "$strip_it" <<'PY' > "$out/$name.sbom.json"
+python3 - "$here" "$root" "$name" "$version" "$commit" "$dirty" "${CANCHO:-}" "$strip_it" <<'PY' > "$out/$name.sbom.json"
 import hashlib, json, os, re, shutil, subprocess, sys, tomllib
 
-here, root, name, version, commit, dirty, lex_sys, stripped = sys.argv[1:9]
+here, root, name, version, commit, dirty, cancho, stripped = sys.argv[1:9]
 
 
 def sha256(path):
@@ -112,24 +112,24 @@ def run(*cmd):
         return None
 
 
-project = tomllib.load(open(os.path.join(here, "lex-sys.toml"), "rb"))
-pinned = project["package"]["lex-sys"]
+project = tomllib.load(open(os.path.join(here, "cancho.toml"), "rb"))
+pinned = project["package"]["cancho"]
 binary = os.path.join(root, "bin", "hooks")
 
-compiler = {"pinned_by_lex_sys_toml": pinned}
-if lex_sys:
-    compiler["binary"] = lex_sys
-    compiler["reports"] = run(lex_sys, "--version")        # "lex-sys 0.0.0 (rev <commit>, host <triple>)"
+compiler = {"pinned_by_cancho_toml": pinned}
+if cancho:
+    compiler["binary"] = cancho
+    compiler["reports"] = run(cancho, "--version")        # "cancho 0.0.0 (rev <commit>, host <triple>)"
     compiler["rev_matches_pin"] = bool(compiler["reports"] and pinned in compiler["reports"])
 else:
     compiler["reports"] = None
-    compiler["note"] = "LEX_SYS was not set (--no-build): the compiler that made build/hooks is not recorded"
+    compiler["note"] = "CANCHO was not set (--no-build): the compiler that made build/hooks is not recorded"
 # The compiler's LLVM backend shells out to clang and its linker step to cc, so they shaped the binary too.
 compiler["clang"] = (run("clang", "--version") or "not found").splitlines()[0]
 compiler["cc"] = (run("cc", "--version") or "not found").splitlines()[0]
 
 # std is compiled into the compiler (it has no version of its own): the compiler commit IS the std version.
-std_modules = sorted({m for f in os.listdir(os.path.join(here, "src")) if f.endswith(".ls")
+std_modules = sorted({m for f in os.listdir(os.path.join(here, "src")) if f.endswith(".cho")
                       for m in re.findall(r"^import (std\.[a-z_0-9]+);", open(os.path.join(here, "src", f)).read(), re.M)})
 std = {"version": f"embedded in the compiler at {pinned}", "modules_imported_by_src": std_modules}
 
@@ -154,7 +154,7 @@ libraries = []
 for lib, spec in sorted(project.get("dependencies", {}).items()):
     libraries.append({"name": lib, "git": spec.get("git"), "rev": spec.get("rev"), "path": spec.get("path")})
 sbom = {
-    "format": "lexsys-hooks-sbom-stub/1",
+    "format": "cancho-hooks-sbom-stub/1",
     "complete": False,
     "read_this_first": ("A stub, not CycloneDX or SPDX: a listing of what scripts/release.sh could read from the build tools, written so "
                         "that what it leaves out is as visible as what it lists. No scanner has checked it and nothing here is signed."),
@@ -163,7 +163,7 @@ sbom = {
         "binary": {"path": "bin/hooks", "sha256": sha256(binary), "bytes": os.path.getsize(binary),
                    "normalized": ("strip --strip-all --remove-section=.note.gnu.build-id: no symbols, no build-id, so that two builds of the same "
                                   "sources on the same toolchain are byte-identical" if stripped == "1" else "no: as the compiler wrote it, with symbols")},
-        "lex_sys_toml_sha256": sha256(os.path.join(here, "lex-sys.toml")),
+        "cancho_toml_sha256": sha256(os.path.join(here, "cancho.toml")),
     },
     "other_binaries": [
         {"path": "bin/hooks-mcp", "sha256": sha256(os.path.join(root, "bin", "hooks-mcp")), "bytes": os.path.getsize(os.path.join(root, "bin", "hooks-mcp")),
@@ -171,17 +171,17 @@ sbom = {
     ],
     "compiler": compiler,
     "std": std,
-    "lex_sys_libraries_pinned_by_commit": libraries,
+    "cancho_libraries_pinned_by_commit": libraries,
     "dynamic_libraries_of_the_binary": {
         "from": "ldd on the build host; the target host supplies its own copies, which must be this glibc or newer",
         "entries": libc,
     },
-    "statically_linked_native_code": "none known beyond the foreign symbols the compiler's authority report lists, pinned in docs/authority.json (scripts/check-authority.sh): libc (statx, src/perm.ls), and libssl and libcrypto for the TLS client of an https endpoint (src/ossl.ls), which are the dynamic libraries above; not verified by this script",
+    "statically_linked_native_code": "none known beyond the foreign symbols the compiler's authority report lists, pinned in docs/authority.json (scripts/check-authority.sh): libc (statx, src/perm.cho), and libssl and libcrypto for the TLS client of an https endpoint (src/ossl.cho), which are the dynamic libraries above; not verified by this script",
     "not_listed": [
         "the Rust toolchain that built the compiler (named by the compiler repository's rust-toolchain.toml at the pinned commit)",
         "the crates the compiler was built from (its Cargo.lock at the pinned commit)",
         "LLVM and the linker behind clang and cc beyond the version lines above",
-        "the contents of the libraries' own dependencies, if they had any (lex-sys libraries record theirs in their own lex-sys.toml)",
+        "the contents of the libraries' own dependencies, if they had any (cancho libraries record theirs in their own cancho.toml)",
         "the base image and its packages, for the container image (the Dockerfile does not pin a digest)",
         "any signature, attestation or provenance statement",
     ],

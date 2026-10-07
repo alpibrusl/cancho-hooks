@@ -51,7 +51,7 @@ REFUSED = [
     "127.0.0.1", "127.255.255.254", "10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254",
     "169.254.0.1", "100.64.0.1", "100.127.255.255", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.255", "240.0.0.1", "255.255.255.255",
     "192.0.0.8", "192.0.2.1", "192.88.99.1", "198.18.0.1", "198.19.1.1", "198.51.100.1", "203.0.113.1",
-    # neither a literal nor a name in the sense of destination.ls: a short or number form, a leading zero, IPv6, junk, a scheme, a path, a port, a user
+    # neither a literal nor a name in the sense of destination.cho: a short or number form, a leading zero, IPv6, junk, a scheme, a path, a port, a user
     "127.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "127.0.0.01", "010.0.0.1",
     "1.2.3", "1.2.3.4.5", "256.1.1.1", "::1", "[::1]", "::ffff:127.0.0.1", "1.1.1.1.", "example.com.", "-a.example", "a..example", "a b.example",
     "http://example.com", "ftp://example.com", "example.com/hook", "example.com:8080", "user@example.com", "*.example.com", "exa_mple.com/",

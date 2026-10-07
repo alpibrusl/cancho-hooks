@@ -424,7 +424,7 @@ def stage_chaos(events=600, threads=6, mean_ms=120):
 # ---- 8. a log that cannot be written ------------------------------------------------------------------------------
 
 def stage_broken():
-    """A failed write breaks the log (lexsys-log): everything is refused with 503 until a restart, a repeat of a held key
+    """A failed write breaks the log (cancho-log): everything is refused with 503 until a restart, a repeat of a held key
     included (whether its record reached the disk is no longer known), and a restart finds every acknowledged key."""
     import resource
     import signal

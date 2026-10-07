@@ -63,27 +63,27 @@ jobs:
         with:
           path: hooks
 
-      - name: Read the compiler pin from lex-sys.toml
+      - name: Read the compiler pin from cancho.toml
         id: pin
-        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' hooks/cancho.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
-          repository: alpibrusl/lex-sys
+          repository: alpibrusl/cancho
           ref: ${{ steps.pin.outputs.rev }}
-          path: lex-sys
+          path: cancho
 
       - name: Cache the compiler
         id: compiler
         uses: actions/cache@v4
         with:
-          path: lex-sys/target/release/lex-sys
-          key: lex-sys-${{ steps.pin.outputs.rev }}
+          path: cancho/target/release/cancho
+          key: cancho-${{ steps.pin.outputs.rev }}
 
-      - name: Build lex-sys
+      - name: Build cancho
         if: steps.compiler.outputs.cache-hit != 'true'
-        working-directory: lex-sys
-        run: cargo build --release -p lex-sys
+        working-directory: cancho
+        run: cargo build --release -p cancho
 
       - name: OpenSSL and the PostgreSQL client
         run: |
@@ -93,7 +93,7 @@ jobs:
 
       - name: Build the service and the shims
         working-directory: hooks
-        run: LEX_SYS=../lex-sys/target/release/lex-sys scripts/build.sh
+        run: CANCHO=../cancho/target/release/cancho scripts/build.sh
 
       - name: The harness against itself (the checker must catch every mutation of a ledger)
         working-directory: hooks

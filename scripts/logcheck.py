@@ -4,9 +4,9 @@
     python3 scripts/logcheck.py check DIR [--kv]     # JSON report on stdout (or key=value lines); exit 0 if consistent, 1 if not
     python3 scripts/logcheck.py trim FILE            # cut FILE to its valid prefix (for a COPY: never run on a live file)
 
-The format is lexsys-log's (its docs/design.md section 4): `len u32 | crc u32 | ms u64 | seq u64 | fields u32 | pairs...`, the CRC
+The format is cancho-log's (its docs/design.md section 4): `len u32 | crc u32 | ms u64 | seq u64 | fields u32 | pairs...`, the CRC
 being CRC-32C over everything after `len`. The reader is the one `tests/chaos.py` uses, written separately from the service.
-`delivery.seg` records are the 40-byte outcomes of `src/state.ls` (`put_outcome`): kind, endpoint, event, attempts, next attempt.
+`delivery.seg` records are the 40-byte outcomes of `src/state.cho` (`put_outcome`): kind, endpoint, event, attempts, next attempt.
 
 What is checked, and why each one matters to a restore:
 
@@ -24,7 +24,7 @@ What is checked, and why each one matters to a restore:
   * a torn tail in the LAST segment is reported, and is harmless: the service cuts it at start (and says so). A last segment that is empty or
     whose header is cut is a roll caught half-done: it holds no event and is ignored, as the service ignores it. A sealed segment must end
     exactly at a record. Damage in the middle of a file is a
-    problem: the service refuses to start on it (status 19) unless given `--repair-logs 1`. The rule is the service's (src/logguard.ls)
+    problem: the service refuses to start on it (status 19) unless given `--repair-logs 1`. The rule is the service's (src/logguard.cho)
     and this file is its reference: after the last whole record, the bytes are damage if a record that validates starts anywhere in
     them, or if they parse as two records of plausible length one after the other; otherwise they are a torn tail (an unfinished
     write, a page of zeros). A last record that is whole but corrupt looks the same as a torn one: the service cuts it too, and so
@@ -47,7 +47,7 @@ REASONS = {0: "none", 1: "connect_refused", 2: "connect_timeout", 3: "connect_er
            7: "reset", 8: "closed_early", 9: "bad_response", 10: "status_3xx", 11: "status_4xx", 12: "status_5xx", 13: "gone",
            14: "status_other", 15: "busy", 16: "too_large",
            17: "dns_failed", 18: "dns_timeout", 19: "ssrf_refused", 20: "tls_handshake", 21: "cert_untrusted", 22: "cert_expired", 23: "cert_hostname", 24: "cert_invalid",
-           25: "tls_timeout", 26: "tls_error"}   # src/reason.ls; kind 14 holds one in its fifth field, plus 256 for a replay's attempt
+           25: "tls_timeout", 26: "tls_error"}   # src/reason.cho; kind 14 holds one in its fifth field, plus 256 for a replay's attempt
 CREATED = 10                          # `attempts` is the endpoint's starting cursor: an event id (or 0)
 
 try:  # a C implementation if one happens to be installed; the table below is the fallback and the same function
@@ -123,7 +123,7 @@ def read_log(data, headers=False):
         if not total:
             break
         ms, _seq, fields = struct.unpack_from("<QQI", data, at + 8)
-        if (ms, _seq) <= prev:       # ids strictly increase within a log (lexsys-log `segment.scan`): a record that goes backwards is where the log stops
+        if (ms, _seq) <= prev:       # ids strictly increase within a log (cancho-log `segment.scan`): a record that goes backwards is where the log stops
             break
         prev = (ms, _seq)
         p, pairs = at + 28, []
@@ -144,7 +144,7 @@ _PLAUSIBLE = re.compile(rb"(?=(?:[\x18-\xff].|[\x00-\x17][\x01-\xff])\x00\x00|\x
 
 
 def classify_tail(data, end):
-    """What the bytes after the last valid record (`data[end:]`) are, by the service's rule (src/logguard.ls): a dict with
+    """What the bytes after the last valid record (`data[end:]`) are, by the service's rule (src/logguard.cho): a dict with
     `kind` "clean", "torn" (an unfinished write or a page of zeros: safe to cut) or "damage" (a record that validates starts after
     the first bad place, or the bytes parse as two records of plausible length in a row: cutting would throw away intact records, or
     ones a crash does not produce), and the numbers the service reports: `tail` bytes, `found_at` (the offset of the first intact

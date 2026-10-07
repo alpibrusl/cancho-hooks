@@ -3,7 +3,7 @@
 
     HOOKS_PG=host:port:user:database python3 tests/leak_test.py build/hooks        (the database's endpoints, attempts and schedules are truncated)
 
-A region that is left by a `return` is not given back (lex-sys #252): at least one 64 KiB chunk a call, of which at least a page becomes resident. The soak
+A region that is left by a `return` is not given back (cancho #252): at least one 64 KiB chunk a call, of which at least a page becomes resident. The soak
 found it on every call that changes something in the database: a `PATCH` kept 134 to 203 KB, a create and a delete 27 KB, a bulk replay of dead letters 9 KB,
 a fire 18 KB. Each kind of call is made here in two rounds; the first warms what is resident only as it is used (the windows, the hash slots of the two
 idempotency indexes, which are made small with `--idem-keys`, so that they warm in seconds), and the second may keep at most 1 KiB a call. A page a call is

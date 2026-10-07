@@ -1,4 +1,4 @@
-# /etc/hooks/hooks.conf: the settings of lexsys-hooks (docs/design.md section 20, README "Settings", docs/runbook.md).
+# /etc/hooks/hooks.conf: the settings of cancho-hooks (docs/design.md section 20, README "Settings", docs/runbook.md).
 # One `key = value` a line; `#` only on a line of its own. The flags of the command line are applied after this file and win.
 #
 # THIS FILE HOLDS SECRETS (the tokens, pg-password): install it root:hooks, mode 0640, and keep it out of version control.

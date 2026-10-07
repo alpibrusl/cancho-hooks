@@ -8,7 +8,7 @@ sent when a person enables it.
 The service cannot be made to wait five days, so the test writes the records the service itself would have written five days ago: a
 `streak` record (kind 12: endpoint, and in the fifth field when its run of failed attempts began, Unix ms) is put in `delivery.seg` before
 the service starts, with a time 5 days and an hour back (an old binary reads it as an ordinary record of the slot). The service
-counts days in milliseconds on the Unix clock, the rule itself is unit-tested at its boundary (`tests/state_test.ls`), and here the
+counts days in milliseconds on the Unix clock, the rule itself is unit-tested at its boundary (`tests/state_test.cho`), and here the
 end-to-end part is checked at the granularity of an hour either side of a day.
 
   1. a failed attempt begins a run, written once with its time (one `streak` record however many attempts fail), shown as `failing_since`
@@ -59,7 +59,7 @@ def check(name, ok, detail=""):
         FAILS.append(name)
 
 
-# ---- the outcome log, read and written here (the format of src/state.ls `put_outcome`) ------------------------------
+# ---- the outcome log, read and written here (the format of src/state.cho `put_outcome`) ------------------------------
 
 def put_record(seq, kind, slot, event=0, attempts=0, next_at=0):
     value = struct.pack("<5Q", kind, slot, event, attempts, next_at)

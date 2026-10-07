@@ -9,11 +9,11 @@ set -euo pipefail
 tag=${1:?usage: release-notes.sh <tag> <0|1>}
 pre=${2:-1}
 version=${tag#v}
-repo=alpibrusl/lexsys-hooks
+repo=alpibrusl/cancho-hooks
 
 if [ "$pre" = 1 ]; then
 cat <<'TEXT'
-**Alpha.** The API may still change, and nothing here is certified for production: the 24-hour chaos soak on a release candidate and an independent review of lex-sys's own TLS decide when that changes (what is and is not done: [docs/status.md](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md)). Open source under the EUPL-1.2, provided as is, without warranty: you run it at your own responsibility.
+**Alpha.** The API may still change, and nothing here is certified for production: the 24-hour chaos soak on a release candidate and an independent review of cancho's own TLS decide when that changes (what is and is not done: [docs/status.md](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md)). Open source under the EUPL-1.2, provided as is, without warranty: you run it at your own responsibility.
 
 TEXT
 fi
@@ -60,5 +60,5 @@ For x86-64 only. The image is built by the same workflow from the same commit.
 ## Not claimed
 
 * Reproducibility was measured on one OS and architecture (the same Ubuntu toolchain gives the same bytes after the normalisation \`release.sh\` applies: docs/runbook.md, "Releases"). A different toolchain or architecture is not claimed to give the same bytes, and the container's base image is a tag, not a digest.
-* No build for macOS or Windows, and no build of \`hooks-pure\` (the variant with lex-sys's own TLS and no foreign function; [docs/pure-tls.md](https://github.com/${repo}/blob/main/docs/pure-tls.md)): it is built from source.
+* No build for macOS or Windows, and no build of \`hooks-pure\` (the variant with cancho's own TLS and no foreign function; [docs/pure-tls.md](https://github.com/${repo}/blob/main/docs/pure-tls.md)): it is built from source.
 TEXT

@@ -5,7 +5,7 @@
 
   erase   300 events, each with a word of its own in its body; one endpoint delivers, one refuses until it is let go (so its window holds events that wait for a
           retry). Event 150 is erased: 200; `GET` and a replay are 410; a second DELETE says it was already; the word of event 150 is in no file of the data
-          directory (read as bytes), the words of 149 and 151 are; every segment is read whole by lexsys-log's reader in chaos.py, event 150's body is
+          directory (read as bytes), the words of 149 and 151 are; every segment is read whole by cancho-log's reader in chaos.py, event 150's body is
           `{"erased":true}` and spaces to its old length; when the second endpoint is let go it is sent every event but 150; a restart agrees; logcheck passes
   active  the newest event (in the segment being written) is erased: the segment is sealed first and the word is gone
   kill    kill -9 at each step of the rewrite (compact-kill-at 34, 35, 36): a start finishes the erasure (the word gone, 410)
@@ -74,7 +74,7 @@ def all_bytes(d):
 
 
 def segment_events(d):
-    """Every event of every segment, read by chaos.py's reader (lexsys-log records): {id: body}, and whether every file read whole."""
+    """Every event of every segment, read by chaos.py's reader (cancho-log records): {id: body}, and whether every file read whole."""
     events, whole = {}, True
     for p in sorted(glob.glob(os.path.join(d, "events*.seg"))):
         data = open(p, "rb").read()

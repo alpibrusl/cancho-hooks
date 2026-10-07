@@ -47,7 +47,7 @@ PG_PASSWORD = os.environ.get("HOOKS_PG_PASSWORD", "")
 PSQL_ENV = dict(os.environ, PGPASSWORD=PG_PASSWORD) if PG_PASSWORD else dict(os.environ)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILS = []
-LIMIT = 1024          # the slots there are (src/state.ls `max_endpoints`; design section 41: it was 62)
+LIMIT = 1024          # the slots there are (src/state.cho `max_endpoints`; design section 41: it was 62)
 CREATED, REMOVED = 10, 11
 DELIVERED, FAILED = 1, 2
 

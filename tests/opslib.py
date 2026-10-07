@@ -334,7 +334,7 @@ def outcomes(d):
 
 
 def put_record(seq, kind, slot, event=0, attempts=0, next_at=0):
-    """One outcome record as the service writes it (src/state.ls `put_outcome`): the log's record around five 8-byte integers."""
+    """One outcome record as the service writes it (src/state.cho `put_outcome`): the log's record around five 8-byte integers."""
     value = struct.pack("<5Q", kind, slot, event, attempts, next_at)
     body = struct.pack("<QQI", seq, 0, 1) + struct.pack("<I", 1) + b"o" + struct.pack("<I", len(value)) + value
     return struct.pack("<I", 4 + len(body)) + struct.pack("<I", chaos.crc32c(body)) + body

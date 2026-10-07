@@ -1,0 +1,681 @@
+edition 5;
+
+module api;
+
+import std.buffer;
+import schema;
+import web;
+
+// `api` -- the service's HTTP API, declared once (`docs/design.md` section 52).
+//
+// This is the one place that says what the routes are. `cancho-web`'s `web.operation` registers each route in the router the service
+// uses (`routes`), and everything declared after it about that operation (its parameters, its body, every answer, the tokens that may
+// call it) is what `web.openapi` writes into `docs/openapi.json` (`document`, printed by `tools/openapi.cho`). The bodies and answers are
+// `cancho-schema` nodes. The document is therefore not written by hand: `scripts/openapi.sh --check` regenerates it and fails on any
+// difference from the committed file.
+//
+// **The ids.** `web.operation` numbers the routes 1, 2, 3 ... in the order they are declared here, and `hooks.cho`'s `handle` branches on
+// those numbers, as does the table of `authz.cho`. THE ORDER OF THE DECLARATIONS BELOW IS THE NUMBERING: a route is added at the end, and
+// the table gets its line (`tests/authz_test.py` fails if the table and the declarations disagree on a method, a path or a scope).
+//
+// **The tokens.** What an operation declares here (`secure`) is documentation. The gate is `authz.scope_of`, which this file does not
+// read and which does not read this file; `tests/authz_test.py` and `tests/openapi_test.py` require the two to agree, operation by operation.
+
+fn title() -> [] &static [byte] {
+    return "cancho-hooks";
+}
+
+fn version() -> [] &static [byte] {
+    return "0.1.0";
+}
+
+// 0 open, 1 ingest, 2 read, 3 admin (`authz.s_*`, in the same order; the table there is what is enforced). Ingest and read are
+// accepted with the admin token as well, as `authz.judge` does.
+fn secure[&h](heap: &!h Heap, api: web.Api, op: int, scope: int) -> [heap] web.Api {
+    var a = api;
+    if scope == 0 {
+        return web.no_auth(heap, a, op);
+    }
+    if scope == 1 {
+        a = web.require(heap, a, op, "ingest");
+    }
+    if scope == 2 {
+        a = web.require(heap, a, op, "read");
+    }
+    return web.require(heap, a, op, "admin");
+}
+
+// The two answers of every operation that needs a token (`authz.refuse`).
+fn refused[&h](heap: &!h Heap, api: web.Api, op: int) -> [heap] web.Api {
+    let a = web.respond_error(heap, api, op, 401, "A token is configured and none, or a wrong one, was sent.");
+    return web.respond_error(heap, a, op, 403, "The token is of a scope that does not reach this route, or the route needs the admin token and the service has none configured.");
+}
+
+// Fields of an object node, one call each: a field of a plain type, or (`f_node`) of a node built beforehand. `required` says the field is
+// always there in an answer, or must be there in a request.
+fn f_node[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], node: int, required: bool) -> [heap] schema.Schema {
+    return schema.add_field(heap, s, object, name, node, required);
+}
+
+fn f_int[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t, n) = schema.new_int(heap, s, schema.int_min(), schema.int_max());
+    return schema.add_field(heap, t, object, name, n, required);
+}
+
+fn f_text[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t, n) = schema.new_string(heap, s, 0, schema.int_max());
+    return schema.add_field(heap, t, object, name, n, required);
+}
+
+fn f_flag[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t, n) = schema.new_bool(heap, s);
+    return schema.add_field(heap, t, object, name, n, required);
+}
+
+fn f_any[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t, n) = schema.new_any(heap, s);
+    return schema.add_field(heap, t, object, name, n, required);
+}
+
+fn f_ints[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t1, item) = schema.new_int(heap, s, schema.int_min(), schema.int_max());
+    let (t2, n) = schema.new_array(heap, t1, item, 0, schema.int_max());
+    return schema.add_field(heap, t2, object, name, n, required);
+}
+
+fn f_texts[&h](heap: &!h Heap, s: schema.Schema, object: int, name: &static [byte], required: bool) -> [heap] schema.Schema {
+    let (t1, item) = schema.new_string(heap, s, 0, schema.int_max());
+    let (t2, n) = schema.new_array(heap, t1, item, 0, schema.int_max());
+    return schema.add_field(heap, t2, object, name, n, required);
+}
+
+// The API and the schema its nodes are in. The schema is needed to write the document, not to route.
+pub fn declare[&h](heap: &!h Heap) -> [heap] (web.Api, schema.Schema) {
+    var s = schema.empty(heap);
+
+    // The shapes the operations share (named components of the document)
+    let (t1, c_Error) = schema.new_object(heap, s, false);
+    s = t1;
+    s = f_text(heap, s, c_Error, "error", true);
+
+    let (t2, c_Attempt) = schema.new_object(heap, s, false);
+    s = t2;
+    s = f_int(heap, s, c_Attempt, "endpoint", true);
+    s = f_any(heap, s, c_Attempt, "replay", false);
+    s = f_int(heap, s, c_Attempt, "attempt", true);
+    s = f_text(heap, s, c_Attempt, "outcome", true);
+    // not expressible in the schema node yet (component Attempt.status): The HTTP status, or -1 could not connect, -2 could not send, -3 timed out, -4 no answer.
+    s = f_int(heap, s, c_Attempt, "status", true);
+    s = f_text(heap, s, c_Attempt, "reason", true);
+    s = f_int(heap, s, c_Attempt, "at", false);
+    s = f_int(heap, s, c_Attempt, "latency_ms", false);
+
+    let (t3, c_Endpoint) = schema.new_object(heap, s, false);
+    s = t3;
+    s = f_int(heap, s, c_Endpoint, "id", true);
+    s = f_int(heap, s, c_Endpoint, "port", true);
+    let (t4, c_Endpoint_scheme) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t4;
+    s = schema.add_choice(heap, s, c_Endpoint_scheme, "http");
+    s = schema.add_choice(heap, s, c_Endpoint_scheme, "https");
+    s = f_node(heap, s, c_Endpoint, "scheme", c_Endpoint_scheme, true);
+    s = f_int(heap, s, c_Endpoint, "cursor", false);
+    s = f_flag(heap, s, c_Endpoint, "disabled", true);
+    s = f_flag(heap, s, c_Endpoint, "paused", true);
+    // not expressible in the schema node yet (component Endpoint.failing_since): Unix ms at which the current run of failures began; 0 if none.
+    s = f_int(heap, s, c_Endpoint, "failing_since", false);
+    s = f_texts(heap, s, c_Endpoint, "types", true);
+    // not expressible in the schema node yet (component Endpoint.headers): The names of the custom headers, not their values.
+    s = f_texts(heap, s, c_Endpoint, "headers", false);
+    // not expressible in the schema node yet (component Endpoint.secret_old_until): Unix ms until which the previous secret signs as well; 0: none.
+    s = f_int(heap, s, c_Endpoint, "secret_old_until", false);
+    s = f_int(heap, s, c_Endpoint, "concurrency", false);
+    s = f_int(heap, s, c_Endpoint, "rate", false);
+
+    // not expressible in the schema node yet (component EndpointCreate): Give `url`, or `host` and `port`.
+    let (t5, c_EndpointCreate) = schema.new_object(heap, s, false);
+    s = t5;
+    s = f_text(heap, s, c_EndpointCreate, "url", false);
+    s = f_text(heap, s, c_EndpointCreate, "host", false);
+    s = f_int(heap, s, c_EndpointCreate, "port", false);
+    let (t6, c_EndpointCreate_scheme) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t6;
+    s = schema.add_choice(heap, s, c_EndpointCreate_scheme, "http");
+    s = schema.add_choice(heap, s, c_EndpointCreate_scheme, "https");
+    s = f_node(heap, s, c_EndpointCreate, "scheme", c_EndpointCreate_scheme, false);
+    // not expressible in the schema node yet (component EndpointCreate.secret): `whsec_` and base64. The service makes one if left out.
+    s = f_text(heap, s, c_EndpointCreate, "secret", false);
+    s = f_texts(heap, s, c_EndpointCreate, "types", false);
+    // not expressible: every other member is {"type": "string"}
+    let (t7, c_EndpointCreate_headers) = schema.new_object(heap, s, false);
+    s = t7;
+    s = f_node(heap, s, c_EndpointCreate, "headers", c_EndpointCreate_headers, false);
+    s = f_int(heap, s, c_EndpointCreate, "concurrency", false);
+    s = f_int(heap, s, c_EndpointCreate, "rate", false);
+    let (t8, c_EndpointCreate_from) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t8;
+    s = schema.add_choice(heap, s, c_EndpointCreate_from, "now");
+    s = f_node(heap, s, c_EndpointCreate, "from", c_EndpointCreate_from, false);
+
+    let (t9, c_EndpointChange) = schema.new_object(heap, s, false);
+    s = t9;
+    s = f_text(heap, s, c_EndpointChange, "url", false);
+    s = f_text(heap, s, c_EndpointChange, "host", false);
+    s = f_int(heap, s, c_EndpointChange, "port", false);
+    let (t10, c_EndpointChange_scheme) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t10;
+    s = schema.add_choice(heap, s, c_EndpointChange_scheme, "http");
+    s = schema.add_choice(heap, s, c_EndpointChange_scheme, "https");
+    s = f_node(heap, s, c_EndpointChange, "scheme", c_EndpointChange_scheme, false);
+    s = f_text(heap, s, c_EndpointChange, "secret", false);
+    // not expressible in the schema node yet (component EndpointChange.rotate): The service makes a new secret; not with `secret`.
+    s = f_flag(heap, s, c_EndpointChange, "rotate", false);
+    s = f_texts(heap, s, c_EndpointChange, "types", false);
+    // not expressible: every other member is {"type": "string"}
+    let (t11, c_EndpointChange_headers) = schema.new_object(heap, s, false);
+    s = t11;
+    s = f_node(heap, s, c_EndpointChange, "headers", c_EndpointChange_headers, false);
+    s = f_int(heap, s, c_EndpointChange, "concurrency", false);
+    s = f_int(heap, s, c_EndpointChange, "rate", false);
+    // not expressible in the schema node yet (component EndpointChange.keep_old_ms): Keep the secret this one replaces valid for this long; both signatures on every delivery meanwhile.
+    s = f_int(heap, s, c_EndpointChange, "keep_old_ms", false);
+    s = f_flag(heap, s, c_EndpointChange, "keep_old", false);
+
+    let (t12, c_DeadLetter) = schema.new_object(heap, s, false);
+    s = t12;
+    s = f_int(heap, s, c_DeadLetter, "event", true);
+    s = f_text(heap, s, c_DeadLetter, "type", false);
+    s = f_int(heap, s, c_DeadLetter, "attempts", true);
+    s = f_text(heap, s, c_DeadLetter, "reason", true);
+    s = f_int(heap, s, c_DeadLetter, "died_at", false);
+    s = f_flag(heap, s, c_DeadLetter, "replaying", false);
+
+    let (t13, c_ReplayDead) = schema.new_object(heap, s, false);
+    s = t13;
+    s = f_int(heap, s, c_ReplayDead, "endpoint", true);
+    s = f_int(heap, s, c_ReplayDead, "taken", true);
+    s = f_int(heap, s, c_ReplayDead, "remaining", true);
+    s = f_int(heap, s, c_ReplayDead, "waiting", false);
+    s = f_any(heap, s, c_ReplayDead, "next", false);
+
+    let (t14, c_Schedule) = schema.new_object(heap, s, false);
+    s = t14;
+    s = f_int(heap, s, c_Schedule, "id", true);
+    s = f_text(heap, s, c_Schedule, "expr", true);
+    s = f_text(heap, s, c_Schedule, "type", true);
+    s = f_any(heap, s, c_Schedule, "body", false);
+    s = f_flag(heap, s, c_Schedule, "enabled", true);
+    s = f_any(heap, s, c_Schedule, "created_at", false);
+    s = f_any(heap, s, c_Schedule, "last_fired", false);
+    let (t15, c_Schedule_next_fire) = schema.new_int(heap, s, schema.int_min(), schema.int_max());
+    s = t15;
+    s = schema.make_nullable(s, c_Schedule_next_fire);
+    s = f_node(heap, s, c_Schedule, "next_fire", c_Schedule_next_fire, false);
+    let (t16, c_Schedule_next_fire_at) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t16;
+    s = schema.make_nullable(s, c_Schedule_next_fire_at);
+    s = f_node(heap, s, c_Schedule, "next_fire_at", c_Schedule_next_fire_at, false);
+
+    var api = web.empty(heap);
+    api = web.about(heap, api, "A self-hosted webhook delivery service.", "Events are on disk before the answer to `POST /events`, then signed (Standard Webhooks), retried and replayable. Delivery is at least once: a receiver drops a repeat by `webhook-id` (`evt_<id>`). Every route, its scope and its answers are also described in docs/api.md. This document is generated from the declaration the service routes with (src/api.cho).");
+    api = web.bearer_scheme(heap, api, "ingest", "The ingest token (POST /events).");
+    api = web.bearer_scheme(heap, api, "read", "The read token.");
+    api = web.bearer_scheme(heap, api, "admin", "The admin token; it also does what the other two do.");
+    api = web.component(heap, api, "Error", c_Error);
+    api = web.component(heap, api, "Attempt", c_Attempt);
+    api = web.component(heap, api, "Endpoint", c_Endpoint);
+    api = web.component(heap, api, "EndpointCreate", c_EndpointCreate);
+    api = web.component(heap, api, "EndpointChange", c_EndpointChange);
+    api = web.component(heap, api, "DeadLetter", c_DeadLetter);
+    api = web.component(heap, api, "ReplayDead", c_ReplayDead);
+    api = web.component(heap, api, "Schedule", c_Schedule);
+
+    // 1. GET /healthz
+    let (t17, r_healthz_200) = schema.new_object(heap, s, false);
+    s = t17;
+    s = f_flag(heap, s, r_healthz_200, "ok", true);
+    let (a1, op1) = web.operation(heap, api, "GET", "/healthz", "healthz");
+    api = a1;
+    api = web.summary(heap, api, op1, "Liveness: the process is up and its loop turns");
+    api = secure(heap, api, op1, 0);
+    api = web.respond(heap, api, op1, 200, "Always 200 while the loop turns, even with the disk full.", r_healthz_200);
+
+    // 2. POST /events
+    let (t18, p_idempotency_key) = schema.new_string(heap, s, 1, 255);
+    s = t18;
+    let (t19, b_postEvent) = schema.new_object(heap, s, false);
+    s = t19;
+    s = f_text(heap, s, b_postEvent, "type", true);
+    let (t20, r_postEvent_202) = schema.new_object(heap, s, false);
+    s = t20;
+    s = f_int(heap, s, r_postEvent_202, "id", true);
+    let (a2, op2) = web.operation(heap, api, "POST", "/events", "postEvent");
+    api = a2;
+    api = web.summary(heap, api, op2, "Post an event");
+    api = secure(heap, api, op2, 1);
+    api = web.header_param(heap, api, op2, "Idempotency-Key", p_idempotency_key, false);
+    api = web.describe_param(heap, api, op2, "Idempotency-Key", "1 to 255 visible ASCII characters. The same key returns the same answer, across crashes.");
+    api = web.body(heap, api, op2, b_postEvent);
+    api = web.respond(heap, api, op2, 202, "On disk (flushed) before this answer.", r_postEvent_202);
+    api = web.respond_error(heap, api, op2, 400, "A bad or doubled Idempotency-Key.");
+    api = web.respond_error(heap, api, op2, 413, "The event is too large (about 65,499 bytes less its type and key).");
+    api = web.respond_error(heap, api, op2, 422, "Not a JSON object with a string `type`, or a key already used for a different event.");
+    api = web.respond_error(heap, api, op2, 507, "`idem-keys` keys are held and fresh.");
+    api = web.respond_error(heap, api, op2, 503, "The log is broken.");
+    api = refused(heap, api, op2);
+
+    // 3. GET /events/{id}
+    let (t21, p_id) = schema.new_int(heap, s, 1, schema.int_max());
+    s = t21;
+    let (t22, r_getEvent_200) = schema.new_object(heap, s, false);
+    s = t22;
+    let (a3, op3) = web.operation(heap, api, "GET", "/events/:id", "getEvent");
+    api = a3;
+    api = web.summary(heap, api, op3, "Read a stored event");
+    api = secure(heap, api, op3, 2);
+    api = web.path_param(heap, api, op3, "id", p_id);
+    api = web.respond(heap, api, op3, 200, "The event as it was posted.", r_getEvent_200);
+    api = web.respond_error(heap, api, op3, 404, "An id that was never given.");
+    api = web.respond_error(heap, api, op3, 410, "Dropped by retention, or erased. Ids are never given twice.");
+    api = refused(heap, api, op3);
+
+    // 4. GET /stats
+    // not expressible in the schema node yet: every member beyond these four is an integer or a boolean (docs/api.md lists them)
+    let (t23, r_getStats_200) = schema.new_object(heap, s, false);
+    s = t23;
+    s = f_int(heap, s, r_getStats_200, "endpoints", true);
+    s = f_int(heap, s, r_getStats_200, "delivered", true);
+    s = f_int(heap, s, r_getStats_200, "failed", true);
+    s = f_int(heap, s, r_getStats_200, "dead", true);
+    let (a4, op4) = web.operation(heap, api, "GET", "/stats", "getStats");
+    api = a4;
+    api = web.summary(heap, api, op4, "Counters since the start");
+    api = secure(heap, api, op4, 2);
+    api = web.respond(heap, api, op4, 200, "Integer counters; the full list is in docs/api.md.", r_getStats_200);
+    api = refused(heap, api, op4);
+
+    // 5. GET /config
+    let (t24, r_getConfig_200) = schema.new_object(heap, s, false);
+    s = t24;
+    s = f_any(heap, s, r_getConfig_200, "schedule", true);
+    s = f_any(heap, s, r_getConfig_200, "production", true);
+    let (a5, op5) = web.operation(heap, api, "GET", "/config", "getConfig");
+    api = a5;
+    api = web.summary(heap, api, op5, "The settings in force (never a token or a secret)");
+    api = secure(heap, api, op5, 2);
+    api = web.respond(heap, api, op5, 200, "Settings.", r_getConfig_200);
+    api = refused(heap, api, op5);
+
+    // 6. POST /endpoints/{id}/enable
+    let (a6, op6) = web.operation(heap, api, "POST", "/endpoints/:id/enable", "enableEndpoint");
+    api = a6;
+    api = web.summary(heap, api, op6, "Enable an endpoint a 410 or the circuit breaker disabled");
+    api = secure(heap, api, op6, 3);
+    api = web.path_param(heap, api, op6, "id", p_id);
+    api = web.respond(heap, api, op6, 200, "Whether or not it was disabled.", r_getEvent_200);
+    api = web.respond_error(heap, api, op6, 404, "Unknown id.");
+    api = refused(heap, api, op6);
+
+    // 7. GET /endpoints
+    // not expressible in the schema node yet (GET /endpoints limit): the default is 64
+    let (t25, p_limit) = schema.new_int(heap, s, 1, 256);
+    s = t25;
+    let (t26, p_offset) = schema.new_int(heap, s, 0, schema.int_max());
+    s = t26;
+    let (t27, r_listEndpoints_200) = schema.new_array(heap, s, c_Endpoint, 0, schema.int_max());
+    s = t27;
+    let (a7, op7) = web.operation(heap, api, "GET", "/endpoints", "listEndpoints");
+    api = a7;
+    api = web.summary(heap, api, op7, "List endpoints");
+    api = secure(heap, api, op7, 2);
+    api = web.query_param(heap, api, op7, "limit", p_limit, false);
+    api = web.query_param(heap, api, op7, "offset", p_offset, false);
+    api = web.respond(heap, api, op7, 200, "Endpoints in table order; paged when there are many.", r_listEndpoints_200);
+    api = web.respond_error(heap, api, op7, 400, "A bad parameter.");
+    api = refused(heap, api, op7);
+
+    // 8. POST /events/{id}/replay
+    let (t28, r_replayEvent_202) = schema.new_object(heap, s, false);
+    s = t28;
+    s = f_int(heap, s, r_replayEvent_202, "event", true);
+    // not expressible in the schema node yet (POST /events/{id}/replay 202.endpoints): The endpoints it was queued for.
+    s = f_ints(heap, s, r_replayEvent_202, "endpoints", true);
+    let (a8, op8) = web.operation(heap, api, "POST", "/events/:id/replay", "replayEvent");
+    api = a8;
+    api = web.summary(heap, api, op8, "Send an event again to every endpoint that subscribes to its type");
+    api = secure(heap, api, op8, 3);
+    api = web.path_param(heap, api, op8, "id", p_id);
+    api = web.respond(heap, api, op8, 202, "Replays are waiting.", r_replayEvent_202);
+    api = web.respond_error(heap, api, op8, 404, "Unknown event.");
+    api = web.respond_error(heap, api, op8, 410, "The event was dropped.");
+    api = web.respond_error(heap, api, op8, 507, "32 replays already wait.");
+    api = refused(heap, api, op8);
+
+    // 9. POST /events/{id}/replay/{endpoint}
+    let (a9, op9) = web.operation(heap, api, "POST", "/events/:id/replay/:endpoint", "replayEventTo");
+    api = a9;
+    api = web.summary(heap, api, op9, "Send an event again to one endpoint, whatever it subscribes to");
+    api = secure(heap, api, op9, 3);
+    api = web.path_param(heap, api, op9, "id", p_id);
+    api = web.path_param(heap, api, op9, "endpoint", p_offset);
+    api = web.respond(heap, api, op9, 202, "A replay is waiting.", r_replayEvent_202);
+    api = web.respond_error(heap, api, op9, 404, "Unknown event or endpoint.");
+    api = web.respond_error(heap, api, op9, 410, "The event was dropped.");
+    api = web.respond_error(heap, api, op9, 507, "32 replays already wait.");
+    api = refused(heap, api, op9);
+
+    // 10. GET /events/{id}/attempts
+    let (t29, r_getAttempts_200) = schema.new_array(heap, s, c_Attempt, 0, schema.int_max());
+    s = t29;
+    let (a10, op10) = web.operation(heap, api, "GET", "/events/:id/attempts", "getAttempts");
+    api = a10;
+    api = web.summary(heap, api, op10, "The attempts of an event (from the database)");
+    api = secure(heap, api, op10, 2);
+    api = web.path_param(heap, api, op10, "id", p_id);
+    api = web.respond(heap, api, op10, 200, "Attempts, oldest first.", r_getAttempts_200);
+    api = web.respond_error(heap, api, op10, 503, "No database is named, or it cannot answer.");
+    api = web.respond_error(heap, api, op10, 504, "The database did not answer in five seconds.");
+    api = refused(heap, api, op10);
+
+    // 11. POST /endpoints
+    let (t30, r_createEndpoint_201) = schema.new_object(heap, s, false);
+    s = t30;
+    s = f_int(heap, s, r_createEndpoint_201, "id", true);
+    s = f_text(heap, s, r_createEndpoint_201, "host", true);
+    s = f_text(heap, s, r_createEndpoint_201, "scheme", true);
+    s = f_int(heap, s, r_createEndpoint_201, "port", true);
+    s = f_text(heap, s, r_createEndpoint_201, "secret", true);
+    s = f_text(heap, s, r_createEndpoint_201, "from", false);
+    s = f_int(heap, s, r_createEndpoint_201, "cursor", false);
+    let (a11, op11) = web.operation(heap, api, "POST", "/endpoints", "createEndpoint");
+    api = a11;
+    api = web.summary(heap, api, op11, "Create an endpoint");
+    api = web.describe(heap, api, op11, "Needs a database and an admin token. The endpoint gets the events from now on, not the log's past.");
+    api = secure(heap, api, op11, 3);
+    api = web.body(heap, api, op11, c_EndpointCreate);
+    api = web.respond(heap, api, op11, 201, "Created. The secret is in this answer and in no other.", r_createEndpoint_201);
+    api = web.respond_error(heap, api, op11, 400, "With the reason.");
+    api = web.respond_error(heap, api, op11, 409, "Another change waits, or 1,024 exist.");
+    api = web.respond_error(heap, api, op11, 503, "No database is named, or it refused.");
+    api = web.respond_error(heap, api, op11, 504, "The database did not answer in five seconds (the row may still have been stored).");
+    api = refused(heap, api, op11);
+
+    // 12. GET /endpoints/{id}
+    let (a12, op12) = web.operation(heap, api, "GET", "/endpoints/:id", "getEndpoint");
+    api = a12;
+    api = web.summary(heap, api, op12, "One endpoint");
+    api = secure(heap, api, op12, 2);
+    api = web.path_param(heap, api, op12, "id", p_id);
+    api = web.respond(heap, api, op12, 200, "The endpoint.", c_Endpoint);
+    api = web.respond_error(heap, api, op12, 400, "Not a number.");
+    api = web.respond_error(heap, api, op12, 404, "Unknown id.");
+    api = refused(heap, api, op12);
+
+    // 13. PATCH /endpoints/{id}
+    let (t31, r_changeEndpoint_200) = schema.new_object(heap, s, false);
+    s = t31;
+    s = f_int(heap, s, r_changeEndpoint_200, "id", true);
+    s = f_text(heap, s, r_changeEndpoint_200, "host", false);
+    s = f_text(heap, s, r_changeEndpoint_200, "scheme", false);
+    s = f_int(heap, s, r_changeEndpoint_200, "port", false);
+    s = f_text(heap, s, r_changeEndpoint_200, "secret", false);
+    s = f_int(heap, s, r_changeEndpoint_200, "secret_old_until", false);
+    let (a13, op13) = web.operation(heap, api, "PATCH", "/endpoints/:id", "changeEndpoint");
+    api = a13;
+    api = web.summary(heap, api, op13, "Change an endpoint, or rotate its secret");
+    api = secure(heap, api, op13, 3);
+    api = web.path_param(heap, api, op13, "id", p_id);
+    api = web.body(heap, api, op13, c_EndpointChange);
+    api = web.respond(heap, api, op13, 200, "Changed. `secret` is present when the change brought or made one; it is in this answer and in no other.", r_changeEndpoint_200);
+    api = web.respond_error(heap, api, op13, 400, "With a reason.");
+    api = web.respond_error(heap, api, op13, 404, "Unknown id or a row that is gone.");
+    api = web.respond_error(heap, api, op13, 409, "Another change waits.");
+    api = web.respond_error(heap, api, op13, 503, "The database refuses (nothing changes).");
+    api = refused(heap, api, op13);
+
+    // 14. DELETE /endpoints/{id}
+    let (t32, r_deleteEndpoint_200) = schema.new_object(heap, s, false);
+    s = t32;
+    s = f_int(heap, s, r_deleteEndpoint_200, "id", true);
+    s = f_flag(heap, s, r_deleteEndpoint_200, "deleted", true);
+    s = f_flag(heap, s, r_deleteEndpoint_200, "draining", false);
+    s = f_text(heap, s, r_deleteEndpoint_200, "row", false);
+    let (a14, op14) = web.operation(heap, api, "DELETE", "/endpoints/:id", "deleteEndpoint");
+    api = a14;
+    api = web.summary(heap, api, op14, "Remove an endpoint");
+    api = secure(heap, api, op14, 3);
+    api = web.path_param(heap, api, op14, "id", p_id);
+    api = web.respond(heap, api, op14, 200, "Removed.", r_deleteEndpoint_200);
+    api = web.respond_error(heap, api, op14, 400, "Not a number.");
+    api = web.respond_error(heap, api, op14, 404, "Unknown id.");
+    api = web.respond_error(heap, api, op14, 409, "Another change waits, or all slots are taken.");
+    api = web.respond_error(heap, api, op14, 503, "The database refuses (nothing changes).");
+    api = web.respond_error(heap, api, op14, 504, "The database did not answer in five seconds.");
+    api = refused(heap, api, op14);
+
+    // 15. POST /schedules
+    let (t33, b_createSchedule) = schema.new_object(heap, s, false);
+    s = t33;
+    s = f_text(heap, s, b_createSchedule, "expr", true);
+    s = f_text(heap, s, b_createSchedule, "type", true);
+    s = f_any(heap, s, b_createSchedule, "body", false);
+    s = f_flag(heap, s, b_createSchedule, "enabled", false);
+    let (a15, op15) = web.operation(heap, api, "POST", "/schedules", "createSchedule");
+    api = a15;
+    api = web.summary(heap, api, op15, "Create a schedule");
+    api = web.describe(heap, api, op15, "A schedule counts from now: it does not fire for the time before it existed. A fire is an ordinary event.");
+    api = secure(heap, api, op15, 3);
+    api = web.body(heap, api, op15, b_createSchedule);
+    api = web.respond(heap, api, op15, 201, "Created.", c_Schedule);
+    api = web.respond_error(heap, api, op15, 400, "With the reason.");
+    api = web.respond_error(heap, api, op15, 409, "64 schedules exist.");
+    api = refused(heap, api, op15);
+
+    // 16. GET /schedules
+    let (t34, r_listSchedules_200) = schema.new_array(heap, s, c_Schedule, 0, schema.int_max());
+    s = t34;
+    let (a16, op16) = web.operation(heap, api, "GET", "/schedules", "listSchedules");
+    api = a16;
+    api = web.summary(heap, api, op16, "List schedules");
+    api = secure(heap, api, op16, 3);
+    api = web.respond(heap, api, op16, 200, "The schedules.", r_listSchedules_200);
+    api = refused(heap, api, op16);
+
+    // 17. GET /schedules/{id}
+    let (a17, op17) = web.operation(heap, api, "GET", "/schedules/:id", "getSchedule");
+    api = a17;
+    api = web.summary(heap, api, op17, "One schedule");
+    api = secure(heap, api, op17, 3);
+    api = web.path_param(heap, api, op17, "id", p_id);
+    api = web.respond(heap, api, op17, 200, "The schedule.", c_Schedule);
+    api = web.respond_error(heap, api, op17, 404, "Unknown id.");
+    api = refused(heap, api, op17);
+
+    // 18. PATCH /schedules/{id}
+    let (t35, b_changeSchedule) = schema.new_object(heap, s, false);
+    s = t35;
+    s = f_text(heap, s, b_changeSchedule, "expr", false);
+    s = f_text(heap, s, b_changeSchedule, "type", false);
+    s = f_any(heap, s, b_changeSchedule, "body", false);
+    s = f_flag(heap, s, b_changeSchedule, "enabled", false);
+    let (a18, op18) = web.operation(heap, api, "PATCH", "/schedules/:id", "changeSchedule");
+    api = a18;
+    api = web.summary(heap, api, op18, "Change a schedule");
+    api = secure(heap, api, op18, 3);
+    api = web.path_param(heap, api, op18, "id", p_id);
+    api = web.body(heap, api, op18, b_changeSchedule);
+    api = web.respond(heap, api, op18, 200, "The schedule.", c_Schedule);
+    api = web.respond_error(heap, api, op18, 400, "Not a change.");
+    api = web.respond_error(heap, api, op18, 404, "Unknown id.");
+    api = refused(heap, api, op18);
+
+    // 19. DELETE /schedules/{id}
+    let (t36, r_deleteSchedule_200) = schema.new_object(heap, s, false);
+    s = t36;
+    s = f_int(heap, s, r_deleteSchedule_200, "id", true);
+    s = f_flag(heap, s, r_deleteSchedule_200, "deleted", true);
+    let (a19, op19) = web.operation(heap, api, "DELETE", "/schedules/:id", "deleteSchedule");
+    api = a19;
+    api = web.summary(heap, api, op19, "Remove a schedule");
+    api = secure(heap, api, op19, 3);
+    api = web.path_param(heap, api, op19, "id", p_id);
+    api = web.respond(heap, api, op19, 200, "Removed.", r_deleteSchedule_200);
+    api = web.respond_error(heap, api, op19, 404, "Unknown id.");
+    api = refused(heap, api, op19);
+
+    // 20. GET /endpoints/{id}/dead
+    let (t37, p_limit) = schema.new_int(heap, s, 1, 1000);
+    s = t37;
+    let (t38, p_order) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t38;
+    s = schema.add_choice(heap, s, p_order, "asc");
+    s = schema.add_choice(heap, s, p_order, "desc");
+    let (t39, p_after) = schema.new_int(heap, s, schema.int_min(), schema.int_max());
+    s = t39;
+    let (t40, r_listDeadLetters_200) = schema.new_object(heap, s, false);
+    s = t40;
+    s = f_int(heap, s, r_listDeadLetters_200, "endpoint", true);
+    s = f_text(heap, s, r_listDeadLetters_200, "order", true);
+    s = f_int(heap, s, r_listDeadLetters_200, "held", false);
+    s = f_flag(heap, s, r_listDeadLetters_200, "truncated", false);
+    s = f_int(heap, s, r_listDeadLetters_200, "complete_above", false);
+    let (t41, r_listDeadLetters_200_dead) = schema.new_array(heap, s, c_DeadLetter, 0, schema.int_max());
+    s = t41;
+    s = f_node(heap, s, r_listDeadLetters_200, "dead", r_listDeadLetters_200_dead, true);
+    let (t42, r_listDeadLetters_200_next) = schema.new_int(heap, s, schema.int_min(), schema.int_max());
+    s = t42;
+    s = schema.make_nullable(s, r_listDeadLetters_200_next);
+    s = f_node(heap, s, r_listDeadLetters_200, "next", r_listDeadLetters_200_next, false);
+    let (a20, op20) = web.operation(heap, api, "GET", "/endpoints/:id/dead", "listDeadLetters");
+    api = a20;
+    api = web.summary(heap, api, op20, "The endpoint's dead letters, a page of them");
+    api = secure(heap, api, op20, 2);
+    api = web.path_param(heap, api, op20, "id", p_id);
+    api = web.query_param(heap, api, op20, "limit", p_limit, false);
+    api = web.query_param(heap, api, op20, "order", p_order, false);
+    api = web.query_param(heap, api, op20, "after", p_after, false);
+    api = web.describe_param(heap, api, op20, "after", "An event id.");
+    api = web.respond(heap, api, op20, 200, "A page.", r_listDeadLetters_200);
+    api = web.respond_error(heap, api, op20, 400, "A bad parameter.");
+    api = web.respond_error(heap, api, op20, 404, "Unknown endpoint.");
+    api = refused(heap, api, op20);
+
+    // 21. POST /endpoints/{id}/replay-dead
+    let (t43, b_replayDead) = schema.new_object(heap, s, false);
+    s = t43;
+    let (t44, b_replayDead_limit) = schema.new_int(heap, s, 1, 2048);
+    s = t44;
+    s = f_node(heap, s, b_replayDead, "limit", b_replayDead_limit, false);
+    s = f_texts(heap, s, b_replayDead, "types", false);
+    s = f_int(heap, s, b_replayDead, "after", false);
+    let (a21, op21) = web.operation(heap, api, "POST", "/endpoints/:id/replay-dead", "replayDead");
+    api = a21;
+    api = web.summary(heap, api, op21, "Send the endpoint's dead letters again, oldest first");
+    api = secure(heap, api, op21, 3);
+    api = web.path_param(heap, api, op21, "id", p_id);
+    api = web.optional_body(heap, api, op21, b_replayDead);
+    api = web.respond(heap, api, op21, 200, "Nothing more to take, or a page taken.", c_ReplayDead);
+    api = web.respond(heap, api, op21, 202, "Taken; call again until `remaining` is 0.", c_ReplayDead);
+    api = web.respond_error(heap, api, op21, 400, "A bad body.");
+    api = web.respond_error(heap, api, op21, 404, "Unknown endpoint.");
+    api = refused(heap, api, op21);
+
+    // 22. DELETE /events/{id}/replay/{endpoint}
+    let (t45, r_cancelReplay_200) = schema.new_object(heap, s, false);
+    s = t45;
+    s = f_int(heap, s, r_cancelReplay_200, "event", true);
+    s = f_int(heap, s, r_cancelReplay_200, "endpoint", true);
+    s = f_int(heap, s, r_cancelReplay_200, "cancelled", true);
+    s = f_int(heap, s, r_cancelReplay_200, "busy", true);
+    let (a22, op22) = web.operation(heap, api, "DELETE", "/events/:id/replay/:endpoint", "cancelReplay");
+    api = a22;
+    api = web.summary(heap, api, op22, "Take back a waiting replay");
+    api = secure(heap, api, op22, 3);
+    api = web.path_param(heap, api, op22, "id", p_id);
+    api = web.path_param(heap, api, op22, "endpoint", p_offset);
+    api = web.respond(heap, api, op22, 200, "Cancelled (durably, before this answer).", r_cancelReplay_200);
+    api = web.respond_error(heap, api, op22, 400, "An id or endpoint that is not a number.");
+    api = web.respond_error(heap, api, op22, 404, "No such replay waits.");
+    api = web.respond_error(heap, api, op22, 409, "An attempt of it is on the wire.");
+    api = refused(heap, api, op22);
+
+    // 23. DELETE /endpoints/{id}/replays
+    let (t46, r_cancelReplays_200) = schema.new_object(heap, s, false);
+    s = t46;
+    s = f_int(heap, s, r_cancelReplays_200, "endpoint", true);
+    s = f_int(heap, s, r_cancelReplays_200, "cancelled", true);
+    s = f_int(heap, s, r_cancelReplays_200, "busy", true);
+    let (a23, op23) = web.operation(heap, api, "DELETE", "/endpoints/:id/replays", "cancelReplays");
+    api = a23;
+    api = web.summary(heap, api, op23, "Take back every waiting replay of the endpoint");
+    api = secure(heap, api, op23, 3);
+    api = web.path_param(heap, api, op23, "id", p_id);
+    api = web.respond(heap, api, op23, 200, "Done.", r_cancelReplays_200);
+    api = web.respond_error(heap, api, op23, 404, "Unknown endpoint.");
+    api = refused(heap, api, op23);
+
+    // 24. DELETE /events/{id}
+    let (t47, r_eraseEvent_200) = schema.new_object(heap, s, false);
+    s = t47;
+    s = f_int(heap, s, r_eraseEvent_200, "id", true);
+    s = f_flag(heap, s, r_eraseEvent_200, "erased", true);
+    s = f_flag(heap, s, r_eraseEvent_200, "already", false);
+    let (a24, op24) = web.operation(heap, api, "DELETE", "/events/:id", "eraseEvent");
+    api = a24;
+    api = web.summary(heap, api, op24, "Erase one event's body");
+    api = web.describe(heap, api, op24, "Not erased: type, idempotency key, id, size, history rows, and backups taken before.");
+    api = secure(heap, api, op24, 3);
+    api = web.path_param(heap, api, op24, "id", p_id);
+    api = web.respond(heap, api, op24, 200, "Erased (`already` is true the second time).", r_eraseEvent_200);
+    api = web.respond_error(heap, api, op24, 404, "An id never given.");
+    api = web.respond_error(heap, api, op24, 410, "Dropped by retention; nothing is left.");
+    api = web.respond_error(heap, api, op24, 503, "The erasure could not be stored (nothing changed) or the segment could not be rewritten now (erased for delivery and reading; rewritten at the next start).");
+    api = refused(heap, api, op24);
+
+    // 25. GET /readyz
+    let (t48, r_readyz_200) = schema.new_object(heap, s, false);
+    s = t48;
+    s = f_flag(heap, s, r_readyz_200, "ready", true);
+    let (t49, r_readyz_503) = schema.new_object(heap, s, false);
+    s = t49;
+    s = f_flag(heap, s, r_readyz_503, "ready", true);
+    let (t50, r_readyz_503_check) = schema.new_string(heap, s, 0, schema.int_max());
+    s = t50;
+    s = schema.add_choice(heap, s, r_readyz_503_check, "stopping");
+    s = schema.add_choice(heap, s, r_readyz_503_check, "events_log");
+    s = schema.add_choice(heap, s, r_readyz_503_check, "delivery_log");
+    s = schema.add_choice(heap, s, r_readyz_503_check, "data_dir");
+    s = schema.add_choice(heap, s, r_readyz_503_check, "database");
+    s = f_node(heap, s, r_readyz_503, "check", r_readyz_503_check, true);
+    s = f_text(heap, s, r_readyz_503, "reason", false);
+    let (a25, op25) = web.operation(heap, api, "GET", "/readyz", "readyz");
+    api = a25;
+    api = web.summary(heap, api, op25, "Readiness");
+    api = secure(heap, api, op25, 0);
+    api = web.respond(heap, api, op25, 200, "Ready.", r_readyz_200);
+    api = web.respond(heap, api, op25, 503, "Not ready.", r_readyz_503);
+
+    // 26. GET /metrics
+    let (a26, op26) = web.operation(heap, api, "GET", "/metrics", "getMetrics");
+    api = a26;
+    api = web.summary(heap, api, op26, "Prometheus metrics (text exposition format 0.0.4)");
+    api = secure(heap, api, op26, 2);
+    api = web.query_param(heap, api, op26, "page", p_offset, false);
+    api = web.describe_param(heap, api, op26, "page", "Pages of 64 endpoints; page 0 also has the service's series.");
+    api = web.respond_text(heap, api, op26, 200, "Metrics.");
+    api = refused(heap, api, op26);
+
+    return (api, s);
+}
+
+// The router: every route, by the id `handle` tests (the schema is not kept).
+pub fn routes[&h](heap: &!h Heap) -> [heap] web.Api {
+    let (api, s) = declare(heap);
+    schema.drop(heap, s);
+    return api;
+}
+
+// The OpenAPI document of a declaration (`declare`), compact JSON.
+pub fn document[&h, &a, &s](heap: &!h Heap, api: &a web.Api, sc: &s schema.Schema) -> [heap] buffer.Buffer {
+    return web.openapi(heap, api, sc, title(), version());
+}

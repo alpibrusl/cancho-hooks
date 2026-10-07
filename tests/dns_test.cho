@@ -1,0 +1,215 @@
+edition 5;
+
+import std.test;
+import dns;
+
+// `src/dns.cho` (`docs/design.md` section 40): a query for the A record of a name, and the answer to it. The answer is bytes from the network, so the parser is total: a known
+// answer, the errors it must name, and a million damaged answers, each passed as a slice exactly as long as the message so that a read past its end is a trap and not a quiet
+// read of the buffer's tail. (From the cancho TLS spike's `dns_fuzz.cho`, where it was written.)
+
+fn put16[&b](m: &!b [byte], at: int, v: int) -> [] int {
+    m[at] = byte_of(v / 256 % 256);
+    m[at + 1] = byte_of(v % 256);
+    return at + 2;
+}
+
+fn put32[&b](m: &!b [byte], at: int, v: int) -> [] int {
+    put16(m, at, v / 65536);
+    put16(m, at + 2, v % 65536);
+    return at + 4;
+}
+
+// A response to `hooks.example.com`: a CNAME, then two A records (93.184.216.34 and 10.0.0.7). Answers its length.
+fn good_answer[&b](m: &!b [byte], id: int) -> [] int {
+    let q = dns.build_query("hooks.example.com", id, m, 0);
+    // Flags: a response, recursion desired and available.
+    m[2] = byte_of(129);
+    m[3] = byte_of(128);
+    put16(m, 6, 3);
+    var at = q;
+    // CNAME hooks.example.com -> <pointer to the question's name>, TTL 60.
+    at = put16(m, at, 49164);
+    at = put16(m, at, 5);
+    at = put16(m, at, 1);
+    at = put32(m, at, 60);
+    at = put16(m, at, 2);
+    at = put16(m, at, 49164);
+    // A 93.184.216.34, TTL 300.
+    at = put16(m, at, 49164);
+    at = put16(m, at, 1);
+    at = put16(m, at, 1);
+    at = put32(m, at, 300);
+    at = put16(m, at, 4);
+    m[at] = byte_of(93);
+    m[at + 1] = byte_of(184);
+    m[at + 2] = byte_of(216);
+    m[at + 3] = byte_of(34);
+    at = at + 4;
+    // A 10.0.0.7, TTL 120.
+    at = put16(m, at, 49164);
+    at = put16(m, at, 1);
+    at = put16(m, at, 1);
+    at = put32(m, at, 120);
+    at = put16(m, at, 4);
+    m[at] = byte_of(10);
+    m[at + 1] = byte_of(0);
+    m[at + 2] = byte_of(0);
+    m[at + 3] = byte_of(7);
+    return at + 4;
+}
+
+fn next(x: int) -> [] int {
+    return (x * 1103515245 + 12345) % 2147483648;
+}
+
+fn test_a_known_answer_is_read() -> [] int {
+    region a {
+        let m = alloc_slice[a](600, byte_of(0));
+        let addrs = alloc_slice[a](dns.addrs_size(), 0);
+        let n = good_answer(m, 4660);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), 2);
+        test.assert_eq(addrs[0], 93 * 16777216 + 184 * 65536 + 216 * 256 + 34);
+        test.assert_eq(addrs[1], 10 * 16777216 + 7);
+        // the smallest TTL of the A records, not the CNAME's
+        test.assert_eq(addrs[dns.max_addrs()], 120);
+    }
+    return 0;
+}
+
+fn test_the_errors_have_their_names() -> [] int {
+    region a {
+        let m = alloc_slice[a](600, byte_of(0));
+        let addrs = alloc_slice[a](dns.addrs_size(), 0);
+        let n = good_answer(m, 4660);
+        test.assert_eq(dns.parse(m[0..n], n, 4661, addrs), dns.wrong_id());
+        test.assert_eq(dns.parse(m[0..11], 11, 4660, addrs), dns.malformed());
+        test.assert_eq(dns.parse(m[0..n - 30], n - 30, 4660, addrs), dns.malformed());
+        // a query is not a response
+        m[2] = byte_of(1);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), dns.not_a_response());
+        // the TC bit
+        m[2] = byte_of(131);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), dns.truncated());
+        m[2] = byte_of(129);
+        // NXDOMAIN, SERVFAIL, REFUSED
+        m[3] = byte_of(131);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), dns.rcode_error(3));
+        m[3] = byte_of(130);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), dns.rcode_error(2));
+        m[3] = byte_of(133);
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs), dns.rcode_error(5));
+        // an addrs array that is too small
+        test.assert_eq(dns.parse(m[0..n], n, 4660, addrs[0..3]), dns.malformed());
+    }
+    return 0;
+}
+
+fn test_a_name_with_no_address_is_a_count_of_zero() -> [] int {
+    region a {
+        let m = alloc_slice[a](600, byte_of(0));
+        let addrs = alloc_slice[a](dns.addrs_size(), 0);
+        let q = dns.build_query("hooks.example.com", 9, m, 0);
+        m[2] = byte_of(129);
+        m[3] = byte_of(128);
+        test.assert_eq(dns.parse(m[0..q], q, 9, addrs), 0);
+    }
+    return 0;
+}
+
+fn test_the_query_builder() -> [] int {
+    region a {
+        let q = alloc_slice[a](600, byte_of(0));
+        // a.b.example.org: 2 + 2 + 8 + 4 + 1 = 17 name bytes, 12 header, 4 tail
+        test.assert_eq(dns.build_query("a.b.example.org.", 7, q, 0), 33);
+        test.assert_eq(dns.build_query("a.b.example.org", 7, q, 0), 33);
+        test.assert_eq(int_of(q[0]), 0);
+        test.assert_eq(int_of(q[1]), 7);
+        // one question, recursion desired, type A, class IN
+        test.assert_eq(int_of(q[2]), 1);
+        test.assert_eq(int_of(q[5]), 1);
+        test.assert_eq(int_of(q[12]), 1);
+        test.assert_eq(int_of(q[13]), 'a');
+        test.assert_eq(int_of(q[28]), 0);
+        test.assert_eq(int_of(q[29]), 0);
+        test.assert_eq(int_of(q[30]), 1);
+        test.assert_eq(int_of(q[31]), 0);
+        test.assert_eq(int_of(q[32]), 1);
+        test.assert(dns.build_query("", 7, q, 0) < 0);
+        test.assert(dns.build_query("a..b", 7, q, 0) < 0);
+        test.assert(dns.build_query(".a", 7, q, 0) < 0);
+        test.assert(dns.build_query("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com", 7, q, 0) < 0);
+        test.assert(dns.build_query("example.com", 7, q[0..20], 0) < 0);
+        // after an offset, as the two-byte TCP length needs
+        test.assert_eq(dns.build_query("example.com", 258, q, 2), 29);
+        test.assert_eq(int_of(q[2]), 1);
+        test.assert_eq(int_of(q[3]), 2);
+    }
+    return 0;
+}
+
+fn test_an_address_is_written_as_dotted_decimal() -> [] int {
+    region a {
+        let out = alloc_slice[a](20, byte_of(0));
+        test.assert_eq(dns.put_dotted(out, 0, 93 * 16777216 + 184 * 65536 + 216 * 256 + 34), 13);
+        test.assert_eq(int_of(out[0]), '9');
+        test.assert_eq(int_of(out[2]), '.');
+        test.assert_eq(int_of(out[12]), '4');
+        test.assert_eq(dns.put_dotted(out, 0, 0), 7);
+        test.assert_eq(dns.put_dotted(out, 0, 2130706433), 9);
+        test.assert_eq(dns.put_dotted(out, 0, 4294967295), 15);
+    }
+    return 0;
+}
+
+// 1,000,000 damaged answers: 600,000 with 1 to 4 random bytes replaced and a random cut (400,000 aimed at the header and the first 60 bytes), 400,000 random strings. None traps
+// (the test would be killed by the trap) and none claims more addresses than there is room for.
+fn test_a_million_damaged_answers_are_all_answered() -> [] int {
+    region a {
+        let m = alloc_slice[a](600, byte_of(0));
+        let w = alloc_slice[a](600, byte_of(0));
+        let addrs = alloc_slice[a](dns.addrs_size(), 0);
+        let n = good_answer(m, 4660);
+        var x = 42;
+        var k = 0;
+        while k < 1000000 {
+            var len_used = n;
+            if k < 600000 {
+                var j = 0;
+                while j < n {
+                    w[j] = m[j];
+                    j = j + 1;
+                }
+                x = next(x);
+                let changes = 1 + x / 65536 % 4;
+                var t = 0;
+                while t < changes {
+                    x = next(x);
+                    var at = x / 256 % n;
+                    if k >= 400000 {
+                        at = x / 256 % 60;
+                    }
+                    x = next(x);
+                    w[at] = byte_of(x / 256 % 256);
+                    t = t + 1;
+                }
+                x = next(x);
+                if x / 4096 % 3 == 0 {
+                    len_used = x / 256 % (n + 1);
+                }
+            } else {
+                var j = 0;
+                x = next(x);
+                len_used = x / 256 % 600;
+                while j < len_used {
+                    x = next(x);
+                    w[j] = byte_of(x / 256 % 256);
+                    j = j + 1;
+                }
+            }
+            let got = dns.parse(w[0..len_used], len_used, 4660, addrs);
+            test.assert(got <= dns.max_addrs());
+            k = k + 1;
+        }
+    }
+    return 0;
+}

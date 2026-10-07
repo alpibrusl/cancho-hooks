@@ -515,7 +515,7 @@ def stage_quiet():
     check("quiet: 1,024 endpoints whose attempts failed and wait are not all looked at in each turn (fewer than a quarter on average, in at least 4 turns)", turns >= 4 and looks < N * turns / 4, f"{looks} looks in {turns} turns")
     check("quiet: ... and their retries are made when due (the second attempt of each, then a third)", wait_for(lambda: svc.stats()["attempts"] >= 3 * N, 90), str(svc.stats()["attempts"]))
     svc.stop()
-    # A turn walks a bounded number of cells of windows (hooks.ls most_walk(): 65,536). 1,024 endpoints that have failed 100 events each have 102,400 cells that are not
+    # A turn walks a bounded number of cells of windows (hooks.cho most_walk(): 65,536). 1,024 endpoints that have failed 100 events each have 102,400 cells that are not
     # final and not due, which each endpoint reads once to learn when to look again: more than one turn may walk. The turns that stop for it do not wait for the timer
     # (/stats waits_skipped), the walk is finished, and then nothing is looked at while the retries wait. (Without the bound it is one turn of about 100 ms.)
     mk.reset_db()

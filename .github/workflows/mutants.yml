@@ -45,30 +45,30 @@ jobs:
         with:
           path: hooks
 
-      - name: Read the compiler pin from lex-sys.toml
+      - name: Read the compiler pin from cancho.toml
         if: steps.used.outputs.go == '1'
         id: pin
-        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' hooks/cancho.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         if: steps.used.outputs.go == '1'
         with:
-          repository: alpibrusl/lex-sys
+          repository: alpibrusl/cancho
           ref: ${{ steps.pin.outputs.rev }}
-          path: lex-sys
+          path: cancho
 
       - name: Cache the compiler
         if: steps.used.outputs.go == '1'
         id: compiler
         uses: actions/cache@v4
         with:
-          path: lex-sys/target/release/lex-sys
-          key: lex-sys-${{ steps.pin.outputs.rev }}
+          path: cancho/target/release/cancho
+          key: cancho-${{ steps.pin.outputs.rev }}
 
-      - name: Build lex-sys
+      - name: Build cancho
         if: steps.used.outputs.go == '1' && steps.compiler.outputs.cache-hit != 'true'
-        working-directory: lex-sys
-        run: cargo build --release -p lex-sys
+        working-directory: cancho
+        run: cargo build --release -p cancho
 
       - name: OpenSSL, the PostgreSQL client and the reference library
         if: steps.used.outputs.go == '1'
@@ -97,7 +97,7 @@ jobs:
         env:
           HOOKS_PG: 127.0.0.1:5432:postgres:hooks
           HOOKS_PG_PASSWORD: pgpass
-          LEX_SYS: ${{ github.workspace }}/lex-sys/target/release/lex-sys
+          CANCHO: ${{ github.workspace }}/cancho/target/release/cancho
         run: |
           echo "shard ${{ matrix.shard }}: ${{ steps.ids.outputs.ids }}"
           python3 scripts/mutate.py "${{ github.event.inputs.list || 'tests/mutants/many.py' }}" ${{ steps.ids.outputs.ids }}

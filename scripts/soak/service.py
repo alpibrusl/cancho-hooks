@@ -21,7 +21,7 @@ def _small_pages():
 
 # lines the service says on its own (docs/runbook.md 3.1); anything else on standard error is invariant L
 KNOWN_STDERR = ("listening", "hooks: the database: ", "hooks: endpoints loaded: ", "hooks: stopping on SIG", "hooks: stopped: ", "hooks: endpoint ",
-                # what retention says at each step (src/compact.ls); docs/runbook.md 3.1 lists only the lines of the start and the stop
+                # what retention says at each step (src/compact.cho); docs/runbook.md 3.1 lists only the lines of the start and the stop
                 "hooks: events log: sealed a segment", "hooks: events log: dropped a segment", "hooks: events log: removed ", "hooks: events log: an endpoint that was away",
                 "hooks: delivery.seg: replaced by a snapshot")
 

@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lexsys-hooks</title>
-<meta name="description" content="Self-hosted webhook delivery that survives failure: on disk before you get the answer, signed, retried, replayable. One small binary written in lex-sys. Alpha.">
-<meta property="og:title" content="lexsys-hooks: webhooks that survive failure">
+<title>cancho-hooks</title>
+<meta name="description" content="Self-hosted webhook delivery that survives failure: on disk before you get the answer, signed, retried, replayable. One small binary written in cancho. Alpha.">
+<meta property="og:title" content="cancho-hooks: webhooks that survive failure">
 <meta property="og:description" content="Post an event once. It is on disk before the answer, signed, and delivered at least once, through crashes, outages and slow receivers.">
 <meta name="color-scheme" content="light dark">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://alpibrusl.github.io/lexsys-hooks/og.png">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-hooks/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="lexsys-hooks: webhooks that survive failure. On disk, then 202; signed and rotatable; retry and replay.">
+<meta property="og:image:alt" content="cancho-hooks: webhooks that survive failure. On disk, then 202; signed and rotatable; retry and replay.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta property="og:url" content="https://alpibrusl.github.io/lexsys-hooks/">
+<meta property="og:url" content="https://alpibrusl.github.io/cancho-hooks/">
 <style>
 :root {
   --bg: #fbfbfd; --fg: #14171c; --muted: #5b6573; --line: #e1e4ea; --surface: #ffffff; --soft: #f1f3f8;
@@ -119,10 +119,10 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="top"><div class="wrap">
-  <a class="brand" href="#top">lexsys-hooks</a>
+  <a class="brand" href="#top">cancho-hooks</a>
   <nav aria-label="Sections">
     <a href="#why" class="opt">Why</a><a href="#proof" class="opt">Evidence</a><a href="#fit" class="opt">Where it fits</a><a href="#start">Try it</a>
-    <a href="https://github.com/alpibrusl/lexsys-hooks">GitHub</a>
+    <a href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
   </nav>
 </div></header>
 
@@ -215,14 +215,14 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
   <p class="sub">Kill the process. Cut the database. Make receivers hang, reset and lie. Run it under load. Then a separate checker looks at every event for loss, repetition and bad signatures.</p>
   <figure class="figure wide">
     <img src="figures/soak.svg" alt="Timeline of a soak run: kills, database faults and bursts, and how far behind the endpoints that must keep up were; it rises in each fault and returns to nearly zero.">
-    <figcaption>The first 4.7 hours of run 3, a 24-hour chaos run; it later ended inconclusive when the test harness itself ran out of capacity (see the soak notes). Each red tick is a <code>kill -9</code> as a power cut; each amber bar, a database cut, frozen or black-holed. Every rise returns to nearly zero. <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/soak.md">What it checks, and what the first two runs found</a>.</figcaption>
+    <figcaption>The first 4.7 hours of run 3, a 24-hour chaos run; it later ended inconclusive when the test harness itself ran out of capacity (see the soak notes). Each red tick is a <code>kill -9</code> as a power cut; each amber bar, a database cut, frozen or black-holed. Every rise returns to nearly zero. <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/soak.md">What it checks, and what the first two runs found</a>.</figcaption>
   </figure>
   <p class="note"><a href="evidence.html">The tests, what they found, and how each claim was measured</a></p>
   <div class="stats">
     <div><b>kill -9</b><span>and power cuts, at random instants and at every step of a compaction</span></div>
     <div><b>50</b><span>test programs against the real binary, with receivers that hang, reset and lie</span></div>
     <div><b>548</b><span>signature checks against the reference Standard Webhooks library</span></div>
-    <div><b>226</b><span>unit tests in lex-sys, and mutation testing of each new piece</span></div>
+    <div><b>226</b><span>unit tests in cancho, and mutation testing of each new piece</span></div>
   </div>
 </section>
 
@@ -259,17 +259,17 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
 
 <section id="start">
   <h2>Try it</h2>
-  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/lexsys-hooks &amp;&amp; cd lexsys-hooks
+  <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho-hooks &amp;&amp; cd cancho-hooks
 scripts/build.sh                                  # one binary: build/hooks
 mkdir data &amp;&amp; echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" &gt; data/endpoints.conf
 build/hooks --port 8080 --dir data --allow-private-hosts 1 &amp;
 curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre>
-  <p class="note">Building needs the pinned lex-sys compiler: the <a href="https://github.com/alpibrusl/lexsys-hooks#quick-start">README</a> has the extra lines, and a receiver that verifies each signature.</p>
+  <p class="note">Building needs the pinned cancho compiler: the <a href="https://github.com/alpibrusl/cancho-hooks#quick-start">README</a> has the extra lines, and a receiver that verifies each signature.</p>
 </section>
 
-<section id="lexsys">
-  <h2>A durable webhook server, built in lex-sys</h2>
-  <p class="sub">lex-sys is a typed systems language whose compiler writes down what a program may do. For infrastructure that is the point: that report is checked in CI, so a new foreign call is a change somebody has to approve.</p>
+<section id="cancho">
+  <h2>A durable webhook server, built in cancho</h2>
+  <p class="sub">cancho is a typed systems language whose compiler writes down what a program may do. For infrastructure that is the point: that report is checked in CI, so a new foreign call is a change somebody has to approve.</p>
   <div class="two">
     <figure class="figure">
       <h3><code>hooks</code>: foreign calls</h3>
@@ -280,13 +280,13 @@ curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre
     </figure>
     <figure class="figure">
       <h3><code>hooks-pure</code>: foreign calls</h3>
-      <svg viewBox="0 0 420 64" role="img" aria-label="Zero foreign function calls in the build that uses lex-sys's own TLS.">
+      <svg viewBox="0 0 420 64" role="img" aria-label="Zero foreign function calls in the build that uses cancho's own TLS.">
         <rect x="0" y="6" width="400" height="26" rx="5" fill="none" stroke="var(--good)" stroke-width="1.5" stroke-dasharray="4 4"/><text class="t" x="12" y="24" style="fill:var(--good)">none · bounded: true</text>
-        <text class="s" x="0" y="56">lex-sys&rsquo;s own TLS, not yet independently reviewed</text>
+        <text class="s" x="0" y="56">cancho&rsquo;s own TLS, not yet independently reviewed</text>
       </svg>
     </figure>
   </div>
-  <p class="note">Logs, the PostgreSQL client (SCRAM), DNS, HTTP and signatures are lex-sys too. No <code>unsafe</code>.</p>
+  <p class="note">Logs, the PostgreSQL client (SCRAM), DNS, HTTP and signatures are cancho too. No <code>unsafe</code>.</p>
 </section>
 
 <section id="numbers">
@@ -314,23 +314,23 @@ curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre
 
 <aside class="status" id="status">
   <h2>Alpha: we are trying to break it before you deploy it</h2>
-  <p class="note" style="margin:.2rem 0 .6rem">Alpha means the API may still change and nothing here is certified for production. Beta needs a clean 24-hour soak on the release candidate and an independent review of lex-sys&rsquo;s own TLS.</p>
+  <p class="note" style="margin:.2rem 0 .6rem">Alpha means the API may still change and nothing here is certified for production. Beta needs a clean 24-hour soak on the release candidate and an independent review of cancho&rsquo;s own TLS.</p>
   <ul>
     <li>No 24-hour chaos run has completed validly yet: the first two found two real bugs (both fixed), and the third ended inconclusive at 15.8 hours when the test harness, not the service as far as is known, ran out of capacity. Until a clean run on the release candidate, it is not certified for production.</li>
-    <li><code>https</code> uses OpenSSL until lex-sys&rsquo;s own TLS has been independently reviewed.</li>
+    <li><code>https</code> uses OpenSSL until cancho&rsquo;s own TLS has been independently reviewed.</li>
     <li>One process on one core; put a reverse proxy in front for TLS on the service&rsquo;s own port.</li>
   </ul>
-  <p style="margin:.8rem 0 0"><a href="evidence.html">The evidence</a> · <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md">The full list of what is not done</a></p>
+  <p style="margin:.8rem 0 0"><a href="evidence.html">The evidence</a> · <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">The full list of what is not done</a></p>
 </aside>
 
 </main>
 
 <footer><div class="wrap">
-  <a href="https://github.com/alpibrusl/lexsys-hooks">Repository</a><a href="evidence.html">Evidence</a>
-  <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/api.md">API</a><a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/runbook.md">Runbook</a>
-  <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/design.md">Design</a>
+  <a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="evidence.html">Evidence</a>
+  <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">API</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/runbook.md">Runbook</a>
+  <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a>
   <span>Self-hosted: your events stay on your infrastructure.</span>
-  <span>Built on <a href="https://github.com/alpibrusl/lex-sys">lex-sys</a> · open source under the <a href="https://github.com/alpibrusl/lexsys-hooks/blob/main/LICENSE">EUPL-1.2</a>, provided as is, without warranty: you run it at your own responsibility.</span>
+  <span>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a> · open source under the <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">EUPL-1.2</a>, provided as is, without warranty: you run it at your own responsibility.</span>
 </div></footer>
 
 <script>

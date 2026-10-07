@@ -1,0 +1,554 @@
+edition 5;
+
+module cron;
+
+// `cron` -- cron expressions: what they mean, and when they fire next (`docs/design.md` section 32). Pure: no effect, no clock.
+//
+// An expression has five fields separated by blanks (spaces or tabs), as in the Unix `crontab`:
+//
+//     minute (0-59)   hour (0-23)   day of month (1-31)   month (1-12)   day of week (0-7, 0 and 7 are Sunday)
+//
+// or six, with a leading **seconds** field (0-59), when the service runs with `cron-seconds 1` (a test mode: a minute is a long time to
+// wait in a test). Each field is a list of items separated by commas, and an item is
+//
+//     *          every value of the field
+//     a          one value
+//     a-b        a range, both ends included (a <= b: a range does not wrap, so write `22-23,0-2`)
+//     */n        every n-th value of the field, from its first
+//     a-b/n      every n-th value of the range, from a
+//
+// Numbers only: no names (`MON`, `JAN`), no `@daily`, and no `a/n` (a step needs a `*` or a range, as in Vixie cron). A step is from 1 to
+// the number of values the field has. Times are UTC and the calendar is the proleptic Gregorian one.
+//
+// **Day of month and day of week** follow Vixie cron, which is what people mean by "standard": if both fields are restricted (neither
+// begins with `*`) a day matches when *either* does (`0 0 1 * 1` is the first of the month and every Monday); if one begins with `*`
+// (`*`, `*/2`) both must match (`0 0 * * 1` is Mondays, `0 0 */2 * 1` is Mondays that fall on an odd day of the month). The month
+// field always has to match. `0 0 31 2 *` never fires and is refused (`never`).
+//
+// A parsed expression is eight integers, which the caller sizes with `size`:
+//
+//     [0] seconds, a bit set (bit s)   [1] minutes   [2] hours   [3] days of month (bit d, 1 to 31)   [4] months (bit m, 1 to 12)
+//     [5] days of week (bit 0 to 6, Sunday 0)   [6] 1 if the day-of-month field began with `*`   [7] the same for the day of week
+//
+// Times are Unix seconds (an `int`). `next_after` and `prev_upto` answer a Unix second, or -1 when there is none within 40 years.
+//
+// Examples (checked by `tests/cron_test.cho`, and against a brute-force scan by `tests/cron_test.py`):
+//
+//     "* * * * *"          after 2024-01-01T00:00:00Z      2024-01-01T00:01:00Z
+//     "*/15 * * * *"       after 2024-01-01T00:14:59Z      2024-01-01T00:15:00Z
+//     "0 0 29 2 *"         after 2024-03-01T00:00:00Z      2028-02-29T00:00:00Z   (leap days only)
+//     "30 4 1,15 * 5"      after 2024-01-01T00:00:00Z      2024-01-01T04:30:00Z   (the 1st, the 15th, and every Friday)
+//     "0 22 * * 1-5"       after 2024-01-05T22:00:00Z      2024-01-08T22:00:00Z   (a Friday evening, then Monday)
+//     "0 0 * * 7"          the same as `0 0 * * 0`: Sundays
+
+pub fn size() -> [] int {
+    return 8;
+}
+
+// A Unix second no schedule reaches (the year 10000): the `next_fire` a schedule that never fires is given, so that no query for the ones that are due finds it.
+pub fn far() -> [] int {
+    return 253402300800;
+}
+
+// The longest expression accepted, in bytes.
+pub fn max_len() -> [] int {
+    return 100;
+}
+
+// What was wrong with an expression, by the code `parse` answers.
+pub fn why(code: int) -> [] &static [byte] {
+    if code == 1 {
+        return "the expression needs five fields: minute hour day-of-month month day-of-week";
+    }
+    if code == 2 {
+        return "a field takes numbers, `*`, lists (`,`), ranges (`a-b`) and steps (`*/n`, `a-b/n`) and nothing else";
+    }
+    if code == 3 {
+        return "a number is outside its field (minute 0-59, hour 0-23, day of month 1-31, month 1-12, day of week 0-7)";
+    }
+    if code == 4 {
+        return "a range runs backwards (a range does not wrap: write 22-23,0-2)";
+    }
+    if code == 5 {
+        return "a step is from 1 to the number of values of the field, and goes with `*` or a range";
+    }
+    if code == 6 {
+        return "the expression is longer than 100 bytes";
+    }
+    if code == 7 {
+        return "the expression never fires (for example the 31st of February)";
+    }
+    if code == 8 {
+        return "the expression needs six fields: second minute hour day-of-month month day-of-week (cron-seconds is 1)";
+    }
+    return "the expression is not valid";
+}
+
+// ---- the calendar ----------------------------------------------------------------------------------------------------------
+
+// The days from 1970-01-01 to the civil date `y-m-d` (the algorithm of Howard Hinnant's "chrono-compatible low-level date algorithms"),
+// for years from 1 on.
+pub fn days_from_civil(y: int, m: int, d: int) -> [] int {
+    var yy = y;
+    var mm = m + 9;
+    if m <= 2 {
+        yy = y - 1;
+    } else {
+        mm = m - 3;
+    }
+    let era = yy / 400;
+    let yoe = yy - era * 400;
+    let doy = (153 * mm + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// The civil date `(y, m, d)` of the day `z` days after 1970-01-01 (z >= 0).
+pub fn civil_from_days(z: int) -> [] (int, int, int) {
+    let shifted = z + 719468;
+    let era = shifted / 146097;
+    let doe = shifted - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    var m = mp + 3;
+    if mp >= 10 {
+        m = mp - 9;
+    }
+    var y = yoe + era * 400;
+    if m <= 2 {
+        y = y + 1;
+    }
+    return (y, m, d);
+}
+
+// 0 for Sunday to 6 for Saturday: 1970-01-01 was a Thursday.
+pub fn weekday(days: int) -> [] int {
+    return (days + 4) % 7;
+}
+
+// `t` (Unix seconds) as `YYYY-MM-DDTHH:MM:SSZ`, 20 bytes at the front of `out`. Answers 20, or 0 for a time outside the years 1970 to 9999.
+pub fn iso[&o](t: int, out: &!o [byte]) -> [] int {
+    if t < 0 || t >= far() {
+        return 0;
+    }
+    let day = t / 86400;
+    let sod = t % 86400;
+    let (y, m, d) = civil_from_days(day);
+    digits(out, 0, y, 4);
+    out[4] = byte_of('-');
+    digits(out, 5, m, 2);
+    out[7] = byte_of('-');
+    digits(out, 8, d, 2);
+    out[10] = byte_of('T');
+    digits(out, 11, sod / 3600, 2);
+    out[13] = byte_of(':');
+    digits(out, 14, sod % 3600 / 60, 2);
+    out[16] = byte_of(':');
+    digits(out, 17, sod % 60, 2);
+    out[19] = byte_of('Z');
+    return 20;
+}
+
+fn digits[&o](out: &!o [byte], at: int, n: int, width: int) -> [] int {
+    var m = n;
+    var i = width;
+    while i > 0 {
+        out[at + i - 1] = byte_of('0' + m % 10);
+        m = m / 10;
+        i = i - 1;
+    }
+    return 0;
+}
+
+// ---- parsing ---------------------------------------------------------------------------------------------------------------
+
+// A number of one to three digits, or -1.
+fn number[&t](text: &t [byte]) -> [] int {
+    if len(text) < 1 || len(text) > 3 {
+        return 0 - 1;
+    }
+    var n = 0;
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c < '0' || c > '9' {
+            return 0 - 1;
+        }
+        n = n * 10 + (c - '0');
+        i = i + 1;
+    }
+    return n;
+}
+
+fn index_of[&t](text: &t [byte], c: int) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        if int_of(text[i]) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// One field, `lo` to `hi` (a day of week is 0 to 7, and 7 is Sunday). Answers `(code, bits, star)`: code 0 and the values as a bit set, and 1 if the
+// field began with `*`; or the code of what is wrong, with nothing else meaning anything.
+fn field[&t](text: &t [byte], lo: int, hi: int, dow: bool) -> [] (int, int, int) {
+    var star = 0;
+    if len(text) > 0 && int_of(text[0]) == '*' {
+        star = 1;
+    }
+    var bits = 0;
+    var at = 0;
+    while at <= len(text) {
+        var end = at;
+        while end < len(text) && int_of(text[end]) != ',' {
+            end = end + 1;
+        }
+        let item = text[at..end];
+        if len(item) == 0 {
+            return (2, 0, 0);
+        }
+        var base = item;
+        var step = 1;
+        var stepped = false;
+        let slash = index_of(item, '/');
+        if slash >= 0 {
+            base = item[0..slash];
+            let stext = item[slash + 1..len(item)];
+            if len(stext) == 0 {
+                return (5, 0, 0);
+            }
+            let s = number(stext);
+            if s < 0 {
+                return (2, 0, 0);
+            }
+            step = s;
+            stepped = true;
+        }
+        var first = lo;
+        var last = hi;
+        let dash = index_of(base, '-');
+        if len(base) == 1 && int_of(base[0]) == '*' {
+            if dow {
+                last = 6;
+            }
+        } else if dash >= 0 {
+            let a = number(base[0..dash]);
+            let b = number(base[dash + 1..len(base)]);
+            if a < 0 || b < 0 {
+                return (2, 0, 0);
+            }
+            if a < lo || a > hi || b < lo || b > hi {
+                return (3, 0, 0);
+            }
+            if a > b {
+                return (4, 0, 0);
+            }
+            first = a;
+            last = b;
+        } else {
+            let a = number(base);
+            if a < 0 {
+                return (2, 0, 0);
+            }
+            if a < lo || a > hi {
+                return (3, 0, 0);
+            }
+            if stepped {
+                return (5, 0, 0);
+            }
+            first = a;
+            last = a;
+        }
+        if step < 1 || step > hi - lo + 1 {
+            return (5, 0, 0);
+        }
+        var v = first;
+        while v <= last {
+            var bit = v;
+            if dow && v == 7 {
+                bit = 0;
+            }
+            bits = bits | 1 << bit;
+            v = v + step;
+        }
+        at = end + 1;
+    }
+    return (0, bits, star);
+}
+
+// Parse `text` into `out` (`size()` integers). `seconds` says whether the expression has a leading seconds field. Answers 0, or the code of what is wrong
+// (`why`). An expression that parses can still never fire (`valid` checks that too).
+pub fn parse[&t, &o](text: &t [byte], seconds: bool, out: &!o [int]) -> [] int {
+    if len(text) > max_len() {
+        return 6;
+    }
+    // The region is left by falling out of it: one left by a `return` is not given back (cancho #252), and this runs for every schedule a fire reads.
+    var rc = 0;
+    region a {
+        let starts = alloc_slice[a](14, 0);
+        rc = parse_in(text, seconds, out, starts);
+    }
+    return rc;
+}
+
+// The body of `parse`, with the room it works in given to it.
+fn parse_in[&t, &o, &s](text: &t [byte], seconds: bool, out: &!o [int], starts: &!s [int]) -> [] int {
+    var count = 0;
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if c == ' ' || c == '\t' {
+            i = i + 1;
+        } else {
+            var j = i;
+            while j < len(text) && int_of(text[j]) != ' ' && int_of(text[j]) != '\t' {
+                j = j + 1;
+            }
+            if count < 7 {
+                starts[count] = i;
+                starts[count + 7] = j;
+            }
+            count = count + 1;
+            i = j;
+        }
+    }
+    var want = 5;
+    if seconds {
+        want = 6;
+    }
+    if count != want {
+        if seconds {
+            return 8;
+        }
+        return 1;
+    }
+    var k = 0;
+    if seconds {
+        let f = field(text[starts[0]..starts[7]], 0, 59, false);
+        if f.0 != 0 {
+            return f.0;
+        }
+        out[0] = f.1;
+        k = 1;
+    } else {
+        out[0] = 1;
+    }
+    let m = field(text[starts[k]..starts[k + 7]], 0, 59, false);
+    if m.0 != 0 {
+        return m.0;
+    }
+    let h = field(text[starts[k + 1]..starts[k + 8]], 0, 23, false);
+    if h.0 != 0 {
+        return h.0;
+    }
+    let dom = field(text[starts[k + 2]..starts[k + 9]], 1, 31, false);
+    if dom.0 != 0 {
+        return dom.0;
+    }
+    let mon = field(text[starts[k + 3]..starts[k + 10]], 1, 12, false);
+    if mon.0 != 0 {
+        return mon.0;
+    }
+    let dw = field(text[starts[k + 4]..starts[k + 11]], 0, 7, true);
+    if dw.0 != 0 {
+        return dw.0;
+    }
+    out[1] = m.1;
+    out[2] = h.1;
+    out[3] = dom.1;
+    out[4] = mon.1;
+    out[5] = dw.1;
+    out[6] = dom.2;
+    out[7] = dw.2;
+    return 0;
+}
+
+// Parse `text` as `parse` does and also refuse an expression that never fires (`never`, code 7). `out` is not meant to be used after a refusal.
+pub fn valid[&t, &o](text: &t [byte], seconds: bool, out: &!o [int]) -> [] int {
+    let code = parse(text, seconds, out);
+    if code != 0 {
+        return code;
+    }
+    if next_after(out, 0) < 0 {
+        return 7;
+    }
+    return 0;
+}
+
+// ---- when ------------------------------------------------------------------------------------------------------------------
+
+fn has[&s](spec: &s [int], field: int, v: int) -> [] bool {
+    return spec[field] >> v & 1 == 1;
+}
+
+// The most days a search looks across: forty years, which is more than the longest wait between two matches of any expression that can fire
+// (a leap day that must fall on a Sunday is 28 years apart at most; across 2100 it is 40).
+fn horizon() -> [] int {
+    return 14640;
+}
+
+// Does the day `day` (days since 1970-01-01), which is `y-m-d`, match the month, day-of-month and day-of-week fields?
+fn day_matches[&s](spec: &s [int], day: int, m: int, d: int) -> [] bool {
+    if !has(spec, 4, m) {
+        return false;
+    }
+    let by_date = has(spec, 3, d);
+    let by_week = has(spec, 5, weekday(day));
+    if spec[6] == 1 || spec[7] == 1 {
+        return by_date && by_week;
+    }
+    return by_date || by_week;
+}
+
+// The first second of the day, from `from` (0 to 86399), that the time fields match, or -1.
+fn first_time[&s](spec: &s [int], from: int) -> [] int {
+    let h0 = from / 3600;
+    let m0 = from % 3600 / 60;
+    let s0 = from % 60;
+    var h = h0;
+    while h < 24 {
+        if has(spec, 2, h) {
+            var m = 0;
+            if h == h0 {
+                m = m0;
+            }
+            while m < 60 {
+                if has(spec, 1, m) {
+                    var sec = 0;
+                    if h == h0 && m == m0 {
+                        sec = s0;
+                    }
+                    while sec < 60 {
+                        if has(spec, 0, sec) {
+                            return h * 3600 + m * 60 + sec;
+                        }
+                        sec = sec + 1;
+                    }
+                }
+                m = m + 1;
+            }
+        }
+        h = h + 1;
+    }
+    return 0 - 1;
+}
+
+// The last second of the day, up to `upto` (0 to 86399), that the time fields match, or -1.
+fn last_time[&s](spec: &s [int], upto: int) -> [] int {
+    let h1 = upto / 3600;
+    let m1 = upto % 3600 / 60;
+    let s1 = upto % 60;
+    var h = h1;
+    while h >= 0 {
+        if has(spec, 2, h) {
+            var m = 59;
+            if h == h1 {
+                m = m1;
+            }
+            while m >= 0 {
+                if has(spec, 1, m) {
+                    var sec = 59;
+                    if h == h1 && m == m1 {
+                        sec = s1;
+                    }
+                    while sec >= 0 {
+                        if has(spec, 0, sec) {
+                            return h * 3600 + m * 60 + sec;
+                        }
+                        sec = sec - 1;
+                    }
+                }
+                m = m - 1;
+            }
+        }
+        h = h - 1;
+    }
+    return 0 - 1;
+}
+
+// Does the expression fire at the Unix second `t`?
+pub fn matches[&s](spec: &s [int], t: int) -> [] bool {
+    if t < 0 || t >= far() {
+        return false;
+    }
+    let day = t / 86400;
+    let (y, m, d) = civil_from_days(day);
+    return day_matches(spec, day, m, d) && first_time(spec, t % 86400) == t % 86400;
+}
+
+// The first Unix second after `t` that the expression fires at, or -1 if there is none within forty years (or `t` is before 1970 or past 9999).
+pub fn next_after[&s](spec: &s [int], t: int) -> [] int {
+    if t < 0 || t + 1 >= far() {
+        return 0 - 1;
+    }
+    var day = (t + 1) / 86400;
+    var from = (t + 1) % 86400;
+    let last = day + horizon();
+    while day <= last {
+        let (y, m, d) = civil_from_days(day);
+        if !has(spec, 4, m) {
+            // Not this month: the first day of the next.
+            var jump = days_from_civil(y, m + 1, 1);
+            if m == 12 {
+                jump = days_from_civil(y + 1, 1, 1);
+            }
+            // (`jump` is always ahead; a search that cannot go backwards cannot loop for ever, whatever the calendar says)
+            if jump > day {
+                day = jump;
+            } else {
+                day = day + 1;
+            }
+            from = 0;
+        } else {
+            if day_matches(spec, day, m, d) {
+                let at = first_time(spec, from);
+                if at >= 0 {
+                    return day * 86400 + at;
+                }
+            }
+            day = day + 1;
+            from = 0;
+        }
+    }
+    return 0 - 1;
+}
+
+// The last Unix second up to and including `t` that the expression fires at, or -1 if there is none within forty years back (or `t` is outside 1970 to 9999).
+pub fn prev_upto[&s](spec: &s [int], t: int) -> [] int {
+    if t < 0 || t >= far() {
+        return 0 - 1;
+    }
+    var day = t / 86400;
+    var upto = t % 86400;
+    var floor = day - horizon();
+    if floor < 0 {
+        floor = 0;
+    }
+    while day >= floor {
+        let (y, m, d) = civil_from_days(day);
+        if !has(spec, 4, m) {
+            // Not this month: the last day of the one before.
+            let jump = days_from_civil(y, m, 1) - 1;
+            if jump < day {
+                day = jump;
+            } else {
+                day = day - 1;
+            }
+            upto = 86399;
+        } else {
+            if day_matches(spec, day, m, d) {
+                let at = last_time(spec, upto);
+                if at >= 0 {
+                    return day * 86400 + at;
+                }
+            }
+            day = day - 1;
+            upto = 86399;
+        }
+    }
+    return 0 - 1;
+}

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The log checker in lex-sys (`hooks-logcheck`, docs/design.md section 54) against the one in Python (`scripts/logcheck.py`).
+"""The log checker in cancho (`hooks-logcheck`, docs/design.md section 54) against the one in Python (`scripts/logcheck.py`).
 
     python3 tests/logcheck_test.py build/hooks        (build/hooks-logcheck beside it)
 
-The two are written apart (the Python one is the independent reader the other tests lean on; the lex-sys one shares only lexsys-log's scan and the service's rule for a torn
+The two are written apart (the Python one is the independent reader the other tests lean on; the cancho one shares only cancho-log's scan and the service's rule for a torn
 tail), so the way to know the fast one is the same checker is to give both everything and see them agree.
 
   1. a data directory made by the real service: several segments of the events log, deliveries, failures and dead letters, a clean stop: both say consistent, print the same
@@ -108,7 +108,7 @@ def same(name, d):
     lines1, lines2 = (out1 + err1).splitlines(), (out2 + err2).splitlines()
     only1 = [x for x in lines1 if x not in lines2]
     only2 = [x for x in lines2 if x not in lines1]
-    return False, f"{name}: exit {rc1} vs {rc2}; python only: {only1}; lex-sys only: {only2}"
+    return False, f"{name}: exit {rc1} vs {rc2}; python only: {only1}; cancho only: {only2}"
 
 
 def damage(base, rng, k, kinds=None):
@@ -255,7 +255,7 @@ def main():
     run_py(base)
     t_py = time.time() - t0
     size = sum(os.path.getsize(os.path.join(base, n)) for n in os.listdir(base) if n.endswith(".seg"))
-    print(f"   {size / 1e6:.1f} MB of logs: lex-sys {t_native:.2f} s ({size / 1e6 / max(t_native, 1e-3):.0f} MB/s), Python {t_py:.2f} s ({size / 1e6 / max(t_py, 1e-3):.1f} MB/s)", flush=True)
+    print(f"   {size / 1e6:.1f} MB of logs: cancho {t_native:.2f} s ({size / 1e6 / max(t_native, 1e-3):.0f} MB/s), Python {t_py:.2f} s ({size / 1e6 / max(t_py, 1e-3):.1f} MB/s)", flush=True)
     shutil.rmtree(base, ignore_errors=True)
     return check.finish("logcheck")
 

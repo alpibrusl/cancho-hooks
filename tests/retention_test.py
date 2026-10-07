@@ -1106,7 +1106,7 @@ def stage_stall():
           size == 77 * (1 + 62 + 62 * 1024 + 62), str(size))
     print("     compact-now on the full state: %.2f s including the start and the replay of the log; delivery.seg is now %d bytes" % (took, size), flush=True)
     # the stated bound (docs/retention.md section 12): the largest snapshot there can be (62 full windows, 63,488 records, 4.9 MB) holds the loop for
-    # 40 to 70 ms measured (0.5 to 0.96 s before `state.put_outcome` stopped losing its region: docs/lexsys-log-retention.md gap 6); every other step
+    # 40 to 70 ms measured (0.5 to 0.96 s before `state.put_outcome` stopped losing its region: docs/cancho-log-retention.md gap 6); every other step
     # is a few milliseconds. The gate leaves room for a loaded machine.
     check("stall: no step held the loop for more than 300 ms, the largest state there can be (measured: %d ms)" % s["maintenance_ms_max"], s["maintenance_ms_max"] <= 300, str(s["maintenance_ms_max"]))
     check("stall: and a request waited for it at most 400 ms (measured: %.0f ms)" % lat[-1], lat[-1] <= 400, str(lat[-1]))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The build with lex-sys's own TLS only (docs/pure-tls.md): what it does differently from the OpenSSL build, and what `tests/https_test.py` does not look at.
+"""The build with cancho's own TLS only (docs/pure-tls.md): what it does differently from the OpenSSL build, and what `tests/https_test.py` does not look at.
 
     python3 tests/pure_test.py pure/build/hooks-pure            (needs the `openssl` command and `pip install standardwebhooks`; no database)
 
@@ -10,7 +10,7 @@
   2. the environment is not read: with `SSL_CERT_FILE` naming the authority of the receiver's certificate and no `tls-ca-file`, the certificate is untrusted (the
      OpenSSL build honours the variable, and `https_test.py`'s group 6 expects that of it)
   3. the connection ends with `close_notify`: the receiver reads a clean end of the stream and not a truncation
-  4. resumption (lex-sys `docs/tls-resumption.md`): the second delivery to an endpoint resumes the first's session, the receiver sees it resumed and /metrics
+  4. resumption (cancho `docs/tls-resumption.md`): the second delivery to an endpoint resumes the first's session, the receiver sees it resumed and /metrics
      counts it; and a ticket is used once, so the third delivery resumes from the ticket the second got
   5. the ClientHello says the service can resume (psk_key_exchange_modes, psk_dhe_ke only): without it Go's and rustls's servers send no ticket (RFC 8446 §4.2.9), and
      Python's `ssl`, the receiver of 4, sends one anyway, so 4 cannot see it; a receiver that reads the raw ClientHello can

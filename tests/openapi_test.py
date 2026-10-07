@@ -3,11 +3,11 @@
 
     python3 tests/openapi_test.py build/hooks
 
-The document is GENERATED from the declaration the service routes with (`src/api.ls`; `scripts/openapi.sh --check` keeps the committed file equal to
+The document is GENERATED from the declaration the service routes with (`src/api.cho`; `scripts/openapi.sh --check` keeps the committed file equal to
 what that declaration prints). What this test adds is that it is also TRUE of the running service, and that the gate agrees with it.
 
   1. the document is a valid shape (OpenAPI 3.1, every $ref resolves, every operation has an id and answers) and describes exactly the
-     routes of `src/authz.ls`'s table: the same methods, paths and scopes, and the security of each operation is its scope's
+     routes of `src/authz.cho`'s table: the same methods, paths and scopes, and the security of each operation is its scope's
   2. the service answers what the document says: for a set of real requests (no token, no database), the status is one the operation
      declares and the body fits the schema declared for that status (type, required, properties, items, enum; `$ref`s followed)
   3. a path that is no route and a method that is not allowed answer in the `Error` shape the document gives
@@ -52,7 +52,7 @@ def scope_of_security(security):
 
 
 table = {}
-for m in re.finditer(r"return s_(\w+)\(\);\s*//\s*(GET|POST|PATCH|DELETE|PUT) (\S+)", open(os.path.join(ROOT, "src", "authz.ls")).read()):
+for m in re.finditer(r"return s_(\w+)\(\);\s*//\s*(GET|POST|PATCH|DELETE|PUT) (\S+)", open(os.path.join(ROOT, "src", "authz.cho")).read()):
     scope, method, path = m.groups()
     table[(method, re.sub(r":(\w+)", r"{\1}", path))] = scope
 # the table calls the second parameter `:endpoint` and the first `:id`; the document names them the same way

@@ -1,12 +1,12 @@
-# lexsys-hooks
+# cancho-hooks
 
 > A self-hosted webhook delivery service. POST an event once: it is on disk before the answer (202), then signed (Standard Webhooks), retried and replayable. Delivery is at least once; receivers drop a repeat by the `webhook-id` header (`evt_<id>`). One binary, one process; PostgreSQL is optional (it holds the endpoints table and the attempts history). Pre-release: not yet certified for production.
 
 ## Use it
-- [OpenAPI description](https://alpibrusl.github.io/lexsys-hooks/openapi.json): every route, its scope and its answers. It is generated from the declaration the service routes with, and checked against the service by a test.
-- [HTTP API in prose](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/api.md): the same, with the details that do not fit a schema.
-- [Quick start](https://github.com/alpibrusl/lexsys-hooks#quick-start): build, one endpoint, one event.
-- [Configuration](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/configuration.md): every setting.
+- [OpenAPI description](https://alpibrusl.github.io/cancho-hooks/openapi.json): every route, its scope and its answers. It is generated from the declaration the service routes with, and checked against the service by a test.
+- [HTTP API in prose](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md): the same, with the details that do not fit a schema.
+- [Quick start](https://github.com/alpibrusl/cancho-hooks#quick-start): build, one endpoint, one event.
+- [Configuration](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/configuration.md): every setting.
 
 ## Facts that matter when calling it
 - Auth: bearer tokens in three scopes (ingest, read, admin); the admin token also does what the others do. A scope with no configured token leaves its routes open (development). `/healthz` and `/readyz` never need one.
@@ -16,10 +16,10 @@
 - A new endpoint's secret is in the answer to `POST /endpoints` and in no other.
 
 ## Running it
-- [Runbook](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/runbook.md): backup, restore, start failures.
-- [Security](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/security.md) and [privacy](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/privacy.md).
-- [Evidence](https://alpibrusl.github.io/lexsys-hooks/evidence.html): what was tested and how, and what is not claimed.
+- [Runbook](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/runbook.md): backup, restore, start failures.
+- [Security](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/security.md) and [privacy](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/privacy.md).
+- [Evidence](https://alpibrusl.github.io/cancho-hooks/evidence.html): what was tested and how, and what is not claimed.
 
 ## Optional
-- [Design](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/design.md): why each part is the way it is.
-- [Status](https://github.com/alpibrusl/lexsys-hooks/blob/main/docs/status.md): what is not done.
+- [Design](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md): why each part is the way it is.
+- [Status](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md): what is not done.

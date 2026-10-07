@@ -1,10 +1,10 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "lexsys-hooks",
+    "title": "cancho-hooks",
     "version": "0.1.0",
     "summary": "A self-hosted webhook delivery service.",
-    "description": "Events are on disk before the answer to `POST /events`, then signed (Standard Webhooks), retried and replayable. Delivery is at least once: a receiver drops a repeat by `webhook-id` (`evt_<id>`). Every route, its scope and its answers are also described in docs/api.md. This document is generated from the declaration the service routes with (src/api.ls)."
+    "description": "Events are on disk before the answer to `POST /events`, then signed (Standard Webhooks), retried and replayable. Delivery is at least once: a receiver drops a repeat by `webhook-id` (`evt_<id>`). Every route, its scope and its answers are also described in docs/api.md. This document is generated from the declaration the service routes with (src/api.cho)."
   },
   "paths": {
     "/healthz": {

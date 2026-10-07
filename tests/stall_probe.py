@@ -5,7 +5,7 @@
 
 mode: healthy | silent (accepts, never answers) | blackhole (a listener whose accept queue is full, so the SYN is dropped
 and `connect` waits for the kernel). Posts 40 events one after another and prints the latency of each POST: p50, p99, max.
-A report, not a gate: this is the number that decides whether non-blocking connect is the next piece of lex-sys.
+A report, not a gate: this is the number that decides whether non-blocking connect is the next piece of cancho.
 """
 import http.client
 import os
