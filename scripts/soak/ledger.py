@@ -552,10 +552,20 @@ class Verifier:
                 if b - a > period + 1 and not self._away_covers(a, b):
                     self.v.add("I_cron_gap", schedule=src, from_=a, to=b, seconds=b - a)
 
+    # How long after a database fault ends a schedule may still be silent. The schedules are read through the database, and what the service documents
+    # (docs/configuration.md) is: a request that is waiting with no byte coming back is given up and remade after `pg-request-ms` (10 s), an attempt to
+    # connect may take `pg-attempt-ms` (5 s), and the wait between attempts is at most `pg-backoff-max-ms` (5 s). A blackholed database that comes back
+    # can therefore take up to 20 s to be used again; the 5 s this had been (a gap of 14 to 19 s after a fault in a 40-minute validation run, found by
+    # the harness's author) was shorter than what the service says it does. A service that is away (a kill, a stop) keeps the 5 s.
+    DB_RECOVERY_S = 20.0
+    AWAY_SLACK_S = 5.0
+
     def _away_covers(self, a, b):
-        """Is the gap a..b (the scheduled seconds either side of it) explained by the service or the database being away? (5 s of slack each side.)"""
-        for (x, y, _kind) in self.away:
-            if x - 5.0 <= b and y + 5.0 >= a:
+        """Is the gap a..b (the scheduled seconds either side of it) explained by the service or the database being away? (5 s of slack before it and
+        after a service; `DB_RECOVERY_S` after a database.)"""
+        for (x, y, kind) in self.away:
+            after = self.DB_RECOVERY_S if kind == "pg" else self.AWAY_SLACK_S
+            if x - self.AWAY_SLACK_S <= b and y + after >= a:
                 return True
         return False
 

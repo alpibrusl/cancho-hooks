@@ -36,6 +36,23 @@ def rec(t, idx, ident, n, typ="user.created", flags=GOOD, status=204):
 
 
 def main():
+    # ---- a schedule that stays silent after a database fault
+    def cron_gap_case(kind, away, gap_a, gap_b):
+        vr, v = ver()
+        vr.cron_period["s"] = 1
+        for sec in (gap_a - 2, gap_a - 1, gap_a, gap_b, gap_b + 1):
+            vr.cron["s"][sec].add(sec)
+        vr.note_away(away[0], away[1], kind)
+        vr._cron_final()
+        return v
+
+    v = cron_gap_case("pg", (200.0, 240.0), 255, 261)       # the schedule is silent again from 15 s after the database came back
+    check("a schedule that falls silent 15 s after a database fault ended is excused (the service documents up to 20 s)", v.count["I_cron_gap"] == 0, f"{dict(v.count)}")
+    v = cron_gap_case("pg", (200.0, 240.0), 265, 271)       # from 25 s after
+    check("... and one that falls silent 25 s after it is still I_cron_gap", v.count["I_cron_gap"] == 1, f"{dict(v.count)}")
+    v = cron_gap_case("service", (200.0, 240.0), 255, 261)  # the same 15 s after a service that was away
+    check("... and 15 s after a service that was away is still I_cron_gap (the service has no such delay)", v.count["I_cron_gap"] == 1, f"{dict(v.count)}")
+
     # ---- expiry
     def expiry_case(max_age, cursor_at, extra_young=False):
         """events 1..10 acknowledged at t=100..109, never delivered to `h`; its cursor is found past them at `cursor_at`."""
