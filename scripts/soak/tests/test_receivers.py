@@ -36,7 +36,7 @@ def free_port():
 
 
 class Rig:
-    def __init__(self, n_eps=4, shards=1, bind_stuck_s=1.0, ports=None):
+    def __init__(self, n_eps=4, shards=1, bind_stuck_s=1.0, ports=None, extra=()):
         self.dir = tempfile.mkdtemp(prefix="recv-test-")
         os.makedirs(os.path.join(self.dir, "ledger"))
         self.shards = shards
@@ -44,7 +44,7 @@ class Rig:
         spec = {"t0": time.time(), "endpoints": [{"idx": i, "label": f"healthy{i}", "cls": "healthy", "port": p, "tls": False, "secrets": [], "params": {}} for i, p in enumerate(self.ports)]}
         json.dump(spec, open(os.path.join(self.dir, "spec.json"), "w"))
         self.procs = [subprocess.Popen([sys.executable, os.path.join(SOAK, "receivers.py"), "--dir", self.dir, "--seed", "1", "--shard", str(k), "--shards", str(shards),
-                                        "--bind-stuck-s", str(bind_stuck_s)], stdout=open(os.path.join(self.dir, "receivers.log"), "a"), stderr=subprocess.STDOUT) for k in range(shards)]
+                                        "--bind-stuck-s", str(bind_stuck_s), *extra], stdout=open(os.path.join(self.dir, "receivers.log"), "a"), stderr=subprocess.STDOUT) for k in range(shards)]
         self.ctl = {}
         end = time.time() + 15
         for k in range(shards):
@@ -201,6 +201,61 @@ def main():
     finally:
         r.close()
         holder.close()
+
+    # 8. the cost of a record does not grow with the endpoints the run has made and taken away (the ticker walks every endpoint it holds, 20 times a second)
+    r = Rig(n_eps=1, extra=("--forget-s", "1"))
+    try:
+        def per_record(n=1500):
+            c0 = r.cmd(0, {"op": "stats"})["cpu_s"]
+            for i in range(n):
+                request(r.ports[0], 5000 + i)
+            c1 = r.cmd(0, {"op": "stats"})["cpu_s"]
+            return (c1 - c0) / n * 1e6      # microseconds of CPU a request
+
+        before = per_record()
+        for i in range(1200):
+            p = free_port()
+            r.cmd(0, {"op": "add", "spec": {"idx": 100 + i * 2, "label": f"churn{i}", "cls": "churn", "port": p, "tls": False, "secrets": [], "params": {}}})
+            if i % 100 == 99:
+                time.sleep(0.2)
+        for i in range(1200):
+            r.cmd(0, {"op": "remove", "label": f"churn{i}"})
+        time.sleep(3.0)
+        n_left = r.cmd(0, {"op": "stats"})["endpoints"]
+        after = per_record()
+        check(f"after 1,200 endpoints came and went the receiver holds {n_left} (not 1,201) and a request costs {after:.0f} us against {before:.0f} us", n_left <= 3 and after < before * 1.5 + 50,
+              f"{n_left} {before} {after}")
+    finally:
+        r.close()
+
+    # 9. the name server of the https endpoints answers as fast after 30,000 questions as after none (it counted every question ever asked, in a walk under the lock: the cost of a
+    # question grew with the run, and it shares the interpreter with the first receiver process)
+    import struct
+    import tlskit
+    dns = tlskit.DnsStub({"hooks.test": ["127.0.0.1"]}, keep_asked=False)
+    try:
+        q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x05hooks\x04test\x00" + b"\x00\x01\x00\x01"
+        c = socket.create_connection(("127.0.0.1", dns.port))
+
+        def batch(n):
+            t0 = time.time()
+            for _ in range(n):
+                c.sendall(struct.pack(">H", len(q)) + q)
+                got = b""
+                while len(got) < 2:
+                    got += c.recv(2)
+                ln = struct.unpack(">H", got[:2])[0]
+                body = got[2:]
+                while len(body) < ln:
+                    body += c.recv(ln - len(body))
+            return (time.time() - t0) / n * 1e6
+
+        first = batch(3000)
+        batch(25000)
+        last = batch(3000)
+        check(f"a question to the name server costs {last:.0f} us after 31,000 questions against {first:.0f} us for the first 3,000", last < first * 1.6 + 20 and not dns.asked, f"{first} {last}")
+    finally:
+        dns.close()
 
     print("receivers: all checks passed" if all(RESULTS) else "receivers: FAILED")
     return 0 if all(RESULTS) else 1

@@ -206,6 +206,7 @@ class Receivers:
             self.ssl.load_cert_chain(cert["cert"], cert["key"])
         self.accepted = 0
         self.bind_stuck_s = a.bind_stuck_s
+        self.forget_s = a.forget_s
         self.bind_failures = 0       # a bind that failed with "Address already in use" (each is retried; none is ignored: `bind_stuck` in the stats lists the ones that last)
         self.late_unplanned = 0      # answers that were due within half a second and went out more than a second late: the receiver's own loop was the cause
         self.late_max = 0.0
@@ -304,13 +305,13 @@ class Receivers:
                 if ep.cls == "flapping":
                     fm = ep.flap_mode(now)
                     ep.down_mode = fm if fm in ("reset", "close") else None
-            if now - last_prune > 30:
+            if now - last_prune > max(1.0, min(30.0, self.forget_s / 2)):
                 last_prune = now
                 for ep in list(self.eps.values()):
                     if len(ep.attempts) > 2000:
                         ep.attempts = {k: v for k, v in ep.attempts.items() if now - v[1] < 120}
                     # an endpoint that was taken away and has been closed for a minute is forgotten: the loop does not walk (and the stats do not list) every endpoint the run has ever made
-                    if ep.removed and ep.sock is None and ep.server is None and now - ep.removed_at > 60:
+                    if ep.removed and ep.sock is None and ep.server is None and now - ep.removed_at > self.forget_s:
                         del self.eps[ep.idx]
 
     # ---- control
@@ -329,6 +330,21 @@ class Receivers:
         op = c["op"]
         if op == "ping":
             return {"ok": True}
+        if op == "profile":
+            # a diagnostic for the question "what grows in the receivers' CPU per record": {"op":"profile","start":true} profiles the loop thread (cProfile), {"start":false,"path":P} stops and writes
+            # the statistics (pstats) to P. Costs a few times the CPU while it is on: for a window of minutes, not a run.
+            import cProfile
+            if c.get("start"):
+                self.prof = cProfile.Profile()
+                self.prof.enable()
+                return {"ok": True}
+            prof = getattr(self, "prof", None)
+            if prof is None:
+                return {"error": "not profiling"}
+            prof.disable()
+            prof.dump_stats(c["path"])
+            self.prof = None
+            return {"ok": True, "path": c["path"]}
         if op == "stall":
             # a test hook, like `fault`: the loop does nothing for this long, as a loop that is starved of its core does not (the answers that were due meanwhile go out late)
             time.sleep(c["seconds"])
@@ -580,6 +596,7 @@ def main():
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--cpus", default="")
     p.add_argument("--bind-stuck-s", type=float, default=10.0, help="a listener that cannot be opened for this long is reported in the stats (`bind_stuck`)")
+    p.add_argument("--forget-s", type=float, default=60.0, help="a removed endpoint is forgotten (no longer walked by the ticker nor listed) this long after its listener closed")
     p.add_argument("--shard", type=int, default=0)
     p.add_argument("--shards", type=int, default=1)
     a = p.parse_args()
@@ -593,7 +610,7 @@ def main():
     # the name server of the https endpoints (tlskit's, which speaks DNS over TCP, the way the service asks)
     if r.spec.get("dns") and a.shard == 0:
         import tlskit
-        tlskit.DnsStub({r.spec["dns"]["name"]: ["127.0.0.1"]}, port=r.spec["dns"]["port"])
+        tlskit.DnsStub({r.spec["dns"]["name"]: ["127.0.0.1"]}, port=r.spec["dns"]["port"], keep_asked=False)
     signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
     try:
         asyncio.run(r.run())

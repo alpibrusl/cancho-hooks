@@ -340,7 +340,9 @@ class DnsStub:
     (0 for the first) that answers such a list; a name that is not there gets NXDOMAIN. `delay` (seconds) holds every answer back (a dict of name to seconds holds back only those names); `rcode` forces an error code
     (2 SERVFAIL, 5 REFUSED) for every question; `garbage` answers bytes that are not DNS; `wrong_id` answers with another query's id. `asked` lists the names asked, in order."""
 
-    def __init__(self, names, delay=0.0, rcode=0, port=0, ttl=60, garbage=False, wrong_id=False):
+    def __init__(self, names, delay=0.0, rcode=0, port=0, ttl=60, garbage=False, wrong_id=False, keep_asked=True):
+        self.keep_asked = keep_asked      # a stub that runs for a day (the soak's) keeps counts, not the list of every question: the list is for tests
+        self.counts = {}
         self.names, self.delay, self.rcode, self.ttl, self.garbage = {k.lower(): v for k, v in names.items()}, delay, rcode, ttl, garbage
         self.wrong_id = wrong_id
         self.asked, self.lock, self.connections = [], threading.Lock(), 0
@@ -396,8 +398,12 @@ class DnsStub:
                 name, end = self._qname(msg)
                 key = name.lower()
                 with self.lock:
-                    count = sum(1 for a in self.asked if a == key)
-                    self.asked.append(key)
+                    # how many times this name was asked before: a count, not a walk of every question ever asked (that walk, under the lock and the interpreter's, made each
+                    # answer slower than the one before it, and the soak's receivers, which hold the stub, used three times the CPU per record after fifteen minutes)
+                    count = self.counts.get(key, 0)
+                    self.counts[key] = count + 1
+                    if self.keep_asked:
+                        self.asked.append(key)
                 wait = self.delay.get(key, 0) if isinstance(self.delay, dict) else self.delay
                 if wait:
                     time.sleep(wait)
