@@ -444,14 +444,13 @@ def run_group(cmd, timeout, env=None):
 
 
 def checker_kind():
-    """Which log checker backup.sh and restore.sh will use: the native `hooks-logcheck` when it is built beside the service and the scripts know it, else scripts/logcheck.py (Python)."""
+    """Which log checker backup.sh and restore.sh will use. They look for the native `hooks-logcheck` beside themselves, in `build/` or `bin/`, or on the PATH, and use scripts/logcheck.py
+    (Python) when there is none; this looks in the same places, so that a backup's log says which one it was."""
     from common import ROOT
-    try:
-        known = "hooks-logcheck" in open(os.path.join(ROOT, "scripts", "backup.sh")).read()
-    except OSError:
-        known = False
-    built = os.path.exists(os.path.join(ROOT, "build", "hooks-logcheck"))
-    return "native hooks-logcheck" if (known and built) else "python logcheck.py"
+    for c in (os.path.join(ROOT, "scripts", "hooks-logcheck"), os.path.join(ROOT, "build", "hooks-logcheck"), os.path.join(ROOT, "bin", "hooks-logcheck"), shutil.which("hooks-logcheck")):
+        if c and os.access(c, os.X_OK):
+            return "native hooks-logcheck"
+    return "python logcheck.py"
 
 
 def backup_timeout(datadir, native):
