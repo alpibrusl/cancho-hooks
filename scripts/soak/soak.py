@@ -180,7 +180,8 @@ class Run:
         self.unexpected_exits = []
         self.chaos_log = None
         self.violations = Violations(sink=self.write_violation)
-        self.verifier = Verifier(self.seed, violations=self.violations)
+        self.verifier = Verifier(self.seed, violations=self.violations, max_age_s=a.max_age_s if a.max_age_s > 0 else None)
+        self.expired_seen = {}       # incarnation -> the largest events_expired the service reported (it counts from its start)
         self.viol_f = None
         self.t_first_violation = None
         self.resumed = False
@@ -383,7 +384,7 @@ class Run:
             st["unexpected_exits"] = list(self.unexpected_exits)
             st["unexpected"] = list(self.svc.unexpected[-200:]) if self.svc else []
             with self.vlock:
-                st["notes"] = self.verifier.export_notes()
+                st["notes"] = self.verifier.export_notes(time.time())
             tmp = self.path("state.json.tmp")
             with open(tmp, "w") as f:
                 json.dump(st, f)
@@ -396,6 +397,9 @@ class Run:
                                       "--admin-token", ADMIN, "--ingest-token", INGEST, "--read-token", READ]
         if os.environ.get("HOOKS_PG_PASSWORD"):
             f += ["--pg-password", os.environ["HOOKS_PG_PASSWORD"]]
+        if a.max_age_s > 0:
+            # the hard maximum age (design.md 47.2): a segment older than this is dropped whatever pins it. Without it a waiting replay that never starts keeps the log for ever (the third 24 h run)
+            f += ["--max-age-ms", str(int(a.max_age_s * 1000))]
         if self.dns:
             f += ["--dns-server", f"127.0.0.1:{self.dns['port']}", "--tls-ca-file", self.dns["ca"]]
         return f + list(a.service_arg)
@@ -592,7 +596,7 @@ class Run:
 
     def write_run_json(self):
         a = self.args
-        info = {"args": {k: v for k, v in vars(a).items()}, "machine": machine(), "binary_sha256": sha256(a.binary), "service_settings": SERVICE_SETTINGS,
+        info = {"args": {k: v for k, v in vars(a).items()}, "machine": machine(), "binary_sha256": sha256(a.binary), "service_settings": SERVICE_SETTINGS + (["--max-age-ms", str(int(a.max_age_s * 1000))] if a.max_age_s > 0 else []),
                 "started": time.time(), "duration_s": self.duration, "quiet_s": self.quiet_s, "pinned": {"service": sorted(self.service_cpus or []), "harness": sorted(self.harness_cpus or [])},
                 "shim": self.shim, "ports": {"service": self.port}, "tmpfs": bool(self.tmpfs), "valid": True, "receiver_procs": self.nrecv,
                 "host_at_start": guardmod.HostSampler().sample(time.time()), "meminfo_mb": {k: round(v) for k, v in guardmod.read_meminfo().items() if k in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")}}
@@ -897,7 +901,7 @@ class Run:
             self.checker.drain()
             cursors = {self.label_of[e["id"]]: e["cursor"] for e in (eps if s == 200 else []) if e["id"] in self.label_of}
             last_id = st["events_last_id"] if s2 == 200 else last_id
-            v.finish(last_id, cursors, caught_up=caught or True)
+            v.finish(last_id, cursors, caught_up=caught or True, now=time.time(), expired_by_service=sum(self.expired_seen.values()) if self.args.max_age_s > 0 else None)
             self.counts["final_last_id"] = last_id
         # the stop: SIGTERM, exit 0, logs that logcheck accepts, and a restart that repeats nothing recorded
         self.log("finish", step="clean stop")
@@ -1097,6 +1101,8 @@ def parse(argv):
     p.add_argument("--min-tail-s", type=float, default=None)
     p.add_argument("--stall-ms", type=float, default=500.0)
     p.add_argument("--p999-ms", type=float, default=50.0)
+    p.add_argument("--max-age-s", type=float, default=1200.0, help="the service's hard maximum age of an event (--max-age-ms): bounds the data of a run whatever pins the log; a loss at an endpoint is excused as an expiry only for events older than this, "
+                   "and the number excused is held against the service's events_expired. 0: none")
     p.add_argument("--no-early-stop", action="store_true", help="go on after the run has been found invalid (it is marked invalid in run.json from that moment either way): for diagnosis")
     p.add_argument("--allow-low-memory", action="store_true", help="start although the host is short of memory or swap (the run records it in run.json)")
     p.add_argument("--replay-cap", type=int, default=32, help="the service's table of waiting replays: a table that stays full for three minutes is a violation (G_replays_pinned)")

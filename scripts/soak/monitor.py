@@ -24,7 +24,7 @@ COLUMNS = ["t", "el", "inc", "pid", "up", "rss_kb", "hwm_kb", "threads", "fds", 
            "loadavg5", "loadavg15", "psi_cpu_some10", "psi_cpu_some60", "psi_mem_some10", "psi_mem_some60", "psi_mem_full10", "psi_mem_full60", "psi_io_some10", "psi_io_some60",
            "psi_io_full10", "psi_io_full60", "mem_avail_mb", "swap_free_mb", "swap_used_mb", "swapin_s", "swapout_s", "majflt_s", "ctxt_s", "procs_running", "procs_blocked",
            "host_iowait_pct", "host_steal_pct", "host_busy_pct", "recv_late_unplanned", "recv_conn_lost", "recv_bind_failures", "recv_writer_wait_max_ms", "recv_sync_fallbacks",
-           "recv_writer_queue_max", "recv_records", "valid"]
+           "recv_writer_queue_max", "recv_records", "valid", "events_expired"]
 
 SERIES = re.compile(r'^(hooks_[a-z_]+)\{endpoint="(\d+)"\} (\S+)$', re.M)
 PLAIN = re.compile(r'^(hooks_[a-z_]+) (\S+)$', re.M)
@@ -112,11 +112,11 @@ class Checker(threading.Thread):
                 last_id = st.get("events_last_id") if s2 == 200 and isinstance(st, dict) else None
                 for e in eps:
                     label = r.label_of.get(e["id"])
-                    if label is None:
+                    if label is None or label not in r.verifier.by_label:
                         continue
                     ep = r.eps[label]
                     r.verifier.cursor_sample(label, e["cursor"], t, inc, last_id)
-                    r.verifier.settle(label, e["cursor"])
+                    r.verifier.settle(label, e["cursor"], now=t)
                     ep.cursor = e["cursor"]
                     if e.get("disabled") and ep.cls in ("oracle", "healthy", "healthy2", "filter", "slow", "flapping", "http5xx", "https", "rate", "churn"):
                         r.verifier.v.add("F_disabled", ep=label, paused=e.get("paused"), t=t)
@@ -137,7 +137,7 @@ class Checker(threading.Thread):
             return
         with r.vlock:
             self.drain()
-            r.verifier.settle(label, e["cursor"])
+            r.verifier.settle(label, e["cursor"], now=time.time())
 
     def run(self):
         r = self.r
@@ -255,6 +255,9 @@ class Watcher(threading.Thread):
                              ("db_reconnects", "database_reconnects"), ("db_failures", "database_failures"), ("db_losses", "database_losses"), ("hist_written", "history_written"),
                              ("hist_failed", "history_failed"), ("hist_dropped", "history_dropped"), ("replays_waiting", "replays")):
                 row[col] = st.get(key, "")
+            if isinstance(st.get("events_expired"), int):
+                r.expired_seen[r.svc.inc] = max(r.expired_seen.get(r.svc.inc, 0), st["events_expired"])
+                row["events_expired"] = st["events_expired"]
         s, text = r.read("/metrics", timeout=4, raw=True)
         if s == 200 and isinstance(text, str):
             plain = {n: float(v) for n, v in PLAIN.findall(text)}
@@ -266,6 +269,10 @@ class Watcher(threading.Thread):
                 row["lag_max"], row["lag_sum"], row["lag_over_1024"] = max(lag.values()), sum(lag.values()), sum(1 for v in lag.values() if v > 1024)
             for sid, v in lag.items():
                 detail["lag"][r.label_of.get(sid, f"id{sid}")] = v
+                lb = r.label_of.get(sid)
+                if lb is not None:
+                    with r.vlock:
+                        r.verifier.note_lag(lb, v, r.args.rate)
             for sid, v in dead.items():
                 lb = r.label_of.get(sid)
                 detail["dead"][lb or f"id{sid}"] = v
