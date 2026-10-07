@@ -7,6 +7,8 @@ import os
 import random
 import re
 import secrets as pysecrets
+import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -116,63 +118,119 @@ class Replayer(threading.Thread):
             self.r.stop.wait(self.rng.uniform(1.5, 5.0))
 
 
+def find_rows_by_port(run, port):
+    """The ids of the rows of the table that have this port (the harness's own database access; the running service may or may not know them)."""
+    return [int(x[0]) for x in run.psql_rows(f"select id from endpoints where port = {int(port)}")]
+
+
+def remove_endpoint(run, sid, port=None, why="", label=None, wait_s=180.0):
+    """Take an endpoint away so that it is in neither the running service nor the table, and say so: DELETE through the API until the service says it is gone or has never heard of it, then
+    delete the row (a service that never heard of it, because its create was not answered, is not told by the API, and the next start would load the row and deliver to it for ever, at
+    the slowest cursor, with nobody listening: the zombies of the third 24 h run), and read the table to see it is gone. Returns True when it is."""
+    end = time.time() + wait_s
+    s = 0
+    while time.time() < end and not run.stop_all.is_set():
+        s, _ = run.admin("DELETE", f"/endpoints/{sid}", None, timeout=8)
+        if s in (200, 404):
+            break
+        if s in (0, 504):
+            g, _ = run.read(f"/endpoints/{sid}", timeout=5)
+            if g == 404:
+                s = 404
+                break
+        time.sleep(1.5)
+    row_gone = None
+    try:
+        run.psql_rows(f"delete from endpoints where id = {int(sid)}")
+        row_gone = not run.psql_rows(f"select id from endpoints where id = {int(sid)}")
+    except Exception as ex:  # noqa: BLE001
+        run.log("harness-event", what="zombie-row-delete-failed", svc_id=sid, error=repr(ex)[:200])
+    ok = s in (200, 404) and row_gone is not False
+    run.counts["zombies_removed" if why else "endpoints_removed"] += 1
+    if why or not ok:
+        run.log("harness-event", what="endpoint-removed", svc_id=sid, port=port, label=label, why=why, api_status=s, row_gone=row_gone)
+    if not ok:
+        run.violate("P_zombie_endpoint", ep=label, svc_id=sid, status=s, row_gone=row_gone, why=why)
+    return ok
+
+
 class Enabler(threading.Thread):
     """An endpoint that answered 410 is disabled until someone enables it: this is that someone, for the `gone` class. For any other class a disabled endpoint is a finding.
 
-    It is also the janitor: a create that was not answered (the database was frozen, or cut) may have been made after the harness gave up on it, and an endpoint the harness does not know of,
-    with no receiver to answer it, is a factory of dead letters and a pin on the log. One that has been seen for 5 s is looked up by its port in the table, matched to the receiver the harness
-    made for it, and deleted."""
+    It is also the janitor: **the service may only hold the endpoints the harness means it to hold.** A create that was not answered (the database was frozen, or cut) may have been made
+    after the harness gave up on it, and an endpoint that is in the service and that the harness does not intend (one it has not been told of for 5 s, or one it deleted and that came back
+    with the next start, which loads the table) is a factory of dead letters at the slowest cursor and a pin on the log. Each is deleted through the API and its row removed, its receiver
+    is taken away, and the port is given back, and each is a harness event in `chaos.jsonl` (`endpoint-removed`, with the reason) and counted (`zombies_removed`). What the harness does
+    intend is never touched: an endpoint that really exists is judged like any other. After each start of the service the first list is logged (`reconcile`)."""
 
     def __init__(self, run):
         super().__init__(daemon=True, name="enabler")
         self.r = run
         self.unknown = {}
+        self.inc_seen = None
 
     def run(self):
         r = self.r
         while not r.stop_all.is_set():
             r.stop_all.wait(1.5)
-            status, eps = r.read("/endpoints")
+            self.step()
+
+    def step(self):
+        r = self.r
+        if True:
+            inc = r.svc.inc
+            status, eps = r.read("/endpoints?limit=256")
             if status != 200 or not isinstance(eps, list):
-                continue
+                return
             now = time.time()
-            seen = set()
+            seen, zombies = set(), []
             for e in eps:
                 label = r.label_of.get(e["id"])
-                if not label:
-                    seen.add(e["id"])
-                    since = self.unknown.setdefault(e["id"], now)
-                    if now - since > 5.0:
-                        self.stray(e["id"])
+                ep = r.eps.get(label) if label else None
+                if ep is not None and ep.active:
+                    if e.get("disabled") and ep.cls == "gone" and not r.stop.is_set():
+                        s, _ = r.admin("POST", f"/endpoints/{e['id']}/enable", None, timeout=5)
+                        r.counts["enables"] += s == 200
                     continue
-                if e.get("disabled") and r.eps[label].cls == "gone" and not r.stop.is_set():
-                    s, _ = r.admin("POST", f"/endpoints/{e['id']}/enable", None, timeout=5)
-                    r.counts["enables"] += s == 200
+                pending = next((x for x in r.eps.values() if x.port == e.get("port") and x.svc_id is None and x.active), None)
+                if pending is not None and now - pending.created_at < 90.0:
+                    continue        # a create that is being waited on (Churn.reconcile): its own thread settles it
+                if ep is not None and not ep.active and now - ep.retired_at < 15.0:
+                    continue        # being deleted just now
+                seen.add(e["id"])
+                since = self.unknown.setdefault(e["id"], now)
+                zombies.append((e, label, pending, now - since))
+            if self.inc_seen != inc:
+                self.inc_seen = inc
+                r.log("harness-event", what="reconcile", inc=inc, listed=len(eps), intended=sum(1 for x in r.eps.values() if x.active and x.svc_id is not None),
+                      unintended=[e["id"] for e, *_ in zombies])
+            for e, label, pending, age in zombies:
+                if age > 5.0:
+                    self.stray(e, label, pending)
             for k in [k for k in self.unknown if k not in seen]:
                 del self.unknown[k]
 
-    def stray(self, sid):
+    def stray(self, e, label, pending):
         r = self.r
-        try:
-            rows = r.psql_rows(f"select port from endpoints where id = {sid}")
-        except Exception:  # noqa: BLE001
-            return
-        port = int(rows[0][0]) if rows else None
-        ep = next((e for e in r.eps.values() if e.port == port and e.svc_id is None), None) if port else None
+        sid, port = e["id"], e.get("port")
+        ep = pending
         if ep is not None:
             ep.svc_id = sid
             r.label_of[sid] = ep.label
             with r.vlock:
                 r.verifier.activate(ep.label, 0, time.time(), ambiguous=True)
             r.log("stray", svc_id=sid, label=ep.label, port=port)
-        elif port is not None:
+        elif label is not None:
+            ep = r.eps[label]
+            r.log("stray", svc_id=sid, label=label, port=port, note="deleted before, and the service has it again (loaded from the table at a start)")
+        else:
             r.log("stray", svc_id=sid, label=None, port=port, note="not one of the harness's")
-            return
-        s, _ = r.admin("DELETE", f"/endpoints/{sid}", None, timeout=8)
-        if s in (200, 404):
+        why = "unanswered create" if pending is not None else ("came back at a start" if label is not None else "unknown to the harness")
+        if remove_endpoint(r, sid, port, why=why, label=label if label else (ep.label if ep else None)):
             r.counts["strays_deleted"] += 1
-            if ep is not None:
-                r.drop_endpoint(ep)
+            self.unknown.pop(sid, None)
+            if pending is not None:
+                r.drop_endpoint(ep)      # one that was retired before has been dropped already: its receiver and its port were dealt with then
 
 
 # ---- endpoint churn ----------------------------------------------------------------------------------------------------
@@ -239,24 +297,49 @@ class Churn(threading.Thread):
         self.retire(ep)
 
     def reconcile(self, ep):
-        """A create that was not answered: the row may be there. Find it by its port, and take it away."""
+        """A create that was not answered: the row may be there, now or in a moment (the database was frozen or cut; the service answers 504 after five seconds and the row may still go).
+        Look for it by its port in the table every 3 s for a minute; when it is found, take it away (API and row) and take the receiver away. When it is not found the receiver stays for
+        another minute and the table is looked at once more; the janitor (Enabler) catches what is still made after that."""
         r = self.r
-        time.sleep(3.0)
+        end = time.time() + 60
+        sid = None
+        while time.time() < end and not r.stop_all.is_set():
+            time.sleep(3.0)
+            try:
+                rows = find_rows_by_port(r, ep.port)
+            except Exception:  # noqa: BLE001
+                rows = []
+            if rows:
+                sid = rows[0]
+                break
+        if sid is None:
+            threading.Timer(60.0, self.late_look, args=(ep,)).start()
+            return
+        with r.vlock:
+            r.verifier.activate(ep.label, 10 ** 12, time.time(), ambiguous=True)
+        ep.svc_id = sid
+        r.label_of[sid] = ep.label
+        r.log("churn", label=ep.label, step="ambiguous", svc_id=sid)
+        ok = remove_endpoint(r, sid, ep.port, why="unanswered create", label=ep.label)
+        r.drop_endpoint(ep, verified_gone=ok)
+
+    def late_look(self, ep):
+        r = self.r
         try:
-            rows = r.psql_rows(f"select id from endpoints where port = {ep.port}")
+            rows = find_rows_by_port(r, ep.port)
         except Exception:  # noqa: BLE001
-            rows = []
+            rows = None
         if rows:
-            sid = int(rows[0][0])
+            sid = rows[0]
             with r.vlock:
                 r.verifier.activate(ep.label, 10 ** 12, time.time(), ambiguous=True)
             ep.svc_id = sid
             r.label_of[sid] = ep.label
-            r.log("churn", label=ep.label, step="ambiguous", svc_id=sid)
-            self.delete(ep)
-            r.drop_endpoint(ep, keep_receiver=True)
-            return
-        # not there (yet): if the create completes late the janitor (Enabler) finds the endpoint by its port; the receiver stays up for that
+            ok = remove_endpoint(r, sid, ep.port, why="unanswered create, found late", label=ep.label)
+            r.drop_endpoint(ep, verified_gone=ok)
+        else:
+            # nothing: the create did not happen; a quarantine of ten minutes before the port is used again, as a create that is still somewhere in the service would send to it
+            r.drop_endpoint(ep, verified_gone=rows == [], quarantine=600.0)
 
     def retire(self, ep):
         r = self.r
@@ -278,33 +361,22 @@ class Churn(threading.Thread):
             if not r.stop.is_set() and m is not None:
                 with r.vlock:
                     r.verifier.v.add("END_lag", ep=ep.label, why="a created endpoint did not catch up within 60 s", m=m)
-        self.delete(ep)
+        gone = self.delete(ep)
         with r.vlock:
             r.verifier.retire(ep.label, time.time())
         ep.active = False
         ep.retired_at = time.time()
         r.counts["churn_done"] += 1
-        threading.Timer(12.0, lambda: r.recv({"op": "remove", "label": ep.label})).start()
+        r.release_receiver(ep, verified_gone=gone)
 
     def delete(self, ep):
-        """DELETE until the service says it is gone (or has never heard of it). A database that is cut or frozen refuses it with a 503 or a 504 for as long as the fault lasts, so
-        this waits that out: an endpoint that is left behind with no receiver is a dead letter factory and a pin on the log, and that is the harness's fault, not the service's."""
+        """Delete until the service says it is gone (or has never heard of it) and the row is gone from the table: a database that is cut or frozen refuses with a 503 or a 504 for as long as
+        the fault lasts, so this waits that out: an endpoint that is left behind with no receiver is a dead letter factory and a pin on the log, and that is the harness's fault, not the
+        service's. Returns whether it is gone."""
         r = self.r
-        end = time.time() + 180
-        s = 0
-        while time.time() < end:
-            s, _ = r.admin("DELETE", f"/endpoints/{ep.svc_id}", None, timeout=8)
-            if s in (200, 404):
-                break
-            if s in (0, 504):
-                g, _ = r.read(f"/endpoints/{ep.svc_id}", timeout=5)      # the row may have gone although the answer did not come
-                if g == 404:
-                    s = 404
-                    break
-            time.sleep(1.5)
-        r.log("churn", label=ep.label, step="deleted", status=s)
-        if s not in (200, 404):
-            r.violate("P_zombie_endpoint", ep=ep.label, svc_id=ep.svc_id, status=s)
+        ok = remove_endpoint(r, ep.svc_id, ep.port, label=ep.label)
+        r.log("churn", label=ep.label, step="deleted", ok=ok)
+        return ok
 
 
 # ---- the sick endpoint -------------------------------------------------------------------------------------------------
@@ -349,33 +421,99 @@ def sweep_dead(run, e, rounds=40):
 
 # ---- backups -----------------------------------------------------------------------------------------------------------
 
+BACKUPS_KEPT = 2          # the newest backup is what the restore check reads; the one before it is kept in case the newest is not good. Nothing older is.
+
+
+def run_group(cmd, timeout, env=None):
+    """Run a command in a process group of its own and, when it takes longer than `timeout`, kill the whole group: `subprocess.run(timeout=)` kills only the child (the `bash` of
+    backup.sh), and the `cp` and the checker it started went on running, with the directory they were writing left behind. Returns (completed process or None on timeout, stdout, stderr)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        return None, "", ""
+
+
+def checker_kind():
+    """Which log checker backup.sh and restore.sh will use. They look for the native `hooks-logcheck` beside themselves, in `build/` or `bin/`, or on the PATH, and use scripts/logcheck.py
+    (Python) when there is none; this looks in the same places, so that a backup's log says which one it was."""
+    from common import ROOT
+    for c in (os.path.join(ROOT, "scripts", "hooks-logcheck"), os.path.join(ROOT, "build", "hooks-logcheck"), os.path.join(ROOT, "bin", "hooks-logcheck"), shutil.which("hooks-logcheck")):
+        if c and os.access(c, os.X_OK):
+            return "native hooks-logcheck"
+    return "python logcheck.py"
+
+
+def backup_timeout(datadir, native):
+    """Seconds a backup may take: the copy and the check of the logs scale with their size (the Python checker reads about 1.5 MB a second, the native one far faster), so a fixed
+    180 s was a verdict on the size of the directory."""
+    mb = dir_mb(datadir)
+    return min(3600.0, (90.0 + 0.1 * mb) if native else (120.0 + 1.2 * mb)), mb
+
+
+def dir_mb(d):
+    from service import dir_usage
+    return dir_usage(d)[0] / 1048576.0
+
+
+def remove_partials(out):
+    """The `.partial` directories a backup that was killed leaves in `out` (backup.sh writes under that name and renames when the copy verified). Returns how many were left that could not be removed."""
+    left = 0
+    try:
+        names = [n for n in os.listdir(out) if n.endswith(".partial")]
+    except OSError:
+        return 0
+    for n in names:
+        shutil.rmtree(os.path.join(out, n), ignore_errors=True)
+        if os.path.exists(os.path.join(out, n)):
+            left += 1
+    return left
+
+
 def run_backup(run, restore=False):
     """An online backup of the live service (scripts/backup.sh), and, if asked, a restore of it into a scratch directory, checked by logcheck and against the poster's ledger."""
     from common import ROOT
     out = os.path.join(run.out, "backups")
     os.makedirs(out, exist_ok=True)
+    remove_partials(out)        # what an earlier backup left (a run that was resumed after a crash)
     with run.vlock:
         m0 = run.poster.max_id
     t0 = time.time()
+    kind = checker_kind()
+    timeout, mb = backup_timeout(run.datadir, kind.startswith("native"))
     cmd = ["bash", os.path.join(ROOT, "scripts", "backup.sh"), "--dir", run.datadir, "--out", out, "--mode", "online", "--pg-database", run.pg["db"], "--pg-host", run.pg["host"],
            "--pg-port", str(run.pg["port"]), "--pg-user", run.pg["user"], "--skip-attempts"]
-    try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=run.pg_env())
-    except subprocess.TimeoutExpired:
-        run.violate("K_backup", why="backup.sh did not finish in 180 s")
+    p, so, se = run_group(cmd, timeout, env=run.pg_env())
+    if p is None:
+        left = remove_partials(out)
+        run.log("backup", status="timeout", seconds=round(time.time() - t0, 2), timeout_s=round(timeout), data_mb=round(mb, 1), checker=kind, partials_left=left)
+        run.violate("K_backup", why=f"backup.sh did not finish in {timeout:.0f} s (the data directory is {mb:.0f} MB; checker: {kind})")
         return None
     run.counts["backups"] += 1
-    run.log("backup", status=p.returncode, seconds=round(time.time() - t0, 2), stderr=p.stderr[-300:] if p.returncode else "")
+    run.log("backup", status=p.returncode, seconds=round(time.time() - t0, 2), timeout_s=round(timeout), data_mb=round(mb, 1), checker=kind, stderr=se[-300:] if p.returncode else "")
     if p.returncode != 0:
-        run.violate("K_backup", status=p.returncode, stderr=p.stderr[-500:])
+        remove_partials(out)
+        run.violate("K_backup", status=p.returncode, stderr=se[-500:])
         return None
-    dirs = sorted(d for d in os.listdir(out) if d.startswith("hooks-backup-"))
+    dirs = sorted(d for d in os.listdir(out) if d.startswith("hooks-backup-") and not d.endswith(".partial"))
     path = os.path.join(out, dirs[-1])
     ok = True
     if restore:
         ok = restore_check(run, path, m0)
-    for d in dirs[:-1]:
-        subprocess.run(["rm", "-rf", os.path.join(out, d)])
+    for d in dirs[:-BACKUPS_KEPT]:
+        shutil.rmtree(os.path.join(out, d), ignore_errors=True)
+    left = remove_partials(out)
+    if left:
+        run.violate("K_backup", why=f"{left} .partial directories could not be removed from {out}")
     return ok
 
 
@@ -389,22 +527,22 @@ def restore_check(run, backup, m0):
     os.makedirs(scratch)
     # `restore.sh` checks the pair of logs with `logcheck.py`, which is Python: about 1.5 MB a second, so 400 MB of logs takes four and a half minutes of CPU on an idle
     # core. The second 24 h run died here, in a timeout of 180 s, and left no verdict. A timeout is a finding, never a crash.
-    try:
-        p = subprocess.run(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        run.violate("K_restore", why=f"restore.sh did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+    native = checker_kind().startswith("native")
+    tmo = max(RESTORE_TIMEOUT_S if not native else 300.0, backup_timeout(run.datadir, native)[0])
+    p, so, se = run_group(["bash", os.path.join(ROOT, "scripts", "restore.sh"), "--backup", backup, "--dir", scratch], tmo)
+    if p is None:
+        run.violate("K_restore", why=f"restore.sh did not finish in {tmo:.0f} s")
         return False
     run.counts["restores"] += 1
     if p.returncode != 0:
-        run.violate("K_restore", status=p.returncode, stderr=p.stderr[-500:])
+        run.violate("K_restore", status=p.returncode, stderr=se[-500:])
         return False
-    try:
-        q = subprocess.run(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], capture_output=True, text=True, timeout=RESTORE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        run.violate("K_restore", why=f"logcheck.py did not finish in {RESTORE_TIMEOUT_S:.0f} s")
+    q, qo, qe = run_group(["python3", os.path.join(ROOT, "scripts", "logcheck.py"), "check", scratch], tmo)
+    if q is None:
+        run.violate("K_restore", why=f"logcheck.py did not finish in {tmo:.0f} s")
         return False
     if q.returncode != 0:
-        run.violate("K_restore", why="logcheck does not accept the restored directory", out=q.stdout[-500:])
+        run.violate("K_restore", why="logcheck does not accept the restored directory", out=qo[-500:])
         return False
     chaos = common.chaos_module()  # tests/chaos.py: an independent reader of the log
     recs, torn = chaos.read_events(scratch)

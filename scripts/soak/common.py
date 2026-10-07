@@ -122,8 +122,9 @@ def flap_window(seed, label, cycle):
 
 # ---- the ledgers -------------------------------------------------------------------------------------------------------
 
-# The receivers' ledger: one record for every request that reached a receiver, written before the receiver answers.
-#   t       when the request was fully read (receiver's clock, Unix seconds)
+# The receivers' ledger: one record for every request that reached a receiver, written before the receiver answers (one file for each receiver process:
+# `ledger/recv-<shard>.bin`).
+#   t       when the request was fully read (receiver's clock, Unix seconds): the time of the delivery for every judgement the checker makes
 #   ep      the endpoint's index in spec.json (not the service's id: the harness's own name for it)
 #   ev      the event id the service gave (from `webhook-id`)
 #   n       the poster's number of the event (a cron event: the scheduled second)
@@ -132,8 +133,14 @@ def flap_window(seed, label, cycle):
 #   flags   below
 #   status  the status the receiver answered (0: it closed without one)
 #   e2e_ms  the receiver's clock minus the time the poster sent the event (0 for cron), capped
-REC = struct.Struct("<dHQQHBBHI")
+#   t_sent  when the answer was sent (the moment F_EFF was decided: a 2xx sent within 1.6 s of `t`, on a connection that was still open)
+REC = struct.Struct("<dHQQHBBHId")
 F_SIG, F_EFF, F_TS, F_BODY, F_TWO, F_NEW, F_OLD, F_RISK = 1, 2, 4, 8, 16, 32, 64, 128   # F_RISK: answered later than half a second
+
+
+def recv_ledger(out, shard):
+    return os.path.join(out, "ledger", f"recv-{shard}.bin")
+
 
 # The poster's ledger: every event that got a `202`, and every one that did not (in doubt).
 #   t_ack, t_send, n, id (0 if in doubt), typ, flags, pad

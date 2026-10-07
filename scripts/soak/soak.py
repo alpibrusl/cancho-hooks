@@ -35,6 +35,7 @@ sys.path.insert(0, HERE)
 import common  # noqa: E402,F401  (puts tests/ on the path)
 from common import ACK, CLASSES, EP_MAX, ROOT, plan_endpoints, share  # noqa: E402
 import faults  # noqa: E402
+import guard as guardmod  # noqa: E402
 import monitor  # noqa: E402
 import series  # noqa: E402
 import workers  # noqa: E402
@@ -61,6 +62,7 @@ class EpInfo:
         self.svc_id = None
         self.c0 = None
         self.active = True
+        self.created_at = time.time()
         self.retired_at = 0.0       # when it was retired: the saved state forgets a retired endpoint after RETIRED_KEEP_S
         self.cursor = 0
 
@@ -72,21 +74,44 @@ class EpInfo:
                 "active": self.active, "params": self.params}
 
 
-def alloc_port(taken, lo=24000, hi=31999):
-    """A port below the range the kernel hands out to outgoing connections, so that a receiver that closes its listener for a few seconds can have it back."""
-    for p in range(lo, hi):
-        if p in taken:
-            continue
-        s = socket.socket()
-        try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("127.0.0.1", p))
-        except OSError:
-            continue
-        finally:
-            s.close()
-        taken.add(p)
-        return p
+_PORT_LOCK = threading.Lock()
+
+
+def port_usable(p):
+    """Can a receiver listen on this port now? Nothing is bound to it (with SO_REUSEADDR, as the receivers do it: a connection of an earlier endpoint that is closing does not count) and
+    nothing listens on it."""
+    s = socket.socket()
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", p))
+    except OSError:
+        return False
+    finally:
+        s.close()
+    c = socket.socket()
+    c.settimeout(0.2)
+    try:
+        return c.connect_ex(("127.0.0.1", p)) != 0
+    finally:
+        c.close()
+
+
+def alloc_port(taken, lo=24000, hi=31999, free=None):
+    """A port below the range the kernel hands out to outgoing connections, so that a receiver that closes its listener for a few seconds can have it back. Under a lock: three churn
+    threads ask at once, and two that both found a port free before either wrote it down were given the same one. `free` is the list of (time it may be used again, port) of the
+    ports of endpoints that are gone and known to be gone: they are used first, so that a run of a day does not run through the range."""
+    with _PORT_LOCK:
+        if free:
+            now = time.time()
+            for i, (at, p) in enumerate(free):
+                if at <= now and port_usable(p):
+                    del free[i]
+                    return p
+        for p in range(lo, hi):
+            if p in taken or not port_usable(p):
+                continue
+            taken.add(p)
+            return p
     raise RuntimeError("no free port")
 
 
@@ -132,6 +157,7 @@ class Run:
         self.eps, self.label_of = {}, {}
         self.next_idx = 0
         self.taken = set()
+        self.free_ports = []         # (time it may be used again, port): see alloc_port
         self.bursting = False
         self.quiet_replays = False
         self.last_stats, self.last_stats_t = {}, 0.0
@@ -142,7 +168,8 @@ class Run:
         self.quiet_s = self.duration * a.quiet_fraction
         if self.duration >= 7200:
             self.quiet_s = max(self.quiet_s, 1800.0)
-        self.receivers = self.probe = self.proxy = self.poster = self.checker = self.watcher = self.svc = None
+        self.receivers = []
+        self.probe = self.proxy = self.poster = self.checker = self.watcher = self.svc = None
         self.final = {}
         self.phase = 0               # 0 the run, 1 the drain, 2 after the clean stop
         self.service_cpus = self.harness_cpus = None
@@ -153,15 +180,20 @@ class Run:
         self.unexpected_exits = []
         self.chaos_log = None
         self.violations = Violations(sink=self.write_violation)
-        self.verifier = Verifier(self.seed, violations=self.violations)
+        self.verifier = Verifier(self.seed, violations=self.violations, max_age_s=a.max_age_s if a.max_age_s > 0 else None)
+        self.expired_seen = {}       # incarnation -> the largest events_expired the service reported (it counts from its start)
         self.viol_f = None
         self.t_first_violation = None
         self.resumed = False
-        self.ctl_port = None
+        self.ctl_ports = {}
+        self.nrecv = max(1, a.receiver_procs)
+        self.recv_paths = [common.recv_ledger(self.out, k) for k in range(self.nrecv)]
         self.dns = None
         self.cron_ids = {}
         self.saved_fault_counts = {}
         self.faults = None
+        self.guard = guardmod.Guard(rate=a.rate, replay_cap=a.replay_cap)
+        self.invalid_announced = 0
 
     # ---- small things
     def elapsed(self):
@@ -191,6 +223,23 @@ class Run:
     def violate(self, tag, **kw):
         with self.vlock:
             self.violations.add(tag, **kw)
+
+    def mark_invalid(self, code, why):
+        """The run can no longer be evidence about the service: say so, loudly, and in `run.json` from this moment (it is also in the verdict). The run ends early unless --no-early-stop."""
+        t = time.time()
+        print(f"\n*** RUN INVALID at {self.elapsed():.0f} s: {why} ***\n", flush=True)
+        self.log("invalid", code=code, why=why)
+        try:
+            with open(self.path("run.json")) as f:
+                info = json.load(f)
+            info["valid"] = False
+            info.setdefault("invalid", {})[code] = {"at": t, "elapsed_s": round(self.elapsed(), 1), "why": why}
+            tmp = self.path("run.json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(info, f, indent=1, default=str)
+            os.replace(tmp, self.path("run.json"))
+        except (OSError, ValueError) as ex:
+            self.log("state_error", error=f"run.json: {ex!r}")
 
     def pg_env(self):
         env = dict(os.environ)
@@ -234,9 +283,13 @@ class Run:
     def admin(self, method, path, body=None, timeout=8.0):
         return self.http(method, path, body, ADMIN, timeout)
 
-    def recv(self, cmd, timeout=5.0):
+    def shard_of(self, label):
+        ep = self.eps.get(label)
+        return (ep.idx if ep else 0) % self.nrecv
+
+    def recv_one(self, shard, cmd, timeout=5.0):
         try:
-            s = socket.create_connection(("127.0.0.1", self.ctl_port), timeout=timeout)
+            s = socket.create_connection(("127.0.0.1", self.ctl_ports[shard]), timeout=timeout)
             s.sendall((json.dumps(cmd) + "\n").encode())
             buf = b""
             while not buf.endswith(b"\n"):
@@ -246,8 +299,34 @@ class Run:
                 buf += chunk
             s.close()
             return json.loads(buf)
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError):
             return {"error": "no answer"}
+
+    def recv(self, cmd, timeout=5.0):
+        """A command for the receiver process that serves the endpoint (by `label`, or by `spec.idx` for an add), for all of them (`fault`), or the stats of all of them added together
+        (`procs` has each one's own: the guard judges a process, not the sum)."""
+        op = cmd.get("op")
+        if op == "add":
+            return self.recv_one(cmd["spec"]["idx"] % self.nrecv, cmd, timeout)
+        if "label" in cmd:
+            return self.recv_one(self.shard_of(cmd["label"]), cmd, timeout)
+        if op == "fault":
+            outs = [self.recv_one(k, cmd, timeout) for k in range(self.nrecv)]
+            return outs[0]
+        if op == "stats":
+            procs = [self.recv_one(k, cmd, timeout) for k in range(self.nrecv)]
+            if any("cpu_s" not in x for x in procs):
+                return {"error": "no answer", "procs": procs}
+            n = sum(x["lat_n"] for x in procs)
+            agg = {"records": sum(x["records"] for x in procs), "accepted": sum(x["accepted"] for x in procs), "lat_n": n,
+                   "lat_p50": sum(x["lat_p50"] * x["lat_n"] for x in procs) / n if n else 0, "lat_p99": max(x["lat_p99"] for x in procs), "lat_max": max(x["lat_max"] for x in procs),
+                   "loop_lag_max_ms": max(x["loop_lag_max_ms"] for x in procs), "cpu_s": sum(x["cpu_s"] for x in procs), "rss_kb": sum(x["rss_kb"] for x in procs),
+                   "bind_failures": sum(x["bind_failures"] for x in procs), "bind_stuck": sorted(sum((x["bind_stuck"] for x in procs), [])),
+                   "late_unplanned": sum(x["late_unplanned"] for x in procs), "late_max_ms": max(x["late_max_ms"] for x in procs), "conn_lost": sum(x["conn_lost"] for x in procs),
+                   "sync_fallbacks": sum(x["writer"]["sync_fallbacks"] for x in procs), "writer_wait_max_ms": max(x["writer"]["wait_max_ms"] for x in procs),
+                   "writer_queue_max": max(x["writer"]["queue_max"] for x in procs), "writer_errors": [x["writer"]["error"] for x in procs if x["writer"]["error"]], "procs": procs}
+            return agg
+        return self.recv_one(0, cmd, timeout)
 
     def type_of(self, ev):
         from common import type_name
@@ -260,7 +339,7 @@ class Run:
         with self.vlock:
             idx = self.next_idx
             self.next_idx += 1
-        port = alloc_port(self.taken)
+        port = alloc_port(self.taken, free=self.free_ports)
         ep = EpInfo(label, idx, cls, types, port, tls, secrets, params)
         self.eps[label] = ep
         with self.vlock:
@@ -268,20 +347,34 @@ class Run:
         self.recv({"op": "add", "spec": ep.spec()})
         return ep
 
-    def drop_endpoint(self, ep, keep_receiver=False):
+    def drop_endpoint(self, ep, verified_gone=True, quarantine=30.0, delay=12.0):
+        """The harness is done with an endpoint that was never (or is no longer) in the service: it is retired in the checker, and its receiver is taken away after `delay` (an attempt
+        may be on the wire). The port is given back for reuse only when the endpoint is known to be gone from the service and the table (`verified_gone`)."""
         ep.active = False
         ep.retired_at = time.time()
-        if not keep_receiver:
-            self.recv({"op": "remove", "label": ep.label})
         with self.vlock:
             self.verifier.retire(ep.label, time.time())
+        self.release_receiver(ep, verified_gone, quarantine, delay)
+
+    def release_receiver(self, ep, verified_gone, quarantine=30.0, delay=12.0):
+        if getattr(ep, "released", False):
+            return
+        ep.released = True
+
+        def later():
+            self.recv({"op": "remove", "label": ep.label})
+            if verified_gone:
+                self.free_ports.append((time.time() + quarantine, ep.port))
+            else:
+                self.log("harness-event", what="port-not-reused", port=ep.port, label=ep.label, why="the endpoint is not known to be gone")
+        threading.Timer(delay, later).start()
 
     # ---- state
     def save_state(self):
         with self.state_lock:
             st = {"t": time.time(), "elapsed": self.elapsed(), "inc": self.svc.inc if self.svc else 0, "service_pid": self.svc.pid if self.svc else None,
-                  "receivers_pid": self.receivers.pid if self.receivers else None, "probe_pid": self.probe.pid if self.probe else None, "n_next": self.poster.n_next if self.poster else 1,
-                  "next_idx": self.next_idx, "port": self.port, "ctl_port": self.ctl_port, "cron": self.cron_ids, "dns": self.dns,
+                  "receivers_pids": [p.pid for p in self.receivers], "probe_pid": self.probe.pid if self.probe else None, "n_next": self.poster.n_next if self.poster else 1,
+                  "next_idx": self.next_idx, "port": self.port, "ctl_ports": self.ctl_ports, "cron": self.cron_ids, "dns": self.dns,
                   "eps": {k: v.state() for k, v in self.eps.items() if v.active or time.time() - v.retired_at < RETIRED_KEEP_S}, "counts": dict(self.counts), "faults_count": dict(self.faults.count) if self.faults else {}, "taken": sorted(self.taken),
                   "settled": {k: self.verifier.by_label[k].settled for k, v in self.eps.items() if k in self.verifier.by_label and (v.active or time.time() - v.retired_at < RETIRED_KEEP_S)}, "kills": self.verifier.kills[-50:]}
             if self.poster:
@@ -291,7 +384,7 @@ class Run:
             st["unexpected_exits"] = list(self.unexpected_exits)
             st["unexpected"] = list(self.svc.unexpected[-200:]) if self.svc else []
             with self.vlock:
-                st["notes"] = self.verifier.export_notes()
+                st["notes"] = self.verifier.export_notes(time.time())
             tmp = self.path("state.json.tmp")
             with open(tmp, "w") as f:
                 json.dump(st, f)
@@ -304,6 +397,9 @@ class Run:
                                       "--admin-token", ADMIN, "--ingest-token", INGEST, "--read-token", READ]
         if os.environ.get("HOOKS_PG_PASSWORD"):
             f += ["--pg-password", os.environ["HOOKS_PG_PASSWORD"]]
+        if a.max_age_s > 0:
+            # the hard maximum age (design.md 47.2): a segment older than this is dropped whatever pins it. Without it a waiting replay that never starts keeps the log for ever (the third 24 h run)
+            f += ["--max-age-ms", str(int(a.max_age_s * 1000))]
         if self.dns:
             f += ["--dns-server", f"127.0.0.1:{self.dns['port']}", "--tls-ca-file", self.dns["ca"]]
         return f + list(a.service_arg)
@@ -377,19 +473,22 @@ class Run:
     def start_receivers(self, spec):
         with open(self.path("spec.json"), "w") as f:
             json.dump(spec, f)
-        try:
-            os.remove(self.path("ctl.port"))
-        except OSError:
-            pass
         cpus = ",".join(str(c) for c in sorted(self.harness_cpus)) if self.harness_cpus else ""
-        self.receivers = subprocess.Popen([sys.executable, os.path.join(HERE, "receivers.py"), "--dir", self.out, "--seed", str(self.seed), "--cpus", cpus],
-                                          stdout=open(self.path("receivers.log"), "a"), stderr=subprocess.STDOUT)
+        self.receivers, self.ctl_ports = [], {}
+        for k in range(self.nrecv):
+            try:
+                os.remove(self.path(f"ctl-{k}.port"))
+            except OSError:
+                pass
+            self.receivers.append(subprocess.Popen([sys.executable, os.path.join(HERE, "receivers.py"), "--dir", self.out, "--seed", str(self.seed), "--cpus", cpus, "--shard", str(k),
+                                                    "--shards", str(self.nrecv)], stdout=open(self.path("receivers.log"), "a"), stderr=subprocess.STDOUT))
         end = time.time() + 20
-        while time.time() < end and not os.path.exists(self.path("ctl.port")):
-            if self.receivers.poll() is not None:
-                raise RuntimeError("the receivers did not start: see receivers.log")
-            time.sleep(0.05)
-        self.ctl_port = int(open(self.path("ctl.port")).read())
+        for k in range(self.nrecv):
+            while time.time() < end and not os.path.exists(self.path(f"ctl-{k}.port")):
+                if self.receivers[k].poll() is not None:
+                    raise RuntimeError("the receivers did not start: see receivers.log")
+                time.sleep(0.05)
+            self.ctl_ports[k] = int(open(self.path(f"ctl-{k}.port")).read())
 
     def start_probe(self):
         cpus = ",".join(str(c) for c in sorted(self.harness_cpus)) if self.harness_cpus else ""
@@ -417,6 +516,9 @@ class Run:
 
     def setup(self):
         a = self.args
+        short = guardmod.check_start(allow_low=a.allow_low_memory)
+        if short:
+            raise SystemExit("the run does not start: " + "; ".join(short) + " (--allow-low-memory overrides, and the run says so in run.json)")
         self.pin()
         if a.resume:
             return self.setup_resume()
@@ -494,9 +596,10 @@ class Run:
 
     def write_run_json(self):
         a = self.args
-        info = {"args": {k: v for k, v in vars(a).items()}, "machine": machine(), "binary_sha256": sha256(a.binary), "service_settings": SERVICE_SETTINGS,
+        info = {"args": {k: v for k, v in vars(a).items()}, "machine": machine(), "binary_sha256": sha256(a.binary), "service_settings": SERVICE_SETTINGS + (["--max-age-ms", str(int(a.max_age_s * 1000))] if a.max_age_s > 0 else []),
                 "started": time.time(), "duration_s": self.duration, "quiet_s": self.quiet_s, "pinned": {"service": sorted(self.service_cpus or []), "harness": sorted(self.harness_cpus or [])},
-                "shim": self.shim, "ports": {"service": self.port}, "tmpfs": bool(self.tmpfs)}
+                "shim": self.shim, "ports": {"service": self.port}, "tmpfs": bool(self.tmpfs), "valid": True, "receiver_procs": self.nrecv,
+                "host_at_start": guardmod.HostSampler().sample(time.time()), "meminfo_mb": {k: round(v) for k, v in guardmod.read_meminfo().items() if k in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")}}
         try:
             info["commit"] = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             info["pin"] = open(os.path.join(ROOT, "lex-sys.toml")).read().split('lex-sys = "')[1].split('"')[0]
@@ -555,13 +658,13 @@ class Run:
         except OSError:
             pass
         self.saved_fault_counts = st.get("faults_count", {})
-        for pid_key, needle in (("service_pid", os.path.basename(a.binary)), ("receivers_pid", "receivers.py"), ("probe_pid", "probe.py")):
-            pid = st.get(pid_key)
-            if pid and os.path.exists(f"/proc/{pid}/cmdline"):
-                cmd = open(f"/proc/{pid}/cmdline").read()
-                if needle in cmd and (pid_key != "service_pid" or self.datadir in cmd):
-                    os.kill(pid, signal.SIGKILL)
-                    time.sleep(0.2)
+        for pid_key, needle in (("service_pid", os.path.basename(a.binary)), ("receivers_pids", "receivers.py"), ("probe_pid", "probe.py")):
+            for pid in (st.get(pid_key) if isinstance(st.get(pid_key), list) else [st.get(pid_key)]):
+                if pid and os.path.exists(f"/proc/{pid}/cmdline"):
+                    cmd = open(f"/proc/{pid}/cmdline").read()
+                    if needle in cmd and (pid_key != "service_pid" or self.datadir in cmd):
+                        os.kill(pid, signal.SIGKILL)
+                        time.sleep(0.2)
         if a.tmpfs_data and not os.path.ismount(self.datadir):
             os.makedirs(self.datadir, exist_ok=True)
             self.mount_tmpfs(a.tmpfs_data)
@@ -585,7 +688,7 @@ class Run:
         # when did the old run end? The last heartbeat is up to five seconds before it, and a service that was left running (the harness alone was killed) went on delivering until it was stopped just
         # now: the latest write to either ledger is the best evidence of life
         t_dead = st["t"]
-        for f in (os.path.join("ledger", "recv.bin"), "acked.bin"):
+        for f in [os.path.relpath(x, self.out) for x in self.recv_paths] + ["acked.bin"]:
             try:
                 t_dead = max(t_dead, os.path.getmtime(self.path(f)))
             except OSError:
@@ -700,6 +803,13 @@ class Run:
             if a.stop_after_violation and self.t_first_violation and time.time() - self.t_first_violation > a.stop_after_violation:
                 self.log("early-stop", reason="a violation was found and the run is a self-test")
                 self.early = True
+            if self.guard.invalid and not a.no_early_stop and not a.lenient_validity and not self.early:
+                self.log("early-stop", reason="the run is invalid: " + "; ".join(v["why"] for v in self.guard.invalid.values()))
+                print(f"soak: stopping early at {self.elapsed():.0f} s: the run is invalid (--no-early-stop keeps it going for diagnosis)", flush=True)
+                self.early = True
+            if self.guard.invalid and len(self.guard.invalid) != self.invalid_announced:
+                self.invalid_announced = len(self.guard.invalid)
+                last_print = 0.0
             if time.time() - last_print > a.progress_s:
                 last_print = time.time()
                 self.progress()
@@ -708,8 +818,8 @@ class Run:
         rows = self.watcher.rows[-1:] if self.watcher and self.watcher.rows else []
         r = rows[0] if rows else {}
         print(f"[{self.elapsed():7.0f}s/{self.duration:.0f}s] inc {self.svc.inc} acked {self.poster.counts['acked']} rate {r.get('ingest_per_s', '')}/s lag_max {r.get('lag_max', '')} rss {r.get('rss_kb', '')} "
-              f"fds {r.get('fds', '')} rcv {r.get('receivers_cpu_pct', '')}% kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}",
-              flush=True)
+              f"fds {r.get('fds', '')} rcv {r.get('receivers_cpu_max_pct', '')}%max/{r.get('receivers_cpu_pct', '')}% hrn {r.get('harness_cpu_pct', '')}% avail {r.get('mem_avail_mb', '')}MB kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}"
+              + (f" *** INVALID since {min(v['since'] for v in self.guard.invalid.values()) - self.t0:.0f}s: {', '.join(self.guard.invalid)} ***" if self.guard.invalid else ""), flush=True)
 
     # ---- the end
     def finish(self):
@@ -736,7 +846,7 @@ class Run:
             self.stop_all.set()
             self.checker.join(5)
             self.watcher.join(5)
-            for p in (self.probe, self.receivers):
+            for p in [self.probe] + self.receivers:
                 if p and p.poll() is None:
                     p.terminate()
             self.save_state()
@@ -791,7 +901,7 @@ class Run:
             self.checker.drain()
             cursors = {self.label_of[e["id"]]: e["cursor"] for e in (eps if s == 200 else []) if e["id"] in self.label_of}
             last_id = st["events_last_id"] if s2 == 200 else last_id
-            v.finish(last_id, cursors, caught_up=caught or True)
+            v.finish(last_id, cursors, caught_up=caught or True, now=time.time(), expired_by_service=sum(self.expired_seen.values()) if self.args.max_age_s > 0 else None)
             self.counts["final_last_id"] = last_id
         # the stop: SIGTERM, exit 0, logs that logcheck accepts, and a restart that repeats nothing recorded
         self.log("finish", step="clean stop")
@@ -833,7 +943,7 @@ class Run:
         self.stop_all.set()
         self.checker.join(5)
         self.watcher.join(5)
-        for p in (self.probe, self.receivers):
+        for p in [self.probe] + self.receivers:
             if p and p.poll() is None:
                 p.terminate()
         self.save_state()
@@ -893,7 +1003,7 @@ class Run:
         groups = {"A": "an acknowledged event missing, or an event that is not in the log", "B": "a repeat nothing explains", "C": "a delivery against a filter or of an event older than the endpoint",
                   "D": "a bad, stale or revoked signature, or one signature where two are due", "E": "a cursor that went back or ran ahead", "F": "a dead letter where none may be, or a disabled endpoint",
                   "I": "cron", "J": "the clean stop", "K": "backup and restore", "L": "the service ended or said something it should not", "P": "the poster's own checks",
-                  "END": "an endpoint that had not caught up", "U": "a record of an endpoint that is not in the spec"}
+                  "END": "an endpoint that had not caught up", "G": "a bound the run watched while it went: the disk against what retention allows, the table of waiting replays", "U": "a record of an endpoint that is not in the spec"}
         tally = {}
         for tag, n in v.count.items():
             key = "END" if tag.startswith("END") else tag[0]
@@ -923,18 +1033,24 @@ class Run:
             reasons.append(f"the harness used {sum(hcpu) / len(hcpu):.0f} % of a core on average")
         if over > 0.1:
             reasons.append(f"the load average was above the {cores} cores in {over * 100:.0f} % of the samples")
-        rcv = [float(r["receivers_cpu_pct"]) for r in rows if r.get("receivers_cpu_pct") not in (None, "")]
+        rcv = [float(r["receivers_cpu_max_pct"]) for r in rows if r.get("receivers_cpu_max_pct") not in (None, "")]
         lag = [float(r["recv_loop_lag_max_ms"]) for r in rows if r.get("recv_loop_lag_max_ms") not in (None, "")]
         rcv_over = sum(1 for x in rcv if x > 85) / len(rcv) if rcv else 0.0
         lag_over = sum(1 for x in lag if x > 250) / len(lag) if lag else 0.0
         if rcv_over > 0.05 or lag_over > 0.05:
             reasons.append(f"the receivers' process was above 85 % of a core in {rcv_over * 100:.0f} % of the samples and its loop was late by more than 250 ms in {lag_over * 100:.0f} %: "
                            "a receiver that answers late is a failed attempt to the service, so the lag, the repeats and the late deliveries that follow are the harness's")
-        valid = {"valid": not reasons, "reasons": reasons, "receivers_over_85_fraction": round(rcv_over, 3), "receivers_loop_late_fraction": round(lag_over, 3), "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
+        # what the guard found while the run went on (each at the moment it was met): they are the run's reasons too, with the time
+        for code, g in self.guard.invalid.items():
+            reasons.append(f"[{g['since'] - self.t0 + self.elapsed_before:.0f} s] {g['why']}")
+        valid = {"valid": not reasons, "invalid_at_s": round(min(g["since"] for g in self.guard.invalid.values()) - self.t0 + self.elapsed_before) if self.guard.invalid else None,
+                 "stopped_early": bool(self.early and self.guard.invalid), "reasons": reasons, "receivers_over_85_fraction": round(rcv_over, 3), "receivers_loop_late_fraction": round(lag_over, 3), "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
                  "loadavg_over_cores_fraction": round(over, 3), "cores": cores}
         failed = [r["id"] for r in results if r["ok"] is False]
         status = "FAIL" if failed else "PASS"
-        if status == "PASS" and reasons and not a.lenient_validity:
+        if reasons and not a.lenient_validity:
+            # a run that is not valid is not evidence for or against the service, whatever it found: it is INCONCLUSIVE, and what it found is listed (`failed`, and the violations) so that
+            # nothing is hidden, and the next valid run is the one that counts
             status = "INCONCLUSIVE"
         out = {"verdict": status, "failed": failed, "not_evaluated": [{"id": r["id"], "why": r.get("why")} for r in results if r["ok"] is None], "validity": valid,
                "checks": results, "violations": dict(v.count), "examples": {k: x[:20] for k, x in v.examples.items()}, "summary": self.verifier.summary(), "counts": dict(self.counts),
@@ -958,6 +1074,8 @@ def parse(argv):
     p.add_argument("--churn", type=int, default=3, help="threads that create, change and delete endpoints")
     p.add_argument("--schedules", type=int, default=2, choices=[0, 1, 2], help="cron schedules to make (every second; every fifth second)")
     p.add_argument("--workers", type=int, default=6, help="threads of the poster")
+    p.add_argument("--receiver-procs", type=int, default=2, help="processes the receivers run as (the endpoints are divided by idx modulo this; one ledger each): each should stay under 85 %% of a core, "
+                   "see docs/soak.md")
     p.add_argument("--pg", default=os.environ.get("HOOKS_PG", ""), help="host:port:user:database (default $HOOKS_PG); the database is truncated")
     p.add_argument("--out", default="soak-out")
     p.add_argument("--resume", help="continue the run in this directory")
@@ -985,6 +1103,11 @@ def parse(argv):
     p.add_argument("--min-tail-s", type=float, default=None)
     p.add_argument("--stall-ms", type=float, default=500.0)
     p.add_argument("--p999-ms", type=float, default=50.0)
+    p.add_argument("--max-age-s", type=float, default=1200.0, help="the service's hard maximum age of an event (--max-age-ms): bounds the data of a run whatever pins the log; a loss at an endpoint is excused as an expiry only for events older than this, "
+                   "and the number excused is held against the service's events_expired. 0: none")
+    p.add_argument("--no-early-stop", action="store_true", help="go on after the run has been found invalid (it is marked invalid in run.json from that moment either way): for diagnosis")
+    p.add_argument("--allow-low-memory", action="store_true", help="start although the host is short of memory or swap (the run records it in run.json)")
+    p.add_argument("--replay-cap", type=int, default=32, help="the service's table of waiting replays: a table that stays full for three minutes is a violation (G_replays_pinned)")
     p.add_argument("--lenient-validity", action="store_true", help="a run that is not valid is still passed or failed on the invariants (the self-test)")
     p.add_argument("--fault", choices=["lose", "dup", "liar"], help="inject a fault into the harness's own world: the run must FAIL (the self-test)")
     p.add_argument("--waive", default="", help="a comma list of violation tags that do not fail the verdict (they are listed as waived): for looking past a known finding")
@@ -1028,7 +1151,7 @@ def run_main(a):
     run = Run(a)
     if a.calibrate:
         a.sample_s = 3600.0
-    atexit.register(lambda: [p.kill() for p in (run.receivers, run.probe, run.svc.proc if run.svc else None) if p and p.poll() is None])
+    atexit.register(lambda: [p.kill() for p in run.receivers + [run.probe, run.svc.proc if run.svc else None] if p and p.poll() is None])
     signal.signal(signal.SIGTERM, lambda *_: run.stop.set())
     run.setup()
     # `kill -USR1 <pid>` writes the stack of every thread to <out>/stacks.txt: what a thread that spins is doing, without stopping the run.
@@ -1099,7 +1222,7 @@ def calibrate(run):
     run.poster.stop(timeout=60)
     run.stop_all.set()
     run.svc.term(15)
-    for p in (run.probe, run.receivers):
+    for p in [run.probe] + run.receivers:
         if p and p.poll() is None:
             p.terminate()
     out = {"steps": steps, "sustained_events_per_s": best["rate"] if best else None, "limited_by": None, "endpoints": a.endpoints, "schedules": a.schedules, "machine": machine(),
@@ -1115,14 +1238,29 @@ def calibrate(run):
     return 0
 
 
+def unit_tests():
+    """The offline tests of the harness's own parts (scripts/soak/tests/test_*.py): each is a program that exits 0 when its checks pass. Returns the names of those that failed."""
+    import glob
+    failed = []
+    for f in sorted(glob.glob(os.path.join(HERE, "tests", "test_*.py"))):
+        r = subprocess.run([sys.executable, f], capture_output=True, text=True)
+        print(r.stdout, end="")
+        if r.returncode != 0:
+            print(r.stderr[-1500:], end="")
+            failed.append(os.path.basename(f))
+    return failed
+
+
 def selftest(a):
     """The harness against itself (docs/soak.md): the checker on mutated ledgers, then three minutes on the real service clean (must pass) and with a fault injected (must fail)."""
     import selftest_ledger
     results = []
     rc = selftest_ledger.main()
     results.append(("the checker catches every mutation of the ledgers", rc == 0, ""))
+    bad = unit_tests()
+    results.append(("the harness's own parts pass their tests", not bad, ", ".join(bad)))
     if a.selftest_ledger:
-        return 0 if rc == 0 else 1
+        return 0 if rc == 0 and not bad else 1
     if not a.binary or not a.pg:
         print("--selftest needs --binary and --pg (or HOOKS_PG) for the runs on the service", file=sys.stderr)
         return 2
@@ -1182,7 +1320,7 @@ def main(argv=None):
     if a.selftest or a.selftest_ledger:
         if a.selftest_ledger and not a.selftest:
             import selftest_ledger
-            return selftest_ledger.main()
+            return 0 if selftest_ledger.main() == 0 and not unit_tests() else 1
         return selftest(a)
     finalize_args(a, p)
     return run_main(a)
