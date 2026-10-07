@@ -8,7 +8,7 @@ cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/cancho-log"
-rev = "6e3f0de811d1d27481f7cf012ff4f9ffdb06becb"
+rev = "71128de72692427b094429fc729d82435144b2e9"
 path = ".cancho-vcs/log"
 
 [dependencies.server]
@@ -33,7 +33,7 @@ path = ".cancho-vcs"
 
 [dependencies.web]
 git = "https://github.com/alpibrusl/cancho-web"
-rev = "4fd7f42db7501ff139e0c04a01448921a204d673"
+rev = "7f261354f74c322cecce9449650899091a2482a5"
 path = ".cancho-vcs"
 
 # cancho's own TLS client and the certificate verifier it needs (cancho epic #197).
