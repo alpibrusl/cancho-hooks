@@ -68,7 +68,7 @@ a:focus-visible, button:focus-visible, pre:focus-visible, .scroll:focus-visible 
 
 header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
 header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
-.brand { font-weight: 700; color: var(--fg); text-decoration: none; font-family: var(--mono); letter-spacing: -0.01em; }
+.brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; } .brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
 nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; padding: 0; }
 nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; display: inline-block; }
 nav a:hover { color: var(--fg); text-decoration: underline; }
@@ -157,7 +157,7 @@ footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; fl
 
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="./">cancho-hooks</a>
+    <a class="brand" href="./"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
     <nav aria-label="Pages">
       <ul>
         <li><a href="./">Overview</a></li>

@@ -23,7 +23,7 @@ fail() { echo "release-smoke: FAIL: $*" >&2; exit 1; }
 # 2. the tarball holds what it says
 tar -xzf "$tarball" -C "$work"
 root=$(find "$work" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-for f in bin/hooks bin/hooks-mcp bin/hooks-logcheck deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
+for f in bin/hooks bin/hooks-mcp bin/hooks-logcheck docs/assets/cancho-hooks-logo.jpg deploy/hooks.service scripts/backup.sh scripts/restore.sh sql/schema.sql README.md LICENSE Dockerfile; do
   [ -e "$root/$f" ] || fail "the tarball has no $f"
 done
 [ -x "$root/bin/hooks" ] || fail "bin/hooks is not executable"

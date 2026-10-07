@@ -38,7 +38,8 @@ a:focus-visible, .btn:focus-visible, pre:focus-visible { outline: 3px solid var(
 
 header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
 header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
-.brand { font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+.brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+.brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
 nav { display: flex; gap: 1.2rem; margin-left: auto; }
 nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
 nav a:hover { color: var(--fg); }
@@ -119,7 +120,7 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="top"><div class="wrap">
-  <a class="brand" href="#top">cancho-hooks</a>
+  <a class="brand" href="#top"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
   <nav aria-label="Sections">
     <a href="#why" class="opt">Why</a><a href="#proof" class="opt">Evidence</a><a href="#fit" class="opt">Where it fits</a><a href="#start">Try it</a>
     <a href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
