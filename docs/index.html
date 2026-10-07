@@ -260,12 +260,22 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
 
 <section id="start">
   <h2>Try it</h2>
+  <h3 style="margin-top:1.2rem">Download</h3>
+  <pre class="code" tabindex="0"><code>curl -fLO https://github.com/alpibrusl/cancho-hooks/releases/download/v0.1.0-alpha.1/hooks-0.1.0-alpha.1-linux-x86_64.tar.gz
+tar -xzf hooks-0.1.0-alpha.1-linux-x86_64.tar.gz &amp;&amp; cd hooks-0.1.0-alpha.1-linux-x86_64
+mkdir data &amp;&amp; echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" &gt; data/endpoints.conf
+bin/hooks --port 8080 --dir data --allow-private-hosts 1 &amp;
+sleep 1                                           # until it listens
+curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre>
+  <p class="note">Linux, x86-64 and arm64 (use <code>aarch64</code> for arm64), or as a container: <code>docker run -p 8080:8080 ghcr.io/alpibrusl/cancho-hooks:0.1.0-alpha.1</code>. Each file has a checksum and the tarballs a build attestation you can verify: see the <a href="https://github.com/alpibrusl/cancho-hooks#install">README</a> and the <a href="https://github.com/alpibrusl/cancho-hooks/releases">releases</a>.</p>
+  <h3 style="margin-top:1.6rem">Or build it from source</h3>
   <pre class="code" tabindex="0"><code>git clone https://github.com/alpibrusl/cancho-hooks &amp;&amp; cd cancho-hooks
 scripts/build.sh                                  # one binary: build/hooks
 mkdir data &amp;&amp; echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" &gt; data/endpoints.conf
 build/hooks --port 8080 --dir data --allow-private-hosts 1 &amp;
+sleep 1                                           # until it listens
 curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre>
-  <p class="note">Building needs the pinned cancho compiler: the <a href="https://github.com/alpibrusl/cancho-hooks#quick-start">README</a> has the extra lines, and a receiver that verifies each signature.</p>
+  <p class="note">Building needs the pinned cancho compiler: the <a href="https://github.com/alpibrusl/cancho-hooks#quick-start-building-from-source">README</a> has the extra lines, and a receiver that verifies each signature.</p>
 </section>
 
 <section id="cancho">
@@ -327,7 +337,7 @@ curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre
 </main>
 
 <footer><div class="wrap">
-  <a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="evidence.html">Evidence</a>
+  <a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="https://github.com/alpibrusl/cancho-hooks/releases">Releases</a><a href="evidence.html">Evidence</a>
   <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">API</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/runbook.md">Runbook</a>
   <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a>
   <span>Self-hosted: your events stay on your infrastructure.</span>

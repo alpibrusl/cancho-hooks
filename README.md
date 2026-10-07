@@ -19,7 +19,28 @@
 * **Hard to run unsafe.** Scoped tokens, and a `production` profile that refuses to start open; deliveries go only to public addresses, checked at every attempt.
 * **`https` and PostgreSQL**, both optional: TLS with the chain and name verified; endpoints and an attempt history in a table.
 
-## Quick start
+## Install
+
+A prebuilt binary for Linux (x86-64 and arm64), from the [releases](https://github.com/alpibrusl/cancho-hooks/releases) (alpha: see the status above). Each tarball comes with a checksum, and a build attestation that says this repository's release workflow made it:
+
+```sh
+VERSION=0.1.0-alpha.1; ARCH=$(uname -m)                      # ARCH is x86_64 or aarch64
+BASE=https://github.com/alpibrusl/cancho-hooks/releases/download/v$VERSION
+curl -fLO "$BASE/hooks-$VERSION-linux-$ARCH.tar.gz" -O "$BASE/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing                     # it is the file that was published
+gh attestation verify "hooks-$VERSION-linux-$ARCH.tar.gz" --repo alpibrusl/cancho-hooks    # and this repository built it
+tar -xzf "hooks-$VERSION-linux-$ARCH.tar.gz" && cd "hooks-$VERSION-linux-$ARCH"
+mkdir data && echo "0 127.0.0.1 9100 whsec_$(head -c24 /dev/urandom | base64)" > data/endpoints.conf
+bin/hooks --port 8080 --dir data --allow-private-hosts 1 &
+sleep 1                                                      # until it listens
+curl -d '{"type":"user.created"}' localhost:8080/events      # {"id":1}
+```
+
+Or as a container (x86-64): `docker run -d -p 8080:8080 -v hooks-data:/var/lib/hooks ghcr.io/alpibrusl/cancho-hooks:0.1.0-alpha.1`.
+
+The binary uses the system's OpenSSL for `https` delivery (`libssl3`: `apt install libssl3` on Debian and Ubuntu) and a glibc as new as Ubuntu 24.04's. The tarball also holds `bin/hooks-mcp` ([for agents](docs/agents.md)), `bin/hooks-logcheck`, the backup and restore scripts, a systemd unit, and the documents. The [runbook](docs/runbook.md) says how to run it for real; the endpoint above only shows it works (the quick start below has a receiver that verifies the signature).
+
+## Quick start (building from source)
 
 You need `git`, Rust, `gcc`, OpenSSL 3 with its development files (`libssl-dev`), Python 3, and `curl`.
 
