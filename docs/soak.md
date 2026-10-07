@@ -32,12 +32,15 @@ can break), `--cron-seconds 1`, and the logs shrunk so that a month of rolling a
 | `delivery-log-bytes` | 256 KiB | a snapshot of the outcomes log every few seconds |
 | `schedule` | 500, 1000, 2000, 4000, 8000, 16000, 16000, 16000 ms | an event dies after about 64 s of failure: short enough that dead letters happen in the test, and long enough that the chaos an endpoint is put through (below: an outage of up to 10 s, on top of a receiver that fails an attempt of its own, on top of a restart of the service) cannot add up to a death unless a death is the point |
 | `deadline-ms` | 2000 | the default |
+| `max-age-ms` | 1,200,000 (20 min; `--max-age-s`) | the hard maximum age (design.md section 47.2) that nothing can pin: without it waiting replays that never start kept the log for hours in the third 24 h run. See "The maximum age" below |
 | `allow-private-hosts` | 1 | the receivers are on `127.0.0.1` |
 
 The service is pinned to one core with `taskset` and the harness to the others (`--service-cpus`, `--harness-cpus`; the default on a machine with four or
 more cores is the last core for the service and the rest for the harness). **The harness's own CPU is measured and reported** (the processes that make
 the load and keep the ledger, from `/proc`), so that a capacity figure is never one that the harness polluted, and a run in which the harness could not
 hold the rate it was asked for is marked as such rather than passed.
+
+**The receivers** run as `--receiver-procs N` processes (2 by default): the endpoints are divided by index modulo N, each process has its own control port and its own ledger (`ledger/recv-<k>.bin`), and the checker reads the ledgers together, merged by the time of the request. Each process writes its ledger from a thread of its own, a batch at a time, and sends an answer only after the batch holding its record is in the file, so the record is still there before the answer. **A record carries two times**, when the request was read and when the answer was sent, and whether the answer counts (a 2xx sent within 1.6 s of the request, on a connection the service had not closed) is decided when it is sent, not from the delay that was planned: a receiver whose loop is late makes an answer that was meant to be prompt a timeout for the service, and the record now says so. Endpoints that are gone are forgotten by the receivers (the ticker used to walk every endpoint the run had ever made: on a synthetic case a request cost 4.3 times as much after 1,200 endpoints had come and gone, 333 µs against 78 µs, and the same test now holds it flat), and the name server of the `https` endpoints keeps a count and not a list of every question (it walked the list for each question: 54 µs at first, 544 µs after 28,000). A listener that cannot be opened ("Address already in use") is counted, retried, and named in `receivers.log` with the process that holds the port; one that stays stuck for 10 s makes the run invalid.
 
 ### The workload
 
@@ -114,7 +117,9 @@ Every `--sample-s` seconds (10 by default) one row of `metrics.csv` (and one lin
 | `probe_max_ms`, `probe_p99_ms`, `probe_errors`, `control_max_ms` | the probe (below) over the sample interval |
 | `ingest_per_s`, `ingest_p50_ms`, `ingest_p99_ms`, `ingest_max_ms` | the poster's own timing of `POST /events` |
 | `deliv_lat_p50_ms`, `deliv_lat_p99_ms`, `deliv_lat_max_ms` | the receivers' clock minus the time the poster sent the event, over the sample interval: the end-to-end latency of the first delivery |
-| `harness_cpu_pct`, `receivers_cpu_pct`, `loadavg1`, `recv_loop_lag_max_ms` | the cost of the harness itself and the load of the host |
+| `harness_cpu_pct`, `receivers_cpu_pct`, `receivers_cpu_max_pct`, `harness_total_cpu_pct`, `recv_loop_lag_max_ms` | the harness's own processes (the poster, the checker, the watcher, the workers, the probe: **not** the receivers), the receivers (all processes added, and the busiest one), both together, and the longest the busiest receiver's loop was late |
+| `loadavg1`, `loadavg5`, `loadavg15`, `psi_cpu_*`, `psi_mem_*`, `psi_io_*`, `mem_avail_mb`, `swap_used_mb`, `swap_free_mb`, `swapin_s`, `swapout_s`, `majflt_s`, `ctxt_s`, `procs_running`, `procs_blocked`, `host_iowait_pct`, `host_steal_pct`, `host_busy_pct` | the host (`/proc/loadavg`, `/proc/pressure/*`, `/proc/meminfo`, `/proc/vmstat`, `/proc/stat`), so that a stall can be put on something. When a stall of more than 5 s is seen (a sample that came late, a receiver loop or a probe window longer than 5 s) the three processes that used most CPU since the last sample are written to `chaos.jsonl` (`harness-event`, `stall`) |
+| `recv_late_unplanned`, `recv_conn_lost`, `recv_bind_failures`, `recv_writer_wait_max_ms`, `recv_sync_fallbacks`, `recv_writer_queue_max`, `recv_records`, `events_expired`, `valid` | the receivers' own accounting (answers due at once that went out more than a second late; answers whose connection the service had closed; failed binds; how long a record waited for the writer; records written by the loop because the queue was full; the queue's depth), the service's `events_expired`, and whether the guard still finds the run valid |
 | `bursting`, `acked`, `phase` | whether a burst is on, events acknowledged so far, and 0 the run / 1 the drain at the end / 2 the service started once more after the clean stop (not judged) |
 
 **The loop probe** is a separate process that asks `GET /healthz` ten times a second and, immediately after each, makes the same kind of request to a
@@ -221,127 +226,25 @@ twenty examples.
 | L | an exit the harness did not cause; a line on standard error that is not in the list | **0** |
 | end | every endpoint of a class that must deliver everything has caught up (its cursor at the newest event) within ten minutes of the end of the posting | yes |
 
-**A run is valid** only if the poster held at least 90 % of the requested rate over the steady phases, the harness used less than 60 % of one core on
-average, and the load average of the host did not stay above the number of cores for more than a tenth of the run. A run that is not valid is
-reported **inconclusive, with the reason**, and is not counted for or against the service: it is repeated on a quieter machine. A run that is
-valid and fails is a finding, with its seed, its `chaos.jsonl` and the data directory of the failing moment (kept).
+**A run is valid** only while the harness and the host are not the limit, and **that is judged continuously, not at the end** (`scripts/soak/guard.py`, tested by `scripts/soak/tests/test_guard.py`). Every sample is fed to a sliding window of the last ten minutes; the moment a criterion is met the progress line says `*** RUN INVALID ***`, `run.json` is marked (`valid: false`, with the reason, the time and the elapsed seconds), and the run **ends early** (`--no-early-stop` goes on, for diagnosis; the run stays marked). The criteria:
 
-## 5. What the report says
+| criterion | threshold | judged |
+|---|---|---|
+| the busiest receiver process | over 85 % of a core in more than 5 % of the samples of the window | once the window is nine tenths full; over half of the samples sooner |
+| the receivers' loop | late by more than 250 ms in more than 5 % of the samples | the same |
+| the harness's own processes (not the receivers) | over 60 % of a core on average over the window | window |
+| the poster | median of the steady samples of the window under 90 % of the requested rate (steady: the service up, no burst, not in an excused interval) | window, at least 20 samples |
+| receivers answering late | more than 20 answers due at once that went out more than a second late in a window | window |
+| a listener that cannot bind its port | stuck for more than 10 s | at once |
+| memory | under 1 GB available on the host, at two samples in a row | at once |
+| swap | more than 200 pages a second swapped in and out, on average over the window | window |
+| memory pressure (PSI) | all tasks stalled on memory more than 5 % of the time (avg60), three samples in a row | at once |
 
-`report.py` writes `report.md` and `report.json` from the files of a run: the exact method (this page's parameters as run), the seed, the SHA-256 of
-the binary, the commit, the machine (CPU model, cores, memory, kernel, whether it was shared: the load average is in the report), the duration, the
-counts (events posted, acknowledged, deliveries by class, attempts, repeats and their explanation, kills by kind, database faults by kind, backups,
-restores, endpoints created and deleted), the verdict table above with the measured value of each line, the percentiles of ingest latency and of delivery
-latency, the series of memory, descriptors and disk (minimum, median, maximum, fitted slope, per incarnation), the probe's distribution and its worst
-windows, and the harness's own CPU.
+Before it starts the run refuses to if under 2 GB of memory is available, or if swap is exhausted (under 64 MB free) while under 6 GB is available (`--allow-low-memory` overrides, and `run.json` says so). Swap that is full with plenty of memory free is allowed: nothing is paged out, and the swap-rate and pressure criteria watch for the case that matters.
 
-## 6. Resuming
+Two bounds are kept for the service while the run goes on, and each is a **violation** (group G), not an invalidity: the data directory above what retention allows for what was ingested (the G4 bound, at three samples in a row: `G_disk_over_bound`), and the table of waiting replays full (`--replay-cap`, 32) for more than three minutes (`G_replays_pinned`), which is how replays that never start pin the log. At the end the verdict adds the host's load (above the cores in more than a tenth of the samples). A run that is not valid is reported **inconclusive, with the reasons and when each was met**, whatever else it found (what it found stays listed in `verdict.json`, and nothing is dropped from `violations.jsonl`), and is not counted for or against the service: it is repeated on a quieter machine. A run that is valid and fails is a finding, with its seed, its `chaos.jsonl` and the data directory of the failing moment (kept).
 
-A run of 24 hours outlives machines: a container or a virtual machine is restarted every few hours and takes the harness, the receivers and the service with it. What is on disk, in `--out`,
-is enough to go on: the data directory, the two ledgers (`acked.bin`, `ledger/recv.bin`), `chaos.jsonl`, `violations.jsonl`, `metrics.csv`, `samples.jsonl`, `probe.jsonl`, `run.json` (the arguments)
-and `state.json` (written every five seconds: the endpoints with their ports and secrets, the numbers of the poster, the cursors the checker has settled, **what the checker has been told and what
-it holds open**: kills, stops, absences, replays, the windows in which an endpoint was made to fail, the dead letters it waits for, the stretches excused from the loop's bound).
-
-```sh
-# the same command, again and again, until the run has finished (put it under a supervisor, or run it by hand after a restart)
-export HOOKS_PG=127.0.0.1:5432:postgres:hooks_soak      # and HOOKS_PG_PASSWORD: the database of the run, with its contents
-scripts/soak/continue.sh soak-out --binary build/hooks --hours 24 --seed 1
-# which is, once the first start has been interrupted:
-python3 scripts/soak/soak.py --resume soak-out
-```
-
-The conditions: the output directory is intact; **the PostgreSQL database is the one the run used, with its contents** (the endpoints of the run are rows in it, and a resume does not truncate it: if the
-database was lost with the machine, begin again); the binary is the same build (a resume refuses a binary whose SHA-256 is not the run's: `--force` goes on anyway, and the report says so). `--resume` takes
-its parameters from `run.json` (the seed, the rate, the endpoints, the ports, the secrets); `--binary` and `--pg` can be given again if the build or the database moved. A run that has a `verdict.json` is finished.
-
-What a resume does, in this order: stops a process of the previous harness that is still running (the service, the receivers, the probe: found by the pids in `state.json`, and only if the command line is
-this binary on this data directory); treats the interruption as a power cut (**a kill at the time of the last heartbeat**: the files are cut as the `fsync` shim cuts them, so repeats just after it are
-excused); restores what the checker was told, and reads the tail of both ledgers again to rebuild the window of events that are still open (without counting again what was judged before); starts the service
-on the same data directory; brings the receivers back on the same ports, and deletes the endpoints that the churn threads had open (the churn starts again); and runs for the time that was left. The
-**time the harness was not running does not count** towards the duration, and the cron schedules, which the service keeps in the database, are excused for the time the service was away. The poster
-continues the numbering of `n` past what its ledger holds, so that an idempotency key is never used for two events; the chaos generator is fast-forwarded by the number of actions already taken, so the
-sequence of kinds is the one the seed gives. The violations found before the interruption are part of the verdict. A resumed run says so in its report and counts each resume as a kill.
-
-A resume that is interrupted again is resumed again.
-
-## 7. What this test does not cover
-
-Stated, so that a green run is read for what it is: one service on one host (not a fleet, not a real network: loopback never drops a packet or
-delays a segment); a PostgreSQL that is stopped for real only if `--pg-restart-cmd` is given; a disk that is full only with `--tmpfs-data`; a clock
-that does not jump (receivers that answer slowly are tested, a wall clock stepped by NTP is not); no hostile receivers (an oversized response, a
-slow-loris, a redirect: `tests/attempt_test.py` has those); changes of an endpoint's `types` while events flow (the matching rules are
-`tests/filter_test.py`'s); receivers in Python, so the rate the harness can sustain (about 200 events a second for this mix, `docs/capacity.md`) is below what
-the service can (the harness measures its own share, and the capacity page uses C tools for the capacity figures); OpenSSL in the process is exercised by the
-`https` endpoint and by nothing else; **faults do not overlap** except as the schedule happens to place them: a restart, a database fault and a disk fault never run
-together (one lock), and an endpoint is not made to fail again within 45 s of the last time, because the retry schedule is meant to carry one outage and not four
-(in a run compressed to 25 minutes four 5 s outages in 65 s killed an event that has nine attempts: a finding about the schedule and not about the service, and not
-a thing a real day does often). A green 24 hours is evidence about these faults at this rate, not a proof about the others.
-
-## 8. Results
-
-### The 24-hour run
-
-**Not yet run.** The harness is built and has been validated (below); the 24-hour run is pending and will be started on a machine of its own, with
-`python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out` (four cores, about 3 GB of disk for `soak-out`, 1 GB of memory for the harness; the service needs
-one core). Its report will be published here, next to the commit and the binary it ran on. The cells are filled in by that run
-and by nothing else.
-
-| | |
-|---|---|
-| binary, commit, seed | to be measured by the long run |
-| duration, posted, delivered, repeats | to be measured by the long run |
-| kills, stops, database faults | to be measured by the long run |
-| criteria A to L | to be measured by the long run |
-| resident memory (quiet tail): start, end, slope | to be measured by the long run |
-| descriptors, disk (peak, bound) | to be measured by the long run |
-| loop: probe maximum, 99.9th percentile | to be measured by the long run |
-
-### The harness was tested (and what it was tested on)
-
-* **The checker against mutated ledgers**: `soak.py --selftest-ledger`, 24 mutations of a synthetic run of a correct service (a delivery lost, a repeat outside a kill, a repeat after a
-  restart, a delivery against a filter, a signature, a timestamp, a body, one signature while two are due, a cursor that goes back or ahead, a dead letter where none may be, a scheduled second twice,
-  a gap in a schedule, an event nobody posted, an acknowledged event that no ledger knows, a dead letter that is never replayed, an endpoint that has not caught up, one id for two events) and the series (a leak, a step, descriptors
-  that grow, a second thread, a disk that grows, a long step of the loop, a stall, a stall the host shared, failed probes, a slow 99.9th percentile): all caught under their tags, and the unmutated run passes. It runs
-  in 3 s and is a step of `ci.yml`.
-* **The harness on the real service** (`soak.py --selftest --selftest-mutants all`, 180 s each, the build of commit `45faec0`): the clean run passes (with the finding 1 below waived and said so); a receiver that
-  answers `204` and does not write the delivery down (`lose`) is caught as `A_missing` in 63 s; one that writes a delivery down twice (`dup`) as `B_repeat` in 63 s; a service run under a shim whose `fsync` lies (`liar`: three
-  flushes in four are not made durable, and a power cut follows each kill) is caught as `A_not_in_log` (the service no longer starts on its own data directory, and the events it had acknowledged are not in it).
-* **A shakedown of 25 minutes** (`--duration-s 1500 --seed 21`, rate 40 and burst 120 events a second, 12 endpoints and 3 churn threads, every fault, the last quarter without a restart), on a shared 4-core machine
-  (load average 1 to 3), service on core 3, harness on the others, the harness at 19 % of a core in the median. 84,431 events acknowledged, 654,061 deliveries recorded by the receivers; 18 kills (5 of them at a numbered
-  step of a compaction, which the service reached), 2 `SIGTERM` stops, 52 database faults (blackhole 9, cut 15, freeze 8, hold 9, backends ended 11), 14 online backups and 5 restores (all verified), 128 endpoints created, changed and deleted, 254
-  secret rotations, 448 replays, 111 bulk replays of dead letters. **Every criterion passed except two**: finding 1 (waived in the run, 6,412 repeats after restarts) and **G1, the growth of memory** (finding 3: the final
-  incarnation went from 20.9 to 99.4 MB in 560 s). The loop probe: p50 0.30 ms, p99 4.4 ms, p99.9 15.2 ms, largest 70.6 ms; the service's own longest step of the loop 14 ms; the data directory between 0 and 28.9 MB (median 15.8) against a retention of three
-  minutes; descriptors 10 to 73, one thread throughout; cursors back at what they were within 1 s of a restart in all 13 cases measured. Repeats per kill that the kill explains: 1,676 in all, the most after one kill 734 (deliveries of the last two seconds before it,
-  at several hundred deliveries a second).
-* **A second shakedown of 15 minutes without cron and without endpoint churn** (`--schedules 0 --churn 0 --seed 22`): **verdict PASS** with finding 1 waived (793 repeats after restarts, and the one after the clean stop at the end). 68,328 events, 377,247 deliveries, 18 kills (7 at a step of a
-  compaction), 3 stops, 27 database faults; the final incarnation lived 350 s with resident memory at 17.6 to 37.8 MB (fitted growth 1.9 MB over the window against a limit of 4.1) and 10 to 55 descriptors; the probe's largest 48.8 ms; the service's own longest step of the loop 24 ms; the data directory 0 to 34.3 MB, at most 56 % of the bound; cursors back within 1 s (median) and 13 s (the most) of a restart, 30 cases.
-  This is the run that shows finding 3 is in the database paths and not in delivery.
-
-### What the harness found in the service
-
-The service is the build of `origin/main` at `45faec0`. None of these was fixed here; each has a reproducer in `scripts/soak/`, a seed and the evidence in the run directory it was found in.
-
-1. **A restart makes the service deliver, again, events it had recorded as delivered** (`scripts/soak/repro_restart_repeat.py`, exit status 1 on this build). One endpoint with a list of event types (so that half of the events are passed
-   over for it and leave no record), whose cursor is held behind one event that its receiver refuses, while the events after it are delivered window by window: when the receiver lets the first event through, all 1,500 events are delivered once and the
-   cursor goes to 3,000. After a `SIGTERM` stop (exit 0, nothing on the wire) and a start, the cursor is re-read from the beginning, 41, 91, 143 ... (about 50 ids a second), and when it reaches
-   the ids that its window of 1,024 did not cover when the records of their delivery were read, **987 of the 1,500 events are delivered a second time**, about 30 s after the start. The soak sees it on endpoints with a list of event types that were behind their cursor, after every kind of restart (`SIGTERM`, `kill -9`), thousands of deliveries repeated after one restart; it reports them as `B_restart_repeat` and
-   they are what `J_repeat` finds after the clean stop of the end. At-least-once is the contract, so this is not a loss; it is a delivery storm after a restart, and it is also why the soak waives `B_restart_repeat` in its self-test. **Whose fault: the service's.**
-   **Mended** (`docs/design.md` section 42): a record of kind 19 states where such an endpoint's cursor is, before an outcome a replay could not otherwise place and at a clean stop. `tests/advance_test.py`: 0 events delivered again after `SIGTERM`, after `kill -9` as a power cut, and with snapshots (it was 987 of 1,499); the self-test no longer waives `B_restart_repeat`.
-2. **With the data directory full, the service delivers the same events again and again, as fast as the receivers answer** (`scripts/soak/repro_full_disk.py`, a tmpfs of 8 MB, needs root or `sudo -n`). The disk is filled for 4 s with 218 events in the log: the receiver is sent
-   17,788 deliveries, one event 2,211 times. `/readyz` says `events_log` is broken, which is right, and `POST /events` is a `503`, which is right; but the outcome of an attempt cannot be written, so the attempt never counts, and the retry is not spaced by the schedule.
-   In the soak (`--tmpfs-data`) the first such fault was 19,255 repeats in five seconds. **Whose fault: the service's.**
-   **Mended** (`docs/design.md` section 38.5): no attempt is started while the outcomes log is broken; `tests/fulldisk_test.py` sent one event 925 times on the build before, and no event more than once while the disk is full after it.
-3. **Resident memory grows with every call that goes to the database for a change** (`scripts/soak/repro_memory_growth.py`, exit status 1): a `PATCH` of an endpoint 18 to 55 KB a call, the creation and deletion of one 27 KB, a bulk replay of dead letters 9 KB, and **a cron fire 13 to 15 KB** on an idle
-   service (and, in the soak, roughly 70 KB a fire while events flow). The reads, a replay, an enable, delivery to 12 endpoints over TLS with names, retries, a list of types, big events, idempotency keys, and a history row for each of 260,000 deliveries leave it flat (10.1 MB) in
-   the same harness. At the soak's two schedules (1.2 fires a second) the service takes 5 MB a minute and does not stop (a 13-minute run, no fault, no churn: 9.5 to 85.5 MB, the line straight from 3 minutes to the end); without the schedules and without churn the 15-minute run above is flat. A schedule of every second takes from 1 GB (idle) to about 6 GB (under load) a day. G1 is the criterion that catches it; the 24-hour run should be made with `--schedules 0 --churn 0` until it is mended, and its report will say so. **Whose fault: the service's, in the path of the database round trips that change something** (the history rows, which are inserts, do not do it).
-   **Mended** (`docs/design.md` section 38.5): every function on the path of a change and of a fire leaves its regions by falling out of them; `tests/leak_test.py` (two rounds, the second may keep at most 1 KiB a call) fails seven ways on the build before (a `PATCH` 18 to 36 KB, a fire 13 KB) and passes after (0 to 137 bytes a call, 68 bytes a fire). The same test found, on a fast machine, that the history's inserts could take every place of the pool, so that every change was a `503`; the inserts now leave room.
-4. **A restart works its cursors up slowly when they are far behind** (finding 1's reproducer prints it): after the start `GET /endpoints` reports 41, 91, 143 ... (about 50 ids a second for each endpoint) where it said 3,000 before the stop, until the ids that were delivered before are reached. In the soak, with cursors that were close
-   behind (a few hundred ids at 40 events a second), they were back within 1 s (median) and 13 s (the most) of 43 cases; with a backlog of thousands of ids it takes minutes, and the deliveries it repeats are finding 1. This is why the soak's rate is 40 and why `docs/capacity.md` says what a core carries and what a restart costs. **Whose fault: the service's** (a design choice that costs capacity after a restart).
-   **Mended for the clean stop, bounded for a kill** (section 42): after `SIGTERM` the cursor is where it was within a second of the start; after `kill -9` the re-walk starts no more than a window below where the cursor was.
-5. **The runbook's list of what the service writes to standard error is short** (`docs/runbook.md` 3.1: "Nothing else is logged while it runs"): the service says a line for every roll of the events log, every drop of a segment and every replacement of the outcomes log by a snapshot (`hooks: events log: sealed a segment ...`, `dropped a segment of N events`, `delivery.seg: replaced by a snapshot`,
-   `removed ...`), many a minute with the soak's small segments, a few a day at the defaults. The harness's list includes them (invariant L). **Whose fault: the page's.**
-6. **An observation, not a finding**: a replay of an event to all the endpoints that want it, asked for while one of them holds it up, is also sent to an endpoint created before it ends (the soak saw an old event delivered to a new endpoint 24 s after it was made, and accepts it for a replay that was waiting). And the 1,024-id window means that a receiver that fails for the whole
-   retry schedule pins the log and falls behind without limit once `rate x schedule` is above 1,024 ids (150 events a second and a 24-hour schedule: at once): the harness first had an endpoint on a closed port for good and could not bound the data directory with it, which is why `dead` is a cycle like `sick`.
+**The maximum age.** The harness sets `--max-age-ms` (1,200,000 by default): a segment older than that is dropped whatever pins it, and the service moves every endpoint's cursor past what it had not delivered and counts those events (`events_expired`). The checker accepts a loss at an endpoint as an expiry **only for an event that was older than the maximum age when the cursor was found past it** (by the time the poster was told it was accepted, less 2 s of slack); a younger event passed undelivered is `A_missing`, and so is any event in a run with no maximum age (`--max-age-s 0`). The number excused is held against the service's own `events_expired`, summed over the incarnations as far as it was sampled: more than 110 % of it plus 50 is `A_expired_unexplained`. The maximum age is far above anything the harness pins on purpose (a window of 90 s, a retry horizon of 64 s), so in a valid run it is expected to expire nothing; a run that does expire events says so in `events_expired`.
 
 ### The 24-hour runs so far (none has passed)
 
@@ -363,6 +266,46 @@ The service is the build of `origin/main` at `45faec0`. None of these was fixed 
 * **Something about the service, not a bug by its documents:** the 32 waiting replays never started (attempts 0 for hours) because they are started only with what is left of a turn after the window's attempts, and two endpoints had a permanent backlog; a waiting replay pins the log, so the data directory grew until the run ended. `--max-age-days` (design section 47.2) bounds that and the harness did not set it.
 
 Taken together: no violation contradicts the service, one case is open, and the run proves nothing about 24 hours. The evidence is kept; the harness is being repaired before a next run (the receivers over several processes, honest answer times, early stop when a run turns invalid, a backup that is killed with its children and cleaned up, a maximum age, and a checker that forgets nothing it can still need).
+
+**What was found in the harness afterwards** (the analysis above is from the evidence of run 3; this is what was found by reading the harness's code and testing its parts, each checked before it was mended; where a mechanism was found and not shown to be the run's, it says so). The open case of `healthy1` (event 1,080,878) is **still open**: nothing here explains it, and it is the first thing to look at in the next valid run.
+
+
+* **Zombie endpoints.** A create answered `504` (or not at all) left its row in the table; the service did not know it, so the harness's `DELETE` was a `404` and the row stayed; the next restart loaded it as an endpoint at the slowest cursor, and the harness kept its receiver up and never removed it. Twelve of them in 15.8 h, about 24 deliveries a second each. They explain a factor of 1.5 in the receivers' cost, not all of it.
+* **The receivers' cost per record.** One Python process, the ledger written by the event loop, and two things that grow. (1) **The name server of the `https` endpoints**, which the first receiver process holds, counted how often a name had been asked by walking the list of every question ever asked, under its lock and the interpreter's: the cost of an answer was 54 µs at first and 544 µs after 28,000 questions (measured on the stub alone), and the service asks for every attempt to the `https` endpoints, about 20 times a second. On a validation run of the old code the cost per record rose from 500 to 1,500 µs in 15 minutes. At that rate fifteen hours is a factor far beyond the 3.6 that run 3 showed, so it is the cause of the growth in kind; **run 3 itself was not profiled, and GC, SMT contention and kernel cost were not excluded** as smaller contributions. (2) A ticker that walked every endpoint the run had ever made, twenty times a second: on its own a request cost 4.3 times as much after 1,200 endpoints had come and gone. The zombies add their own load (a factor of 1.5).
+* **A late answer was recorded as an acknowledgement.** The receiver decided "effective" from the delay it had planned and wrote the record when it read the request; an answer that went out late because its loop was late was recorded as delivered while the service had counted a timeout, and the retry that followed was a `B_repeat`.
+* **The checker.** `purge` dropped what was needed by late deliveries (a replay-excused delivery that came late: 7 `C_filter`; an event delivered late by a zombie, below the floor, taken for an event nobody posted: 197,942 `P_phantom`); `posted_n` was trimmed by value once it passed 600,000, which dropped the numbers of events still in the window; an event at a sick or dead endpoint was excused by its acknowledgement time against the failure window, though its first attempt could be later by the service's lag; the saved state kept every endpoint ever made (6.1 MB at each save); and the checker kept multi-million-entry tables (20 % of a core by hour 15).
+* **"Address already in use".** Five times in `receivers.log`, on the ports of endpoints of the run; **the holder was not identified** and it did not happen in any of the eleven runs since. What was changed: the allocation of ports is under a lock (three churn threads could be given the same port, which is one way to get exactly this, not shown to be the way), the ports of endpoints that are gone are used again (the range of 8,000 ports is no longer run through), and a failed bind is counted, retried, named in the log with the processes that hold the port, and, when it lasts 10 s, makes the run invalid. A port with a listener of its own that does not set `SO_REUSEADDR` is the one case in which Linux refuses a bind that does; `SO_REUSEPORT` was not used, because it would let a stale listener of a stranger share the port and answer nothing.
+* **Backups.** `subprocess.run(timeout=180)` killed only the `bash` of `backup.sh`; the `cp` and the checker it had started ran on and the `.partial` directory stayed: 36 of them, 32 GB.
+* **The log was pinned.** The harness never set a maximum age, and 32 waiting replays that never started (attempts 0, for hours) kept the log from being dropped.
+* **The guard only spoke at the end.** The validity criteria were evaluated from the finished run, so the run went on for nine hours after it had become invalid.
+
+**What changed after run 3** (the harness only: what is judged about the service is the same, except as noted, and where a check was changed the reason is in "Changes to the criteria"):
+
+* The janitor removes any endpoint the harness did not intend to be in the service (through the API, and the row), after an unanswered create and after every start, and logs each as a harness event; the receiver and the port of an endpoint that is gone are given back.
+* The receivers write their ledger off the event loop, record when the answer was sent and decide whether it counts then, can run as several processes, forget endpoints that are gone, reuse ports, and report a port that is in use instead of ignoring it.
+* The guard judges continuously and stops a run that is invalid, the host is profiled in every sample, and the run does not start on a host that is short of memory.
+* The backup is killed as a group, its partial directory removed, its timeout scaled by the size of the data directory, and two backups kept.
+* A maximum age bounds the data; expiry is excused only for events older than it, and counted against the service's own count.
+* The checker's tables are bounded and keyed as described above.
+
+**What was checked after the changes** (short runs of the pinned build, compiler d7228ca, of 200 s to 40 minutes (run A is the build of ce4c23f of the harness's branch, B e7568ee, C 43cc8f0; the harness changed little between them), with every fault on at a chaos scale of 0.15, so about 6 times as many kills, stops and database faults a minute as in a day-long run; the service on one core and the harness on seven others, on a 16-thread machine that other people also use; **none of this says anything about 24 hours**):
+
+| what | measured |
+|---|---|
+| the receivers' cost per record, minutes 3 to 7 / 13 to 17 / 23 to 27 / 33 to 37 of a 40-minute run | 462 / 456 / 489 / 471 µs (run A); 1,092 / 1,003 / 909 / 997 µs (run B); 1,015 / 1,019 / 1,125 / 946 µs (run C): flat within each run. The same code cost about twice as much per record in B and C as in A from the first minute. **That the cause is the machine's clock (cpufreq `powersave`, 400 MHz to 4.7 GHz, the service's core at a median of 1,276 MHz and the harness's at 1,112 in C) was not shown**: only C recorded it. A cost per record is comparable within a run only. The run before the fix of the name server, for contrast: 500 to 1,530 µs in 15 minutes |
+| the receivers' CPU, two processes, at 40 events a second | 15 to 37 % of a core in all, the busiest process at most 36 %; the loop late by at most 4 ms in A; the ledger writer's wait at most 4 ms, no record written by the loop for want of queue room, no answer that was due at once sent late (A) |
+| zombies | A: 2 creates answered 404 by the service (the row was in the table) were found by their port and removed, API and row; none was left. B and C: none occurred |
+| `.partial` directories, backups | none left (A to C); 31, 17 and 29 backups, the newest two kept |
+| the table of waiting replays | reached the cap (32) at times, never for 180 s |
+| the maximum age | `events_expired` stayed 0 in all three |
+| the guard, on receivers held to a quota of 25 % of a core (SIGSTOP and SIGCONT every second on the two processes of the run, which is what a cgroup quota does) | **the run was marked invalid at 361 s** (the loop late by more than 250 ms in 51 % of the samples, three minutes after the quota began), stopped early, `run.json` says `valid: false` with the reason, the verdict is `INCONCLUSIVE`, and the repeats that a starved loop causes (a request read late is a timeout to the service) did not appear as violations: requests read after a stalled loop are marked as risks (before that change a core starved by other processes gave about 1,000 `B_repeat` in two minutes) |
+| a stall | a receiver held for 7 s: the sample logs the stall with the three busiest processes (`harness-event`, `stall`) |
+| violations in the three healthy runs | A: none. B and C: one `I_cron_gap` each (below). No `A_missing`, `B_repeat`, `C_filter`, `P_phantom`, `F_dead_letter` or `END_lag` in any of them |
+
+Two criteria failed in the healthy runs, and **neither is attributed to the harness**:
+
+* **H2, the 99.9th percentile of the loop probe, in all three:** 76, 97 and 100 ms against the 50 ms of the criterion (the 99th percentile 55 to 68 ms; the median 13.5, 23 and 26 ms, which follows the machine's slowness above). The harness's side of the measure is clean: the control request of the probe (the host) took a median of 1.3 ms and at most 3.8 ms, the receivers' loop at most 4 ms late, nothing sent late. The service's loop is what was late. It is a short run with the faults six times as dense as in a day, on a core that the cpufreq governor slows; that H2 would pass in a run of 24 hours is **not shown**. The criterion is not changed.
+* **`I_cron_gap`, once each in B and C (not in A):** a gap of 5 s in the every-second schedule, 14 to 19 s after a database fault ended. In C `cron_fired` did not move for about 40 s that covered two faults (8.9 s and 18 s long), `cron_skipped` stayed 0, and `db_reconnects` rose some 20 s after the fault proxy was restored: **the service went on without cron until it had reconnected**, and the checker excuses a gap only within 5 s of the time the database was away. Whether so slow a reconnect is acceptable is a question about the service (what `design.md` says of cron and the database), not a defect of the harness, and the criterion is not loosened. It was not seen in soak25, whose database faults were a sixth as frequent.
 
 ### What the harness found in itself, and the criteria that changed because of it
 
@@ -387,4 +330,11 @@ Written after the shakedowns, and the reason for each:
 | outages | any endpoint at any time | an endpoint is not made to fail again within 45 s | stacking, section 7 |
 | H | every window | not the seconds of a `replay-dead` call | reading the dead letters beyond the 2,048 of the table is a read of `delivery.seg` and a documented pause of the loop (`docs/runbook.md` 3.6) |
 | G | the last incarnation | the last incarnation before the clean stop at the end | the incarnation that is started to watch the restart lives seconds |
+| validity | judged from the finished run | judged continuously over a sliding window of ten minutes; the run is marked invalid from the moment a criterion is met and ends early | run 3 went on for nine hours after it had become invalid. The thresholds are the ones that were there (85 %, 250 ms, 5 %, 60 %, 90 %); `harness_cpu_pct` no longer includes the receivers, which have their own criterion, so that several receiver processes are not counted as one harness over its limit |
+| A | an event passed undelivered is `A_missing` | an event older than the maximum age (less 2 s) when the cursor is found past it is an expiry, counted against `events_expired` | the service now has a maximum age (`--max-age-ms`); only events older than it are excused |
+| A | a `sick` or `dead` endpoint's loss was deferred if the event was acknowledged inside the failure window | or if its first attempt could have been inside it (acknowledgement plus 2 s plus the service's lag at that endpoint, up to 300 s) | the first attempt can be later than the acknowledgement by the lag. A deferred event is judged again at the end (`A_missing_final`), so nothing is forgiven |
+| receivers' record | effective if the planned delay was within 1.6 s, decided when the request was read | effective if a 2xx was sent within 1.6 s of the request, on a connection still open, decided when it was sent | a late answer is a timeout to the service |
+| verdict of an invalid run | INCONCLUSIVE only if it would have passed | INCONCLUSIVE whatever it found, with what it found listed | a run that is stopped as invalid is not evidence for or against the service; a starved run was reported FAIL on a series criterion |
+| a request read after a stalled loop | recorded as any other | marked F_RISK, like a slow answer, for the next half second after a stall of the receivers' loop of more than 250 ms | the service's clock had been running while the request waited in the kernel's buffer; without it a starved harness produced 1,000 `B_repeat` in two minutes, which the guard now reports as the harness's stall instead |
+| G | the disk bound and the pin of the log judged at the end | also judged while the run goes (`G_disk_over_bound`, `G_replays_pinned`) | 8+ hours were spent on a run in which the log was pinned |
 | the `.synced` files of the shim | counted in the data directory | taken away when their file is gone, and not counted | the shim leaves one for every segment it has seen |
