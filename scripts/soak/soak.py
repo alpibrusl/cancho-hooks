@@ -1214,7 +1214,7 @@ def selftest(a):
     bad = unit_tests()
     results.append(("the harness's own parts pass their tests", not bad, ", ".join(bad)))
     if a.selftest_ledger:
-        return 0 if rc == 0 else 1
+        return 0 if rc == 0 and not bad else 1
     if not a.binary or not a.pg:
         print("--selftest needs --binary and --pg (or HOOKS_PG) for the runs on the service", file=sys.stderr)
         return 2
