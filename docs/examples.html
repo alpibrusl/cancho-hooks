@@ -71,13 +71,6 @@ a:focus-visible, button:focus-visible, pre:focus-visible, .scroll:focus-visible 
 .wrap { width: 100%; max-width: 62rem; margin: 0 auto; padding: 0 16px; }
 .prose { max-width: 42rem; }
 
-header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
-header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
-.brand { font-weight: 700; color: var(--fg); text-decoration: none; font-family: var(--mono); letter-spacing: -0.01em; }
-nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; padding: 0; }
-nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; display: inline-block; }
-nav a:hover { color: var(--fg); text-decoration: underline; }
-.top .gh { margin-left: auto; }
 
 h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 0.75rem; letter-spacing: -0.02em; font-family: var(--mono); }
 h2 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.75rem; letter-spacing: -0.01em; }
@@ -151,8 +144,6 @@ td:first-child { white-space: nowrap; }
 .limits li { margin-bottom: 0.5rem; }
 .limits code { background: transparent; border: 1px solid var(--line); }
 
-footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding: 1.5rem 0 2.5rem; color: var(--muted); font-size: 0.9rem; }
-footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; }
 
 @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
 
@@ -170,32 +161,52 @@ pre.t .ok { color: var(--ok); }
 .ex .lim code { background: transparent; border: 1px solid var(--line); }
 .ex .links { margin: 0; color: var(--muted); }
 .run { margin-top: 1.5rem; max-width: 42rem; }
-nav a[aria-current="page"] { color: var(--fg); font-weight: 600; }
+/* shared:begin (the header and the footer: identical on every page, checked by tests/examples_test.py) */
+.sitewrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+header.site { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.site .sitewrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem 1.5rem; min-height: 3.4rem; }
+header.site .brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+header.site .brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
+header.site nav { display: flex; flex-wrap: wrap; gap: 0 1.2rem; }
+header.site nav a, header.site .gh { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; padding: .35rem 0; border-bottom: 2px solid transparent; }
+header.site nav a:hover, header.site .gh:hover { color: var(--fg); }
+header.site a[aria-current="page"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
+header.site .gh { margin-left: auto; }
+@media (max-width: 40rem) { header.site { position: static; } header.site .sitewrap { padding-top: .4rem; padding-bottom: .3rem; } header.site nav { order: 3; width: 100%; } }
+footer.site { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer.site .links { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; margin-bottom: .8rem; }
+footer.site p { margin: 0 0 .4rem; }
+/* shared:end */
+.rec { margin: 0 0 0.75rem; }
+.rec .ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem; margin-bottom: 0.5rem; }
+.rec button { font: inherit; font-size: 0.9rem; color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 0.3rem 0.75rem; cursor: pointer; }
+.rec button:hover { border-color: var(--accent); }
+.rec button:disabled { opacity: 0.5; cursor: default; }
+.rec button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.rec progress { flex: 1 1 6rem; min-width: 6rem; max-width: 16rem; height: 0.6rem; accent-color: var(--accent); }
+.rec .dl { font-size: 0.85rem; color: var(--muted); }
+.rec pre.screen { max-height: 24rem; overflow: auto; margin: 0 0 0.5rem; }
+.rec .msg { font-size: 0.85rem; color: var(--muted); margin: 0 0 0.5rem; }
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="top">
-  <div class="wrap">
-    <a class="brand" href="./">cancho-hooks</a>
-    <nav aria-label="Pages">
-      <ul>
-        <li><a href="./">Overview</a></li>
-        <li><a href="examples.html" aria-current="page">Examples</a></li>
-        <li><a href="evidence.html">Evidence</a></li>
-        <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">Status</a></li>
-      </ul>
-    </nav>
-    <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
-  </div>
-</header>
+<!-- shared:header:begin -->
+<header class="site"><div class="sitewrap">
+  <a class="brand" href="./"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
+  <nav aria-label="Site">
+    <a href="./">Overview</a><a href="examples.html" aria-current="page">Examples</a><a href="evidence.html">Evidence</a><a href="./#start">Install</a>
+  </nav>
+  <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
+</div></header>
+<!-- shared:header:end -->
 
 <main id="main">
 <div class="wrap">
   <section class="hero" aria-labelledby="h-title">
     <h1 id="h-title" style="font-size:clamp(1.6rem,5vw,2.25rem)">Examples</h1>
-    <p class="lede">Seven situations, each a script you can run. What you read is what the script printed, and CI checks that it still is.</p>
+    <p class="lede">Seven situations, each a script you can run. What you read is what the script printed, and CI checks that it still is. Each card also has a recording of the run: play it here, or with <code>asciinema play examples/casts/02-payments.cast</code>. The waits in a recording are shortened to 1.5 seconds, so a script that waited longer plays faster than it ran.</p>
     <p class="small muted run">You need the built service, bash, curl and python3; examples 1 and 4 also need a PostgreSQL they may empty. Each script starts its own service on a free port and stops it. <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/receiver.py"><code>receiver.py</code></a> is the receiver: it verifies every signature. Start with the <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a>.</p>
   </section>
 
@@ -239,6 +250,7 @@ acme evt_5 signature ok (1 signature) {"type":"invoice.paid","invoice":"INV-1004
 "delivered":9
 "failed":0
 <span class="ok">ok: no delivery failed, rotation included</span></code></pre>
+    <div class="rec" data-cast="casts/01-saas-customers.cast"><p class="dl small"><a href="casts/01-saas-customers.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> Delivery is at least once: a receiver can be sent an event again and the <code>webhook-id</code> is then the same. Creating endpoints while the service runs needs PostgreSQL and an admin token. The limits (concurrency 2, rate 10) are shown in the list; example 5 shows concurrency at work.</p>
     <p class="links small">Run it: <code>examples/01-saas-customers.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/01-saas-customers.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/endpoints.md">Endpoints, filters, rotation, headers</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The HTTP API</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Pace</a></p>
   </section>
@@ -267,6 +279,7 @@ shop evt_1 signature ok (1 signature) {"type":"payment.captured","order":1042,"a
 <span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events/1/replay -H "Authorization: Bearer $ADMIN"
 {"event":1,"endpoints":[0]} [202]
 shop evt_1 signature ok (1 signature) duplicate</code></pre>
+    <div class="rec" data-cast="casts/02-payments.cast"><p class="dl small"><a href="casts/02-payments.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> Delivery is at least once, not exactly once: a repeat is possible, and the receiver drops it by <code>webhook-id</code>, as the one here does. The demo shortens the retry delays; the default first retry is 5 seconds.</p>
     <p class="links small">Run it: <code>examples/02-payments.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/02-payments.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">POST /events</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Idempotency, how it works</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">What is tested</a></p>
   </section>
@@ -290,6 +303,7 @@ customer evt_2 signature ok (1 signature) {"type":"order.shipped","order":2}
 customer evt_3 signature ok (1 signature) {"type":"order.shipped","order":3}
 <span class="p">$ </span>curl -s "$URL/endpoints/0/dead"
 {"endpoint":0,"order":"desc","held":0,…"dead":[],"next":null}</code></pre>
+    <div class="rec" data-cast="casts/03-endpoint-down.cast"><p class="dl small"><a href="casts/03-endpoint-down.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> The demo uses <code>--schedule 200,300,400</code> (four attempts in about a second). The default is nine retries over about three days: 5 s, 5 min, 30 min, 2 h, and so on up to 24 h between the last two attempts. An endpoint lists at most 2,048 dead letters; an older one is replayed by its event id.</p>
     <p class="links small">Run it: <code>examples/03-endpoint-down.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/03-endpoint-down.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Retries, dead letters, bulk replay</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The routes</a></p>
   </section>
@@ -312,6 +326,7 @@ reports evt_2 signature ok (1 signature) {"type":"report.due","schedule":2,"sche
 <span class="p">$ </span>curl -s -w ' [%{http_code}]\n' -X POST $URL/events/1/replay -H "Authorization: Bearer $ADMIN"
 {"event":1,"endpoints":[0]} [202]
 reports evt_1 signature ok (1 signature) duplicate</code></pre>
+    <div class="rec" data-cast="casts/04-cron.cast"><p class="dl small"><a href="casts/04-cron.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> Five fields, numbers only, UTC. The second half runs the service with <code>--cron-seconds 1</code>, a mode for demos and tests that adds a seconds field, so that a fire can be watched in seconds instead of on Monday. One service per database: a second one reading the same schedules would fire them too. Needs PostgreSQL and an admin token.</p>
     <p class="links small">Run it: <code>examples/04-cron.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/04-cron.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/cron.md">Schedules</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">The routes</a></p>
   </section>
@@ -331,6 +346,7 @@ billing: 3 deliveries (invoice.*), done after … ms
 audit:   4 deliveries (everything), done after … ms
 search:  4 deliveries (invoice.*, user.*; 1.5 s each, one at a time), done after … ms
 <span class="ok">ok: the two fast receivers were done in less than half the time the slow one needed</span></code></pre>
+    <div class="rec" data-cast="casts/05-several-systems.cast"><p class="dl small"><a href="casts/05-several-systems.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> One process, up to 64 attempts in flight together. The times above are from one machine and one run: the script only requires that the fast ones finish in under half the slow one's time.</p>
     <p class="links small">Run it: <code>examples/05-several-systems.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/05-several-systems.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/delivery.md">Pace: concurrency and rate</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/endpoints.md">endpoints.conf</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/capacity.md">Capacity</a></p>
   </section>
@@ -365,6 +381,7 @@ customer evt_2 signature ok (1 signature) {"type":"order.created","email":"ben@e
 "events_expired":…
 "segments_expired":…
 <span class="ok">ok: the expired events are counted, not hidden</span></code></pre>
+    <div class="rec" data-cast="casts/06-erase-and-expire.cast"><p class="dl small"><a href="casts/06-erase-and-expire.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> Not erased: the event's type, id, size and idempotency key; the history rows (they hold no body); backups taken before the erasure; and the copies the receivers already have. The service does not index bodies by person, so an access request needs the event ids. Not legal advice; the page says what the service does.</p>
     <p class="links small">Run it: <code>examples/06-erase-and-expire.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/06-erase-and-expire.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/privacy.md">Privacy and audit: what is held, what is erased, what is not</a> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/retention.md">Retention and the maximum age</a></p>
   </section>
@@ -387,23 +404,81 @@ customer evt_2 signature ok (1 signature) {"type":"order.created","email":"ben@e
 {"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"Invalid params: unknown tool"}}
 <span class="p">$ </span>curl -s -w ' [%{http_code}]\n' $URL/events/2
 {"error":"no such event"} [404]</code></pre>
+    <div class="rec" data-cast="casts/07-agent.cast"><p class="dl small"><a href="casts/07-agent.cast" download>Download the recording (.cast)</a></p></div>
     <p class="lim"><strong>Limits.</strong> An event's body goes to the agent's model: decide that before giving it the tool. It speaks plain HTTP to a service on this machine, or through a tunnel; it is not given secrets, endpoint changes or erasure.</p>
     <p class="links small">Run it: <code>examples/07-agent.sh</code> &middot; <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/examples/07-agent.sh">the script</a> &middot; Docs: <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/agents.md">The service for an AI agent</a></p>
   </section>
 </div>
 </main>
 
-<footer>
-  <div class="wrap">
-    <ul>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/examples.md">The mechanisms, by hand</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design document</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">EUPL-1.2</a></li>
-    </ul>
-    <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Signatures follow the Standard Webhooks specification.</p>
-  </div>
-</footer>
+<!-- shared:footer:begin -->
+<footer class="site"><div class="sitewrap">
+  <div class="links"><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="https://github.com/alpibrusl/cancho-hooks/releases">Releases</a><a href="examples.html">Examples</a><a href="evidence.html">Evidence</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">Licence</a></div>
+  <p>Self-hosted: your events stay on your infrastructure. Signatures follow the Standard Webhooks specification.</p>
+  <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Open source under the EUPL-1.2, provided as is, without warranty: you run it at your own responsibility.</p>
+</div></footer>
+<!-- shared:footer:end -->
+<script>
+/* A player for the recordings (asciicast v2: a JSON header line, then [seconds, "o", text] lines). It plays the text of the output at its recorded
+   times (the recorder capped every wait at 1.5 s). It understands no colour and no cursor movement: any escape sequence is dropped, and a carriage
+   return before a newline is dropped. With prefers-reduced-motion it shows the whole text at once. Without JavaScript the card keeps its static transcript. */
+(function () {
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function parse(text) {
+    var lines = text.split('\n').filter(function (l) { return l; }), head = JSON.parse(lines[0]);
+    if (head.version !== 2) throw new Error('not asciicast v2');
+    var ev = lines.slice(1).map(function (l) { return JSON.parse(l); }).filter(function (e) { return e[1] === 'o'; });
+    return ev.map(function (e) { return [e[0], e[2].replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '').replace(/\r\n/g, '\n').replace(/\r/g, '')]; });
+  }
+  function el(tag, attrs, text) {
+    var e = document.createElement(tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text) e.textContent = text;
+    return e;
+  }
+  document.querySelectorAll('.rec[data-cast]').forEach(function (box) {
+    var url = box.getAttribute('data-cast'), events = null, i = 0, timer = null, speed = 1, playing = false, total = 0;
+    var statics = box.parentNode.querySelectorAll('pre.t');
+    var ctl = el('div', { 'class': 'ctl' }), play = el('button', { type: 'button' }, 'Play the recording');
+    var pause = el('button', { type: 'button', disabled: '' }, 'Pause'), restart = el('button', { type: 'button', disabled: '' }, 'Restart');
+    var fast = el('button', { type: 'button', 'aria-pressed': 'false' }, '1×'), bar = el('progress', { max: '1', value: '0', 'aria-label': 'Progress of the recording' });
+    var screen = el('pre', { 'class': 't screen', tabindex: '0', hidden: '', 'aria-label': 'The recording, as text' }), msg = el('p', { 'class': 'msg', role: 'status' });
+    ctl.append(play, pause, restart, fast, bar);
+    box.prepend(ctl, msg, screen);
+    function show(on) { screen.hidden = !on; statics.forEach(function (p) { p.hidden = on; }); }
+    function draw() { bar.value = events && events.length ? (i ? events[i - 1][0] : 0) / (total || 1) : 0; }
+    function put(text) { screen.appendChild(document.createTextNode(text)); screen.scrollTop = screen.scrollHeight; }
+    function setPlaying(p) { playing = p; pause.disabled = !p; pause.textContent = 'Pause'; }
+    function step() {
+      timer = null;
+      if (i >= events.length) { setPlaying(false); draw(); msg.textContent = 'End of the recording.'; return; }
+      put(events[i][1]); i++; draw();
+      if (i >= events.length) { setPlaying(false); msg.textContent = 'End of the recording.'; return; }
+      timer = setTimeout(step, Math.max(0, events[i][0] - events[i - 1][0]) * 1000 / speed);
+    }
+    function start() { screen.textContent = ''; i = 0; show(true); msg.textContent = ''; restart.disabled = false; setPlaying(true); step(); }
+    function load(then) {
+      if (events) return then();
+      msg.textContent = 'Loading…';
+      fetch(url).then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); }).then(function (t) {
+        events = parse(t); total = events.length ? events[events.length - 1][0] : 0; msg.textContent = ''; then();
+      }).catch(function () { msg.textContent = 'The recording could not be loaded here (a page opened from a file cannot fetch it); use the download link.'; });
+    }
+    play.addEventListener('click', function () {
+      load(function () {
+        if (reduce) { screen.textContent = events.map(function (e) { return e[1]; }).join(''); show(true); i = events.length; bar.value = 1; msg.textContent = 'Reduced motion: the whole recording is shown at once.'; restart.disabled = true; return; }
+        start();
+      });
+    });
+    pause.addEventListener('click', function () {
+      if (!events) return;
+      if (playing) { clearTimeout(timer); timer = null; setPlaying(false); pause.disabled = false; pause.textContent = 'Resume'; }
+      else if (i < events.length) { setPlaying(true); step(); }
+    });
+    restart.addEventListener('click', function () { clearTimeout(timer); start(); });
+    fast.addEventListener('click', function () { speed = speed === 1 ? 2 : 1; fast.textContent = speed + '×'; fast.setAttribute('aria-pressed', speed === 2 ? 'true' : 'false'); });
+  });
+})();
+</script>
 </body>
 </html>
