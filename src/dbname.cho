@@ -1,0 +1,260 @@
+edition 5;
+
+module dbname;
+
+import std.conns;
+import dns;
+import destination;
+
+// `dbname` -- the database's host, when it is a name, resolved by the service itself (`docs/design.md` section 45).
+//
+// The pool dials the host it is given, and a name given to it is resolved by the C library's `getaddrinfo`, a call that waits: the loop
+// stood still for as long as the name server took (cancho #259). So a name is resolved here, by the service's own name server client (TCP, the
+// name server of `dns-server` or of /etc/resolv.conf, as for an `https` endpoint: section 40), without waiting, and the pool is given the address.
+// The address is looked up again after a dial that failed or a connection that was lost, so a name that moves is followed.
+//
+// The state is `size()` integers, the caller's (a slice of the delivery state):
+//
+//     [0] 0 nothing to do (the host is an address, or there is no database)   1 an address is wanted   2 a lookup is on the wire   3 the address is known
+//     [1] the address (an IPv4, packed)   [2] when the lookup on the wire is given up (monotonic ms)   [3] its query id   [4] bytes of the query written
+//     [5] bytes of the answer read   [6] the query's length, with its two-byte prefix   [7] the earliest the next lookup may start (monotonic ms)
+//     [8] the wait after the last failed lookup (ms)   [9] lookups made   [10] lookups that failed   [11] the name server (packed)   [12] its port
+//     [13] the slot of the lookup's connection in its table (-1: none)   [14] a counter for the query ids   [15] the pool's count of lost connections, as last seen
+//
+// The bytes are `buf_size()`, the caller's: the query from 0, the answer (a two-byte length, then at most 4,096 bytes) from 1,024.
+
+pub fn size() -> [] int {
+    return 16;
+}
+
+pub fn buf_size() -> [] int {
+    return 1024 + 4098;
+}
+
+// How long a lookup may take before it is given up (ms), and the longest wait between failed ones.
+fn lookup_ms() -> [] int {
+    return 5000;
+}
+
+fn most_wait_ms() -> [] int {
+    return 30000;
+}
+
+// `host` is the setting `pg-host`: an address needs nothing; a name needs a name server (with none, the pool is given the name, as before).
+pub fn init[&s, &h](st: &!s [int], host: &h [byte], ns: int, ns_port: int) -> [] int {
+    var i = 0;
+    while i < size() {
+        st[i] = 0;
+        i = i + 1;
+    }
+    st[13] = 0 - 1;
+    st[11] = ns;
+    st[12] = ns_port;
+    if len(host) > 0 && destination.address(host) < 0 && ns != 0 {
+        st[0] = 1;
+    }
+    return 0;
+}
+
+// Whether the service resolves the host itself (it is a name): the caller drives the pool's dials then.
+pub fn active[&s](st: &s [int]) -> [] bool {
+    return st[0] != 0;
+}
+
+pub fn known[&s](st: &s [int]) -> [] bool {
+    return st[0] == 3;
+}
+
+pub fn lookups[&s](st: &s [int]) -> [] int {
+    return st[9];
+}
+
+pub fn failures[&s](st: &s [int]) -> [] int {
+    return st[10];
+}
+
+// The known address as text, into `out` (16 bytes at least). Answers its length.
+pub fn dotted[&s, &o](st: &s [int], out: &!o [byte]) -> [] int {
+    return dns.put_dotted(out, 0, st[1]);
+}
+
+// The pool's count of connections lost: one more than last seen is a connection lost, and the name is looked up again before the next dial.
+pub fn note_losses[&s](st: &!s [int], losses: int) -> [] int {
+    if losses > st[15] {
+        st[15] = losses;
+        stale(st);
+    }
+    return 0;
+}
+
+// A dial to the address failed, or a connection was lost: look the name up again before the next dial.
+pub fn stale[&s](st: &!s [int]) -> [] int {
+    if st[0] == 3 {
+        st[0] = 1;
+    }
+    return 0;
+}
+
+fn failed[&s](st: &!s [int], now: int) -> [] int {
+    st[0] = 1;
+    st[10] = st[10] + 1;
+    var wait = st[8] * 2;
+    if wait < 250 {
+        wait = 250;
+    }
+    if wait > most_wait_ms() {
+        wait = most_wait_ms();
+    }
+    st[8] = wait;
+    st[7] = now + wait;
+    return 0;
+}
+
+fn close_conn[&t, &s](tab: &!t conns.Table, st: &!s [int]) -> [] int {
+    if st[13] >= 0 {
+        conns.close(tab, st[13]);
+        st[13] = 0 - 1;
+    }
+    return 0;
+}
+
+// Start a lookup if one is wanted and may start: the query is made, a connection to the name server is begun (without waiting) and watched under
+// `token`. Answers the table, which holds the connection.
+pub fn start[&h, &n, &p, &s, &b, &q](heap: &!h Heap, net: &n Net(""), table: conns.Table, poller: &!p Poller, st: &!s [int], buf: &!b [byte], host: &q [byte], token: int, now: int) -> [heap, net_out(""), poll] conns.Table {
+    var tab = table;
+    if st[0] != 1 || now < st[7] {
+        return tab;
+    }
+    st[9] = st[9] + 1;
+    st[14] = st[14] + 1;
+    let id = (st[14] * 40503 + now) % 65536;
+    let qlen = dns.build_query(host, id, buf[0..1024], 2);
+    if qlen < 0 {
+        failed(st, now);
+        return tab;
+    }
+    buf[0] = byte_of(qlen / 256 % 256);
+    buf[1] = byte_of(qlen % 256);
+    st[3] = id;
+    st[4] = 0;
+    st[5] = 0;
+    st[6] = qlen + 2;
+    var slot = 0 - 1;
+    region text {
+        let literal = alloc_slice[text](16, byte_of(0));
+        let n_text = dns.put_dotted(literal, 0, st[11]);
+        match tcp_connect_start(net, literal[0..n_text], st[12]) {
+            Dialed::Failed(err) => {
+            }
+            Dialed::Ok(c) => {
+                let (grown, s) = conns.put(heap, tab, c);
+                tab = grown;
+                slot = s;
+            }
+        }
+    }
+    if slot < 0 {
+        failed(st, now);
+        return tab;
+    }
+    st[13] = slot;
+    var watched = 0 - 1;
+    borrow mut tab as &!ct in {
+        watched = conns.watch(ct, poller, slot, token, 2);
+        if watched != 0 {
+            close_conn(ct, st);
+        }
+    }
+    if watched != 0 {
+        failed(st, now);
+        return tab;
+    }
+    st[0] = 2;
+    st[2] = now + lookup_ms();
+    return tab;
+}
+
+// The poller reported the lookup's connection: write the query, then read the answer. When the answer is whole it is judged: its first address
+// is the database's (a private address is allowed: a database is usually on one). Answers 1 when the lookup ended, either way.
+pub fn advance[&t, &p, &s, &b](tab: &!t conns.Table, poller: &!p Poller, st: &!s [int], buf: &!b [byte], token: int, now: int) -> [conn_read, conn_write, poll] int {
+    if st[0] != 2 || st[13] < 0 {
+        return 0;
+    }
+    let slot = st[13];
+    if st[4] < st[6] {
+        match conns.write(tab, slot, buf[st[4]..st[6]]) {
+            Sent::Wrote(k) => {
+                st[4] = st[4] + k;
+                if st[4] >= st[6] && conns.rewatch(tab, poller, slot, token, 1) != 0 {
+                    close_conn(tab, st);
+                    failed(st, now);
+                    return 1;
+                }
+            }
+            Sent::Again => {
+            }
+            Sent::Failed(err) => {
+                close_conn(tab, st);
+                failed(st, now);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    match conns.read(tab, slot, buf[1024 + st[5]..1024 + 4098]) {
+        Received::Data(k) => {
+            st[5] = st[5] + k;
+        }
+        Received::Again => {
+            return 0;
+        }
+        Received::End => {
+            close_conn(tab, st);
+            failed(st, now);
+            return 1;
+        }
+        Received::Failed(err) => {
+            close_conn(tab, st);
+            failed(st, now);
+            return 1;
+        }
+    }
+    if st[5] < 2 {
+        return 0;
+    }
+    let want = int_of(buf[1024]) * 256 + int_of(buf[1025]);
+    if want < 12 || want > 4096 {
+        close_conn(tab, st);
+        failed(st, now);
+        return 1;
+    }
+    if st[5] < want + 2 {
+        return 0;
+    }
+    close_conn(tab, st);
+    var got = 0;
+    region scratch {
+        let found = alloc_slice[scratch](dns.addrs_size(), 0);
+        let n = dns.parse(buf[1026..1026 + want], want, st[3], found);
+        if n > 0 {
+            got = found[0];
+        }
+    }
+    if got == 0 {
+        failed(st, now);
+        return 1;
+    }
+    st[1] = got;
+    st[0] = 3;
+    st[8] = 0;
+    return 1;
+}
+
+// A lookup that has been on the wire too long is given up.
+pub fn expire[&t, &s](tab: &!t conns.Table, st: &!s [int], now: int) -> [] int {
+    if st[0] == 2 && now > st[2] {
+        close_conn(tab, st);
+        failed(st, now);
+    }
+    return 0;
+}

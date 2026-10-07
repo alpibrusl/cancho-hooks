@@ -1,0 +1,419 @@
+edition 5;
+
+import std.test;
+import std.bytes;
+import cron;
+
+// Cron expressions (`src/cron.cho`, `docs/design.md` section 32): the calendar, what is accepted and what is refused, and when an
+// expression fires next and last. Every expected time is a Unix second written out and checked with Python's `calendar.timegm`.
+// `tests/cron_test.py` checks the same functions against an independent implementation on thousands of random cases.
+
+// The next fire after `t` of `expr` (five fields), -2 if it does not parse.
+fn next[&e](expr: &e [byte], t: int) -> [] int {
+    region a {
+        let spec = alloc_slice[a](8, 0);
+        if cron.parse(expr, false, spec) != 0 {
+            return 0 - 2;
+        }
+        return cron.next_after(spec, t);
+    }
+}
+
+// The same for six fields (a leading seconds field).
+fn next6[&e](expr: &e [byte], t: int) -> [] int {
+    region a {
+        let spec = alloc_slice[a](8, 0);
+        if cron.parse(expr, true, spec) != 0 {
+            return 0 - 2;
+        }
+        return cron.next_after(spec, t);
+    }
+}
+
+fn prev[&e](expr: &e [byte], t: int) -> [] int {
+    region a {
+        let spec = alloc_slice[a](8, 0);
+        if cron.parse(expr, false, spec) != 0 {
+            return 0 - 2;
+        }
+        return cron.prev_upto(spec, t);
+    }
+}
+
+// What `parse` answers for `expr`: 0, or the code.
+fn code[&e](expr: &e [byte]) -> [] int {
+    region a {
+        let spec = alloc_slice[a](8, 0);
+        return cron.valid(expr, false, spec);
+    }
+}
+
+fn test_the_calendar_goes_both_ways_for_every_day_of_two_centuries() -> [] int {
+    var z = 0;
+    while z < 80000 {
+        let (y, m, d) = cron.civil_from_days(z);
+        test.assert_eq(cron.days_from_civil(y, m, d), z);
+        test.assert(d >= 1 && d <= 31);
+        test.assert(m >= 1 && m <= 12);
+        z = z + 1;
+    }
+    // A few days a person can check.
+    test.assert_eq(cron.days_from_civil(1970, 1, 1), 0);
+    test.assert_eq(cron.days_from_civil(2000, 3, 1), 11017);
+    test.assert_eq(cron.days_from_civil(2024, 2, 29) * 86400, 1709164800);
+    test.assert_eq(cron.days_from_civil(2100, 3, 1) - cron.days_from_civil(2100, 2, 28), 1);
+    test.assert_eq(cron.days_from_civil(2000, 3, 1) - cron.days_from_civil(2000, 2, 28), 2);
+    return 0;
+}
+
+fn test_the_weekday_is_sunday_zero() -> [] int {
+    test.assert_eq(cron.weekday(0), 4);
+    test.assert_eq(cron.weekday(cron.days_from_civil(2000, 1, 1)), 6);
+    test.assert_eq(cron.weekday(cron.days_from_civil(2024, 1, 7)), 0);
+    test.assert_eq(cron.weekday(cron.days_from_civil(2024, 2, 29)), 4);
+    test.assert_eq(cron.weekday(cron.days_from_civil(2038, 1, 19)), 2);
+    return 0;
+}
+
+// The length of the month `m` of year `y`, from the calendar alone: the days from its first to the first of the next.
+fn length_of(y: int, m: int) -> [] int {
+    if m == 12 {
+        return cron.days_from_civil(y + 1, 1, 1) - cron.days_from_civil(y, 12, 1);
+    }
+    return cron.days_from_civil(y, m + 1, 1) - cron.days_from_civil(y, m, 1);
+}
+
+fn test_leap_years_and_month_lengths_come_out_of_the_calendar() -> [] int {
+    // February: 29 days in 2000, 2024, 2096 and 2104, 28 in 2023, 2100 and 2200
+    test.assert_eq(length_of(2000, 2), 29);
+    test.assert_eq(length_of(2024, 2), 29);
+    test.assert_eq(length_of(2096, 2), 29);
+    test.assert_eq(length_of(2104, 2), 29);
+    test.assert_eq(length_of(2023, 2), 28);
+    test.assert_eq(length_of(2100, 2), 28);
+    test.assert_eq(length_of(2200, 2), 28);
+    test.assert_eq(length_of(2400, 2), 29);
+    // the day after the 28th of February is the 29th in a leap year and the 1st of March in another
+    let (y, m, d) = cron.civil_from_days(cron.days_from_civil(2024, 2, 28) + 1);
+    test.assert_eq(y * 10000 + m * 100 + d, 20240229);
+    let (y2, m2, d2) = cron.civil_from_days(cron.days_from_civil(2100, 2, 28) + 1);
+    test.assert_eq(y2 * 10000 + m2 * 100 + d2, 21000301);
+    // the other months, in a year that is not a leap year and in one that is
+    test.assert_eq(length_of(2023, 1), 31);
+    test.assert_eq(length_of(2023, 3), 31);
+    test.assert_eq(length_of(2023, 4), 30);
+    test.assert_eq(length_of(2023, 5), 31);
+    test.assert_eq(length_of(2023, 6), 30);
+    test.assert_eq(length_of(2023, 7), 31);
+    test.assert_eq(length_of(2023, 8), 31);
+    test.assert_eq(length_of(2023, 9), 30);
+    test.assert_eq(length_of(2023, 10), 31);
+    test.assert_eq(length_of(2023, 11), 30);
+    test.assert_eq(length_of(2023, 12), 31);
+    test.assert_eq(length_of(2024, 12), 31);
+    test.assert_eq(length_of(2024, 4), 30);
+    return 0;
+}
+
+fn test_a_time_is_written_as_iso_8601() -> [] int {
+    region a {
+        let out = alloc_slice[a](24, byte_of(0));
+        test.assert_eq(cron.iso(1709164800, out), 20);
+        test.assert(bytes.equal(out[0..20], "2024-02-29T00:00:00Z"));
+        test.assert_eq(cron.iso(0, out), 20);
+        test.assert(bytes.equal(out[0..20], "1970-01-01T00:00:00Z"));
+        test.assert_eq(cron.iso(253402300799, out), 20);
+        test.assert(bytes.equal(out[0..20], "9999-12-31T23:59:59Z"));
+        test.assert_eq(cron.iso(1709251199, out), 20);
+        test.assert(bytes.equal(out[0..20], "2024-02-29T23:59:59Z"));
+        test.assert_eq(cron.iso(cron.far(), out), 0);
+        test.assert_eq(cron.iso(0 - 1, out), 0);
+    }
+    return 0;
+}
+
+fn test_the_fields_become_bit_sets() -> [] int {
+    region a {
+        let s = alloc_slice[a](8, 0);
+        test.assert_eq(cron.parse("*/15 0 1,15 * 7", false, s), 0);
+        // minutes 0, 15, 30, 45
+        test.assert_eq(s[1], 1 | 1 << 15 | 1 << 30 | 1 << 45);
+        test.assert_eq(s[2], 1);
+        test.assert_eq(s[3], 1 << 1 | 1 << 15);
+        // every month, bits 1 to 12
+        test.assert_eq(s[4], 8190);
+        // 7 is Sunday: bit 0
+        test.assert_eq(s[5], 1);
+        // seconds are 0 in a five-field expression
+        test.assert_eq(s[0], 1);
+        test.assert_eq(s[6], 0);
+        test.assert_eq(s[7], 0);
+        test.assert_eq(cron.parse("0 0 */2 * *", false, s), 0);
+        test.assert_eq(s[6], 1);
+        test.assert_eq(s[7], 1);
+        // `*/2` of the days of the month is 1, 3, 5, ... 31: a step starts at the field's first value
+        test.assert_eq(cron.parse("0 0 */10 * *", false, s), 0);
+        test.assert_eq(s[3], 1 << 1 | 1 << 11 | 1 << 21 | 1 << 31);
+        test.assert_eq(cron.parse("0 0 * * */2", false, s), 0);
+        // 0, 2, 4, 6
+        test.assert_eq(s[5], 1 | 4 | 16 | 64);
+        test.assert_eq(cron.parse("0 0 * * 5-7", false, s), 0);
+        // Friday, Saturday, and 7 which is Sunday
+        test.assert_eq(s[5], 32 | 64 | 1);
+        test.assert_eq(cron.parse("0 0 * * 0-7", false, s), 0);
+        test.assert_eq(s[5], 127);
+        test.assert_eq(cron.parse("10-30/10 * * * *", false, s), 0);
+        test.assert_eq(s[1], 1 << 10 | 1 << 20 | 1 << 30);
+        test.assert_eq(cron.parse("5,10-12,*/30 * * * *", false, s), 0);
+        test.assert_eq(s[1], 1 << 5 | 1 << 10 | 1 << 11 | 1 << 12 | 1 | 1 << 30);
+        // blanks: tabs and runs of spaces separate fields, and the ends are trimmed
+        test.assert_eq(cron.parse("  0\t 0   * *  *  ", false, s), 0);
+        test.assert_eq(cron.parse("*/10 5 0 0 * * *", true, s), 8);
+        test.assert_eq(cron.parse("*/10 5 0 1 * *", true, s), 0);
+        test.assert_eq(s[0], 1 | 1 << 10 | 1 << 20 | 1 << 30 | 1 << 40 | 1 << 50);
+        test.assert_eq(s[1], 1 << 5);
+    }
+    return 0;
+}
+
+fn test_every_kind_of_wrong_expression_is_refused_with_its_own_code() -> [] int {
+    // five fields
+    test.assert_eq(code(""), 1);
+    test.assert_eq(code("* * * *"), 1);
+    test.assert_eq(code("* * * * * *"), 1);
+    test.assert_eq(code("@daily"), 1);
+    // a number outside its field
+    test.assert_eq(code("60 * * * *"), 3);
+    test.assert_eq(code("* 24 * * *"), 3);
+    test.assert_eq(code("* * 0 * *"), 3);
+    test.assert_eq(code("* * 32 * *"), 3);
+    test.assert_eq(code("* * * 0 *"), 3);
+    test.assert_eq(code("* * * 13 *"), 3);
+    test.assert_eq(code("* * * * 8"), 3);
+    test.assert_eq(code("0-60 * * * *"), 3);
+    // a range that runs backwards
+    test.assert_eq(code("5-1 * * * *"), 4);
+    test.assert_eq(code("* 22-2 * * *"), 4);
+    // a step
+    test.assert_eq(code("*/0 * * * *"), 5);
+    test.assert_eq(code("*/61 * * * *"), 5);
+    test.assert_eq(code("*/ * * * *"), 5);
+    test.assert_eq(code("5/10 * * * *"), 5);
+    test.assert_eq(code("1-5/0 * * * *"), 5);
+    // syntax
+    test.assert_eq(code("1,,2 * * * *"), 2);
+    test.assert_eq(code(",1 * * * *"), 2);
+    test.assert_eq(code("1, * * * *"), 2);
+    test.assert_eq(code("a * * * *"), 2);
+    test.assert_eq(code("* * * * MON"), 2);
+    test.assert_eq(code("* * * JAN *"), 2);
+    test.assert_eq(code("-1 * * * *"), 2);
+    test.assert_eq(code("1-2-3 * * * *"), 2);
+    test.assert_eq(code("*/5/2 * * * *"), 2);
+    test.assert_eq(code("1000 * * * *"), 2);
+    test.assert_eq(code("*-5 * * * *"), 2);
+    test.assert_eq(code("5- * * * *"), 2);
+    test.assert_eq(code("+5 * * * *"), 2);
+    test.assert_eq(code("0x5 * * * *"), 2);
+    // too long
+    test.assert_eq(code("0 0 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,1,2,3,4,5 * *"), 6);
+    return 0;
+}
+
+fn test_six_fields_only_with_the_seconds_field_on() -> [] int {
+    region a {
+        let s = alloc_slice[a](8, 0);
+        test.assert_eq(cron.valid("* * * * * *", true, s), 0);
+        test.assert_eq(cron.valid("* * * * *", true, s), 8);
+        test.assert_eq(cron.valid("60 * * * * *", true, s), 3);
+        test.assert_eq(cron.valid("* * * * * * *", true, s), 8);
+    }
+    return 0;
+}
+
+fn test_an_expression_that_never_fires_is_refused() -> [] int {
+    test.assert_eq(code("0 0 31 2 *"), 7);
+    test.assert_eq(code("0 0 30 2 *"), 7);
+    test.assert_eq(code("0 0 31 4 *"), 7);
+    test.assert_eq(code("0 0 31 6,9,11 *"), 7);
+    test.assert_eq(code("0 0 30-31 2 *"), 7);
+    // a leap day is rare, not never
+    test.assert_eq(code("0 0 29 2 *"), 0);
+    // with a day of week too, the day of month OR the day of week fires: Mondays of February
+    test.assert_eq(code("0 0 31 2 1"), 0);
+    // with a `*` in one of them it is both: the 31st of February that is a Monday
+    test.assert_eq(code("0 0 31 2 */1"), 7);
+    test.assert_eq(code("0 0 * 2 *"), 0);
+    return 0;
+}
+
+fn test_every_minute_and_every_fifteen() -> [] int {
+    test.assert_eq(next("* * * * *", 1704067200), 1704067260);
+    // strictly after: a second that is itself a fire is not "after"
+    test.assert_eq(next("* * * * *", 1704067259), 1704067260);
+    test.assert_eq(next("* * * * *", 1704067260), 1704067320);
+    test.assert_eq(next("*/15 * * * *", 1704068099), 1704068100);
+    test.assert_eq(next("*/15 * * * *", 1704068100), 1704069000);
+    test.assert_eq(next("*/20 * * * *", 1704067200), 1704067200 + 1200);
+    // 10, 20, 30 of every hour: after :30 it is :10 of the next hour
+    test.assert_eq(next("10-30/10 * * * *", 1704069000), 1704071400);
+    return 0;
+}
+
+fn test_steps_over_hours_and_days() -> [] int {
+    test.assert_eq(next("0 */6 * * *", 1704067200), 1704088800);
+    test.assert_eq(next("0 */6 * * *", 1704088800), 1704110400);
+    test.assert_eq(next("0 1-5/2 * * *", 1704067200), 1704070800);
+    test.assert_eq(next("0 1-5/2 * * *", 1704070800), 1704078000);
+    // days 1, 11, 21, 31 of the month
+    test.assert_eq(next("0 0 */10 * *", 1705795200), 1706659200);
+    // after the 31st of January: the 1st of February (January's 31st is the last of its steps), then the 11th
+    test.assert_eq(next("0 0 */10 * *", 1706659200), 1706745600);
+    test.assert_eq(next("0 0 */10 * *", 1706745600), 1707609600);
+    // February has no 31st: 21 is the last, then the 1st of March
+    test.assert_eq(next("0 0 */10 * *", 1708473600), 1709251200);
+    return 0;
+}
+
+fn test_month_lengths() -> [] int {
+    // the 31st: January, then March (February has none), then May (April has 30 days)
+    test.assert_eq(next("0 0 31 * *", 1706659200), 1711843200);
+    test.assert_eq(next("0 0 31 * *", 1711843200), 1717113600);
+    // the 30th in a leap year: January, then March
+    test.assert_eq(next("0 0 30 * *", 1706572800), 1711756800);
+    // the last minute of the year, then the same one the year after
+    test.assert_eq(next("59 23 31 12 *", 1735689540), 1767225540);
+    test.assert_eq(next("59 23 31 12 *", 1735689539), 1735689540);
+    // the first of January
+    test.assert_eq(next("0 0 1 1 *", 1704067200), 1735689600);
+    // the end of the day and the start of the next
+    test.assert_eq(next("* * * * *", 1709251199 - 60), 1709251199 - 59);
+    test.assert_eq(next("0 0 * * *", 1709251199), 1709251200);
+    return 0;
+}
+
+fn test_leap_days() -> [] int {
+    // the next 29th of February after 1 March 2024: 2028
+    test.assert_eq(next("0 0 29 2 *", 1709251200), 1835395200);
+    // and four years on
+    test.assert_eq(next("0 0 29 2 *", 1835395200), 1961625600);
+    // 2100 is not a leap year: from March 2096 the wait is eight years
+    test.assert_eq(next("0 0 29 2 *", 3981398400), 4233686400);
+    // from before the day itself
+    test.assert_eq(next("0 0 29 2 *", 1709164799), 1709164800);
+    // 23:59 of that day is in the day
+    test.assert_eq(next("59 23 29 2 *", 1709164800), 1709251140);
+    // 1972, the first leap year after the epoch
+    test.assert_eq(next("0 0 29 2 *", 0), 68169600);
+    // a `*` in the day of week makes it "and": the same day, since every day of the week is allowed
+    test.assert_eq(next("0 0 29 2 */1", 0), 68169600);
+    return 0;
+}
+
+fn test_day_of_month_and_day_of_week_are_or_unless_one_is_a_star() -> [] int {
+    // 2024-01-01 is a Monday and the 1st. `0 0 1 * 1`: the 1st OR a Monday. After it, the next Monday, the 8th.
+    test.assert_eq(next("0 0 1 * 1", 1704067200), 1704672000);
+    // after Monday 29 January: the 1st of February (a Thursday) comes before the next Monday
+    test.assert_eq(next("0 0 1 * 1", 1706486400), 1706745600);
+    // a Monday only
+    test.assert_eq(next("0 0 * * 1", 1704067200), 1704672000);
+    // a day of month only
+    test.assert_eq(next("0 0 15 * *", 1704067200), 1705276800);
+    // `*/2` begins with a star, so both must hold: a Monday that is an odd day. The 8th is even, the 15th is odd.
+    test.assert_eq(next("0 0 */2 * 1", 1704067200), 1705276800);
+    // the same days written without a star in the day of month are OR: the 1st, 3rd, 5th ... and every Monday. The 2nd is neither; the 3rd is.
+    test.assert_eq(next("0 0 1-31/2 * 1", 1704067200), 1704067200 + 2 * 86400);
+    return 0;
+}
+
+fn test_sunday_is_zero_and_seven() -> [] int {
+    // after Monday 1 January 2024 the next Sunday is the 7th
+    test.assert_eq(next("0 0 * * 0", 1704067200), 1704585600);
+    test.assert_eq(next("0 0 * * 7", 1704067200), 1704585600);
+    test.assert_eq(next("0 0 * * 0,7", 1704067200), 1704585600);
+    test.assert_eq(next("0 0 * * 7-7", 1704067200), 1704585600);
+    // Friday to Sunday: after Monday it is Friday the 5th; after that Saturday, then Sunday
+    test.assert_eq(next("0 0 * * 5-7", 1704067200), 1704412800);
+    test.assert_eq(next("0 0 * * 5-7", 1704412800), 1704412800 + 86400);
+    test.assert_eq(next("0 0 * * 5-7", 1704412800 + 86400), 1704585600);
+    // weekdays, ten at night: after Friday 22:00 it is Monday 22:00
+    test.assert_eq(next("0 22 * * 1-5", 1704492000), 1704751200);
+    // the day of week is also 0 to 6 of `*/2`
+    test.assert_eq(next("0 0 * * */2", 1704067200), 1704067200 + 86400);
+    return 0;
+}
+
+fn test_the_year_does_not_matter_to_an_hourly_schedule_across_a_new_year() -> [] int {
+    test.assert_eq(next("0 * * * *", 1735689599), 1735689600);
+    test.assert_eq(next("0 0 * * *", 1735689599), 1735689600);
+    test.assert_eq(next("30 4 1,15 * 5", 1704067200), 1704083400);
+    return 0;
+}
+
+fn test_seconds_mode() -> [] int {
+    test.assert_eq(next6("*/10 * * * * *", 1704067200), 1704067210);
+    test.assert_eq(next6("*/10 * * * * *", 1704067259), 1704067260);
+    test.assert_eq(next6("* * * * * *", 1704067200), 1704067201);
+    test.assert_eq(next6("5 0 0 1 1 *", 1704067200), 1704067205);
+    test.assert_eq(next6("5 0 0 1 1 *", 1704067205), 1735689605);
+    test.assert_eq(next6("5 0 0 1 1 *", 1704067204), 1704067205);
+    test.assert_eq(next6("0 0 0 29 2 *", 1709251200), 1835395200);
+    return 0;
+}
+
+fn test_the_last_fire_up_to_a_time() -> [] int {
+    // 00:14:59 is before the quarter hour: the last one is 00:00:00; at 00:15:00 the second is itself a fire
+    test.assert_eq(prev("*/15 * * * *", 1704068099), 1704067200);
+    test.assert_eq(prev("*/15 * * * *", 1704068100), 1704068100);
+    // before the 29th of February 2028: the one of 2024
+    test.assert_eq(prev("0 0 29 2 *", 1835308800), 1709164800);
+    // 2096 to 2104 and back
+    test.assert_eq(prev("0 0 29 2 *", 4233686399), 3981312000);
+    test.assert_eq(prev("0 0 29 2 *", 4233686400), 4233686400);
+    // the 31st, from the 30th of March: January's, because February has none
+    test.assert_eq(prev("0 0 31 * *", 1711756800), 1706659200);
+    // the last Sunday before Saturday 6 January 2024: 31 December 2023
+    test.assert_eq(prev("0 0 * * 0", 1704499200), 1703980800);
+    // none before the epoch, and none of the leap days before 1972
+    test.assert_eq(prev("0 0 29 2 *", 68169599), 0 - 1);
+    test.assert_eq(prev("* * * * *", 0 - 1), 0 - 1);
+    test.assert_eq(prev("0 0 31 * *", 0), 0 - 1);
+    return 0;
+}
+
+// For `n` times `t, t + step, ...`: the next fire is after `t`, is a fire, and the last fire up to just before it is not after `t` and has this one as its next.
+fn consistent[&e](expr: &e [byte], t0: int, step: int, n: int) -> [] int {
+    region a {
+        let s = alloc_slice[a](8, 0);
+        test.assert_eq(cron.parse(expr, false, s), 0);
+        var i = 0;
+        while i < n {
+            let t = t0 + i * step;
+            let nx = cron.next_after(s, t);
+            test.assert(nx > t);
+            test.assert(cron.matches(s, nx));
+            test.assert_eq(cron.prev_upto(s, nx), nx);
+            let before = cron.prev_upto(s, nx - 1);
+            test.assert(before <= t);
+            if before >= 0 {
+                test.assert_eq(cron.next_after(s, before), nx);
+                test.assert(cron.matches(s, before));
+            }
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn test_next_and_last_agree_over_many_times() -> [] int {
+    consistent("* * * * *", 1700000000, 977, 300);
+    consistent("*/7 */5 * * *", 1700000000, 4999, 300);
+    consistent("0 0 29 2 *", 1000000000, 7654321, 200);
+    consistent("0 0 31 * *", 1000000000, 1234567, 200);
+    consistent("30 4 1,15 * 5", 1700000000, 86399, 300);
+    consistent("0 0 */2 * 1", 1700000000, 86400 * 3 + 17, 200);
+    consistent("59 23 31 12 *", 1000000000, 20000000, 100);
+    consistent("15 10 * * 7", 1700000000, 33333, 300);
+    consistent("0 0 1 1,7 *", 900000000, 5000000, 200);
+    return 0;
+}

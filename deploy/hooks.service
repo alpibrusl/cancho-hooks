@@ -1,4 +1,4 @@
-# lexsys-hooks under systemd.
+# cancho-hooks under systemd.
 #
 #   useradd --system --home-dir /var/lib/hooks --shell /usr/sbin/nologin hooks
 #   install -d -o root -g root /opt/hooks/bin && install -m 0755 hooks /opt/hooks/bin/hooks      # from the release tarball
@@ -12,8 +12,8 @@
 # recorded with strace and are all inside @system-service; the binary maps no anonymous executable memory. The unit has NOT been
 # run under a systemd here (no systemd in the build sandbox): the first start on a real host is the test.
 [Unit]
-Description=lexsys-hooks webhook delivery service
-Documentation=https://github.com/alpibrusl/lexsys-hooks
+Description=cancho-hooks webhook delivery service
+Documentation=https://github.com/alpibrusl/cancho-hooks
 After=network-online.target postgresql.service
 Wants=network-online.target
 # A service that keeps failing to start is stopped after 10 tries in 5 minutes, not restarted for ever.

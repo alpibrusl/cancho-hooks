@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One delivery attempt, through the service (src/attempt.ls): what each kind of receiver makes it record.
+"""One delivery attempt, through the service (src/attempt.cho): what each kind of receiver makes it record.
 
     python3 tests/attempt_test.py build/hooks
 

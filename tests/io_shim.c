@@ -8,7 +8,7 @@
  * SHIM_EAGAIN_EVERY-th call of either answers -1 with EAGAIN without touching the socket. Sockets to other ports (the service's own clients, the database) are
  * left alone. Real sockets on loopback accept 60 KB in one call, so the branches that handle a write the kernel takes in pieces, a write that has to wait, a
  * TLS record or a DNS answer that arrives in pieces and a read with nothing yet are not reached by an ordinary run (design.md section 16 says the same of the
- * plain attempt's partial-write branch; the lex-sys TLS spike found it for its own).
+ * plain attempt's partial-write branch; the cancho TLS spike found it for its own).
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

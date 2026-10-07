@@ -1,0 +1,333 @@
+edition 5;
+
+import std.test;
+import epx;
+
+// The extras of an endpoint (`src/epx.cho`, docs/design.md section 35): the row an endpoint has, set, read, shifted down by a delete, and cleared. Two
+// rows fit one arena. (The request side, `epx.parse`, needs a heap and is tested through the service: `tests/headers_test.py`, `tests/filter_test.py`.)
+
+fn test_a_row_starts_empty_and_wants_everything() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        test.assert_eq(epx.types_len(xt, 0), 0);
+        test.assert_eq(epx.wire_len(xt, 0), 0);
+        test.assert_eq(epx.old_len(xt, 0), 0);
+        test.assert(epx.accepts(xt, 0, "anything"));
+        test.assert(epx.accepts(xt, 0, ""));
+        test.assert(!epx.old_active(xt, 0, 1));
+    }
+    return 0;
+}
+
+fn test_a_subscription_is_kept_per_row() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_types(xt, 1, "user.*,ping");
+        test.assert_eq(epx.types_len(xt, 1), 11);
+        test.assert(epx.accepts(xt, 1, "user.created"));
+        test.assert(epx.accepts(xt, 1, "ping"));
+        test.assert(!epx.accepts(xt, 1, "order.created"));
+        test.assert(!epx.accepts(xt, 1, ""));
+        // row 0 is not touched
+        test.assert(epx.accepts(xt, 0, "order.created"));
+        // a shorter list replaces a longer one
+        epx.set_types(xt, 1, "a");
+        test.assert_eq(epx.types_len(xt, 1), 1);
+        test.assert(epx.accepts(xt, 1, "a"));
+        test.assert(!epx.accepts(xt, 1, "user.created"));
+        // and the empty one is everything again
+        epx.set_types(xt, 1, "");
+        test.assert(epx.accepts(xt, 1, "user.created"));
+    }
+    return 0;
+}
+
+fn test_headers_are_kept_as_they_go_on_the_wire() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        test.assert_eq(epx.set_spec(xt, 0, "A:b%20c"), 0);
+        // "A: b c\r\n"
+        test.assert_eq(epx.wire_len(xt, 0), 8);
+        test.assert_eq(epx.wire_byte(xt, 0, 0), int_of(byte_of('A')));
+        test.assert_eq(epx.wire_byte(xt, 0, 3), int_of(byte_of('b')));
+        test.assert_eq(epx.wire_byte(xt, 0, 4), int_of(byte_of(' ')));
+        test.assert_eq(epx.wire_byte(xt, 0, 6), int_of(byte_of('\r')));
+        test.assert_eq(epx.wire_byte(xt, 0, 7), int_of(byte_of('\n')));
+        // a spec that is not good changes nothing
+        test.assert_eq(epx.set_spec(xt, 0, "A:%0d%0a"), 0 - 1);
+        test.assert_eq(epx.wire_len(xt, 0), 8);
+        // the empty spec removes them
+        test.assert_eq(epx.set_spec(xt, 0, ""), 0);
+        test.assert_eq(epx.wire_len(xt, 0), 0);
+    }
+    return 0;
+}
+
+fn test_a_previous_secret_is_valid_until_its_time() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_old(xt, 0, "0123456789abcdef", 5000);
+        test.assert_eq(epx.old_len(xt, 0), 16);
+        test.assert(epx.old_active(xt, 0, 4999));
+        test.assert(!epx.old_active(xt, 0, 5000));
+        test.assert(!epx.old_active(xt, 0, 6000));
+        test.assert_eq(epx.old_byte(xt, 0, 0), int_of(byte_of('0')));
+        test.assert_eq(epx.old_byte(xt, 0, 15), int_of(byte_of('f')));
+        // the time can be moved while there is a key
+        epx.set_old_until(xt, 0, 9000);
+        test.assert(epx.old_active(xt, 0, 8999));
+        test.assert(!epx.old_active(xt, 1, 1));
+        epx.set_old_until(xt, 1, 9000);
+        test.assert_eq(epx.old_len(xt, 1), 0);
+        test.assert(!epx.old_active(xt, 1, 1));
+        // no key, or no time, ends it, and the key's bytes are zeroed
+        epx.set_old(xt, 0, "", 9000);
+        test.assert(!epx.old_active(xt, 0, 1));
+        test.assert_eq(epx.old_byte(xt, 0, 0), 0);
+        epx.set_old(xt, 0, "k", 0);
+        test.assert_eq(epx.old_len(xt, 0), 0);
+    }
+    return 0;
+}
+
+fn test_a_delete_shifts_the_rows_down_and_clears_the_last() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_types(xt, 0, "first");
+        epx.set_spec(xt, 0, "A:one");
+        epx.set_types(xt, 1, "second");
+        epx.set_old(xt, 1, "key", 77);
+        epx.drop_row(xt, 2, 0);
+        test.assert_eq(epx.types_len(xt, 0), 6);
+        test.assert(epx.accepts(xt, 0, "second"));
+        test.assert(!epx.accepts(xt, 0, "first"));
+        test.assert_eq(epx.wire_len(xt, 0), 0);
+        test.assert_eq(epx.old_len(xt, 0), 3);
+        test.assert_eq(epx.old_until(xt, 0), 77);
+        test.assert_eq(epx.types_len(xt, 1), 0);
+        test.assert_eq(epx.old_len(xt, 1), 0);
+        // the last row removed leaves the first alone
+        epx.drop_row(xt, 2, 1);
+        test.assert_eq(epx.types_len(xt, 0), 6);
+    }
+    return 0;
+}
+
+fn test_the_text_the_extras_take_is_estimated_generously() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        test.assert_eq(epx.text_used(xt, 2), 80);
+        epx.set_types(xt, 0, "abcde");
+        epx.set_spec(xt, 1, "A:b");
+        test.assert(epx.text_used(xt, 2) > 80 + 5);
+        test.assert_eq(epx.text_used(xt, 0), 0);
+    }
+    return 0;
+}
+
+// The limits of an endpoint (`lim.cho`, docs/design.md section 39.4) are two integers of its row: 0 is "follow the service". A delete shifts them like the rest.
+fn test_the_limits_are_kept_per_row_and_shift_with_a_delete() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        epx.set_conc(xt, 1, 3);
+        epx.set_rate(xt, 1, 250);
+        test.assert_eq(epx.conc(xt, 1), 3);
+        test.assert_eq(epx.rate(xt, 1), 250);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        // they sit beyond the previous secret's key, in no other member's place
+        epx.set_old(xt, 1, "key", 77);
+        epx.set_types(xt, 1, "a,b");
+        epx.set_spec(xt, 1, "A:one");
+        test.assert_eq(epx.conc(xt, 1), 3);
+        test.assert_eq(epx.rate(xt, 1), 250);
+        epx.drop_row(xt, 2, 0);
+        test.assert_eq(epx.conc(xt, 0), 3);
+        test.assert_eq(epx.rate(xt, 0), 250);
+        test.assert_eq(epx.conc(xt, 1), 0);
+        test.assert_eq(epx.rate(xt, 1), 0);
+        epx.clear_row(xt, 0);
+        test.assert_eq(epx.conc(xt, 0), 0);
+        test.assert_eq(epx.rate(xt, 0), 0);
+        test.assert_eq(epx.max_concurrency(), 8);
+        test.assert_eq(epx.max_rate(), 100000);
+    }
+    return 0;
+}
+
+fn test_the_request_names_the_limits_or_refuses_them[&h](heap: &!h Heap) -> [heap] int {
+    let xgb = box_slice(heap, epx.xg_size(), 0);
+    borrow mut xgb as &!xw in {
+        let xg = contents(xw);
+        // both, in a POST and in a PATCH
+        test.assert_eq(epx.parse(heap, "{\"host\":\"8.8.8.8\",\"concurrency\":3,\"rate\":250}", xg, false, 1000), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
+        test.assert_eq(epx.pending_conc(xg), 3);
+        test.assert_eq(epx.pending_rate(xg), 250);
+        test.assert_eq(epx.parse(heap, "{\"rate\":7}", xg, true, 1000), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_rate());
+        test.assert_eq(epx.pending_rate(xg), 7);
+        test.assert_eq(epx.pending_conc(xg), 0);
+        // null and 0 follow the service: named, and 0
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":null,\"rate\":0}", xg, true, 1000), 0);
+        test.assert_eq(epx.pending_mask(xg), epx.m_conc() | epx.m_rate());
+        test.assert_eq(epx.pending_conc(xg), 0);
+        test.assert_eq(epx.pending_rate(xg), 0);
+        // the edges
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":8,\"rate\":100000}", xg, true, 1000), 0);
+        test.assert_eq(epx.pending_conc(xg), 8);
+        test.assert_eq(epx.pending_rate(xg), 100000);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":1,\"rate\":1}", xg, true, 1000), 0);
+        // not named: not in the mask
+        test.assert_eq(epx.parse(heap, "{\"types\":[\"a\"]}", xg, true, 1000), 0);
+        test.assert_eq(epx.pending_mask(xg) & (epx.m_conc() | epx.m_rate()), 0);
+        // refusals leave nothing pending
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":9}", xg, true, 1000), 306);
+        test.assert_eq(epx.pending_mask(xg), 0);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":-1}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":2.5}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":\"2\"}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":true}", xg, true, 1000), 306);
+        test.assert_eq(epx.parse(heap, "{\"rate\":100001}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":-1}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":\"x\"}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"rate\":99999999999999999999}", xg, true, 1000), 307);
+        test.assert_eq(epx.parse(heap, "{\"concurrency\":3,\"rate\":[]}", xg, true, 1000), 307);
+        test.assert_eq(epx.pending_conc(xg), 0);
+        test.assert_eq(epx.pending_rate(xg), 0);
+    }
+    unbox_slice(heap, xgb);
+    return 0;
+}
+
+// A row is all zero past its lengths (section 41.4): what a shorter value leaves behind is cleared (a header's value is a credential), so that clearing and
+// moving a row cost what it holds and a row nobody wrote is not resident.
+fn test_a_shorter_value_leaves_nothing_behind() -> [] int {
+    region a {
+        let xt = alloc_slice[a](2 * epx.stride(), 0);
+        epx.set_spec(xt, 0, "Authorization:secret-value-1,X-B:other");
+        let long = epx.wire_len(xt, 0);
+        epx.set_spec(xt, 0, "A:b");
+        test.assert_eq(epx.wire_len(xt, 0), 6);
+        var k = 6;
+        var clean = true;
+        while k < long {
+            if epx.wire_byte(xt, 0, k) != 0 {
+                clean = false;
+            }
+            k = k + 1;
+        }
+        test.assert(clean);
+        epx.set_old(xt, 0, "0123456789abcdef", 99);
+        epx.set_old(xt, 0, "xy", 99);
+        test.assert_eq(epx.old_len(xt, 0), 2);
+        test.assert_eq(epx.old_byte(xt, 0, 1), int_of(byte_of('y')));
+        test.assert_eq(epx.old_byte(xt, 0, 2), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 15), 0);
+        epx.set_old(xt, 0, "", 0);
+        test.assert_eq(epx.old_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 1), 0);
+        test.assert_eq(epx.old_len(xt, 0), 0);
+        epx.clear_row(xt, 0);
+        test.assert_eq(epx.wire_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.wire_len(xt, 0), 0);
+    }
+    return 0;
+}
+
+// A delete moves the rows after it down by what they hold: the head and the bytes up to each length, and what the row it lands on held past them is cleared.
+fn test_a_delete_moves_what_rows_hold_and_leaves_no_stale_bytes[&h](heap: &!h Heap) -> [heap] int {
+    let xb = box_slice(heap, 3 * epx.stride(), 0);
+    borrow mut xb as &!xw in {
+        let xt = contents(xw);
+        epx.set_types(xt, 0, "a");
+        epx.set_spec(xt, 0, "Xlong-header-name:value-one");
+        epx.set_old(xt, 0, "key-zero-is-long", 5);
+        epx.set_conc(xt, 0, 7);
+        epx.set_types(xt, 1, "bb,cc");
+        epx.set_spec(xt, 1, "Y:22");
+        epx.set_conc(xt, 1, 2);
+        epx.set_rate(xt, 1, 40);
+        epx.set_types(xt, 2, "d");
+        epx.drop_row(xt, 3, 0);
+        test.assert(epx.accepts(xt, 0, "bb"));
+        test.assert(epx.accepts(xt, 0, "cc"));
+        test.assert(!epx.accepts(xt, 0, "a"));
+        test.assert_eq(epx.wire_len(xt, 0), 7);
+        test.assert_eq(epx.wire_byte(xt, 0, 0), int_of(byte_of('Y')));
+        // the longer header of the row that was there is not left after the shorter one
+        var k = 7;
+        var clean = true;
+        while k < 40 {
+            if epx.wire_byte(xt, 0, k) != 0 {
+                clean = false;
+            }
+            k = k + 1;
+        }
+        test.assert(clean);
+        // the previous key of the row that was there is gone, with its length and its time
+        test.assert_eq(epx.old_len(xt, 0), 0);
+        test.assert_eq(epx.old_until(xt, 0), 0);
+        test.assert_eq(epx.old_byte(xt, 0, 0), 0);
+        test.assert_eq(epx.conc(xt, 0), 2);
+        test.assert_eq(epx.rate(xt, 0), 40);
+        test.assert(epx.accepts(xt, 1, "d"));
+        test.assert(!epx.accepts(xt, 1, "bb"));
+        test.assert_eq(epx.wire_len(xt, 1), 0);
+        test.assert_eq(epx.conc(xt, 1), 0);
+        // and the row that moved up over a row with headers of its own has none of them left in its bytes either
+        var k1 = 0;
+        var clean1 = true;
+        while k1 < 40 {
+            if epx.wire_byte(xt, 1, k1) != 0 {
+                clean1 = false;
+            }
+            k1 = k1 + 1;
+        }
+        test.assert(clean1);
+        // the last of the three is empty
+        test.assert_eq(epx.types_len(xt, 2), 0);
+        test.assert(epx.accepts(xt, 2, "anything"));
+    }
+    unbox_slice(heap, xb);
+    return 0;
+}
+
+// The real block holds 1,024 rows (the limit): the last row is a row of its own, in neither the first's place nor the one before's, and a delete at the front moves it.
+fn test_the_last_row_of_the_whole_block_is_its_own[&h](heap: &!h Heap) -> [heap] int {
+    test.assert_eq(epx.xt_size(), 1024 * epx.stride());
+    test.assert_eq(epx.rows(), 1024);
+    let xb = box_slice(heap, epx.xt_size(), 0);
+    borrow mut xb as &!xw in {
+        let xt = contents(xw);
+        epx.set_types(xt, 1023, "last.*");
+        epx.set_spec(xt, 1023, "Z:9");
+        epx.set_old(xt, 1023, "kk", 8);
+        epx.set_conc(xt, 1023, 5);
+        epx.set_rate(xt, 1023, 77);
+        test.assert(epx.accepts(xt, 1023, "last.x"));
+        test.assert(!epx.accepts(xt, 1022, "last.x") || epx.types_len(xt, 1022) == 0);
+        test.assert_eq(epx.types_len(xt, 1022), 0);
+        test.assert_eq(epx.types_len(xt, 0), 0);
+        test.assert_eq(epx.wire_len(xt, 1022), 0);
+        test.assert_eq(epx.old_len(xt, 1022), 0);
+        test.assert_eq(epx.conc(xt, 1022), 0);
+        test.assert_eq(epx.conc(xt, 1023), 5);
+        test.assert_eq(epx.rate(xt, 1023), 77);
+        test.assert_eq(epx.old_byte(xt, 1023, 1), int_of(byte_of('k')));
+        epx.drop_row(xt, 1024, 0);
+        test.assert(epx.accepts(xt, 1022, "last.x"));
+        test.assert(!epx.accepts(xt, 1022, "other"));
+        test.assert_eq(epx.conc(xt, 1022), 5);
+        test.assert_eq(epx.rate(xt, 1022), 77);
+        test.assert_eq(epx.old_len(xt, 1022), 2);
+        test.assert_eq(epx.wire_len(xt, 1022), 6);
+        test.assert_eq(epx.types_len(xt, 1023), 0);
+        test.assert_eq(epx.conc(xt, 1023), 0);
+        test.assert_eq(epx.old_len(xt, 1023), 0);
+    }
+    unbox_slice(heap, xb);
+    return 0;
+}

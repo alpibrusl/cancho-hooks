@@ -1,0 +1,182 @@
+# The project file (cancho docs/package-system.md section 8): the compiler these sources were written for, the libraries
+# they use, and the programs to build. `cancho build` installs the libraries and builds the programs; `cancho add` adds
+# a library, pinned to a commit.
+
+[package]
+name = "hooks"
+cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+
+[dependencies.log]
+git = "https://github.com/alpibrusl/cancho-log"
+rev = "6e3f0de811d1d27481f7cf012ff4f9ffdb06becb"
+path = ".cancho-vcs/log"
+
+[dependencies.server]
+git = "https://github.com/alpibrusl/cancho"
+rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+path = "packages/http-server/.cancho-vcs"
+
+# The API, declared once (src/api.cho): `web` makes the router and the OpenAPI document from one declaration, and `schema` is what the
+# declaration's bodies and answers are written in. `web` is a package of cancho-web (its store is published by scripts/publish.sh there) and
+# records `schema` as its own requirement; the project names `schema` as well because its sources import it.
+[dependencies.schema]
+git = "https://github.com/alpibrusl/cancho-schema"
+rev = "5152851c7487315cb20f031c9c1c69216e5a2931"
+path = ".cancho-vcs"
+
+[dependencies.web]
+git = "https://github.com/alpibrusl/cancho-web"
+rev = "4fd7f42db7501ff139e0c04a01448921a204d673"
+path = ".cancho-vcs"
+
+[[bin]]
+name = "hooks"
+sources = ["src"]
+std = true
+
+# The OpenAPI document, printed (tools/openapi.cho; `scripts/openapi.sh` writes docs/openapi.json from it). It is built from the declaration the
+# service routes with (src/api.cho) and nothing else: no network, no clock, no filesystem, no foreign code.
+[[bin]]
+name = "hooks-openapi"
+sources = ["tools/openapi.cho", "src/api.cho"]
+std = true
+
+# The probe that tests signing and base64 on their own (tests/sign_test.py).
+[[bin]]
+name = "sign_probe"
+sources = ["tests/sign_probe.cho", "src/sign.cho"]
+std = true
+
+# The probe that tests cron expressions against an independent implementation (tests/cron_test.py).
+[[bin]]
+name = "cron_probe"
+sources = ["tests/cron_probe.cho", "src/cron.cho"]
+std = true
+
+# The MCP server for agents (docs/design.md section 51, docs/agents.md): its own sources, and none of the service's.
+[[bin]]
+name = "hooks-mcp"
+sources = ["tools/mcp.cho"]
+std = true
+
+# The log checker (docs/design.md section 54): the same checks as scripts/logcheck.py, about 95 times faster on a 2 GB directory (docs/design.md section 54); backup.sh and restore.sh use it when it is built.
+[[bin]]
+name = "hooks-logcheck"
+sources = ["tools/logcheck.cho", "src/logguard.cho", "src/state.cho", "src/store.cho"]
+std = true
+
+# The unit tests (`cancho test`): each set is run against the installed libraries.
+[[test]]
+name = "state"
+sources = ["tests/state_test.cho", "src/state.cho"]
+std = true
+
+[[test]]
+name = "endpoints"
+sources = ["tests/endpoints_test.cho", "src/endpoints.cho", "src/destination.cho", "src/sign.cho", "src/state.cho", "src/epx.cho", "src/filter.cho", "src/hdrs.cho"]
+std = true
+
+[[test]]
+name = "destination"
+sources = ["tests/destination_test.cho", "src/destination.cho", "src/endpoints.cho", "src/sign.cho", "src/state.cho", "src/epx.cho", "src/filter.cho", "src/hdrs.cho"]
+std = true
+
+[[test]]
+name = "idem"
+sources = ["tests/idem_test.cho", "src/idem.cho"]
+std = true
+
+[[test]]
+name = "cron"
+sources = ["tests/cron_test.cho", "src/cron.cho"]
+std = true
+
+[[test]]
+name = "authz"
+sources = ["tests/authz_test.cho", "src/authz.cho", "src/perm.cho", "src/manage.cho", "src/destination.cho"]
+std = true
+
+[[test]]
+name = "filter"
+sources = ["tests/filter_test.cho", "src/filter.cho"]
+std = true
+
+[[test]]
+name = "hdrs"
+sources = ["tests/hdrs_test.cho", "src/hdrs.cho"]
+std = true
+
+[[test]]
+name = "epx"
+sources = ["tests/epx_test.cho", "src/epx.cho", "src/filter.cho", "src/hdrs.cho", "src/state.cho"]
+std = true
+
+[[test]]
+name = "retain"
+sources = ["tests/retain_test.cho", "src/retain.cho", "src/evlog.cho", "src/store.cho", "src/logguard.cho", "src/state.cho"]
+std = true
+
+[[test]]
+name = "config"
+sources = ["tests/config_test.cho", "src/config.cho", "src/destination.cho"]
+std = true
+
+[[test]]
+name = "dns"
+sources = ["tests/dns_test.cho", "src/dns.cho"]
+std = true
+
+[[test]]
+name = "resolve"
+sources = ["tests/resolve_test.cho", "src/resolve.cho", "src/destination.cho"]
+std = true
+
+[[test]]
+name = "manage"
+sources = ["tests/manage_test.cho", "src/manage.cho", "src/destination.cho"]
+std = true
+
+[[test]]
+name = "reason"
+sources = ["tests/reason_test.cho", "src/reason.cho"]
+std = true
+
+[[test]]
+name = "dbup"
+sources = ["tests/dbup_test.cho", "src/dbup.cho"]
+std = true
+
+[[test]]
+name = "jitter"
+sources = ["tests/jitter_test.cho", "src/jitter.cho"]
+std = true
+
+[[test]]
+name = "bulk"
+sources = ["tests/bulk_test.cho", "src/bulk.cho", "src/filter.cho"]
+std = true
+
+[[test]]
+name = "dead"
+sources = ["tests/dead_test.cho", "src/dead.cho", "src/state.cho"]
+std = true
+
+[[test]]
+name = "lim"
+sources = ["tests/lim_test.cho", "src/lim.cho", "src/epx.cho", "src/filter.cho", "src/hdrs.cho", "src/state.cho"]
+std = true
+
+[[test]]
+name = "ops"
+sources = ["tests/ops_test.cho", "src/ops.cho", "src/metrics.cho", "src/reason.cho", "src/state.cho"]
+std = true
+
+[dependencies.pg]
+git = "https://github.com/alpibrusl/cancho-pg"
+rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+path = ".cancho-vcs"
+
+[dependencies.pool]
+git = "https://github.com/alpibrusl/cancho-pg"
+rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+path = ".cancho-vcs-pool"

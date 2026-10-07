@@ -17,7 +17,7 @@ on:
       - "Dockerfile"
       - ".dockerignore"
       - "deploy/**"
-      - "lex-sys.toml"
+      - "cancho.toml"
   workflow_dispatch:
 
 permissions:
@@ -48,25 +48,25 @@ jobs:
           else
             echo "version=0.0.0-dry.$(git -C hooks rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
-          echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' hooks/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+          echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' hooks/cancho.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
-          repository: alpibrusl/lex-sys
+          repository: alpibrusl/cancho
           ref: ${{ steps.v.outputs.rev }}
-          path: lex-sys
+          path: cancho
 
       - name: Cache the compiler
         id: compiler
         uses: actions/cache@v4
         with:
-          path: lex-sys/target/release/lex-sys
-          key: lex-sys-${{ runner.arch }}-${{ steps.v.outputs.rev }}
+          path: cancho/target/release/cancho
+          key: cancho-${{ runner.arch }}-${{ steps.v.outputs.rev }}
 
-      - name: Build lex-sys
+      - name: Build cancho
         if: steps.compiler.outputs.cache-hit != 'true'
-        working-directory: lex-sys
-        run: cargo build --release --locked -p lex-sys
+        working-directory: cancho
+        run: cargo build --release --locked -p cancho
 
       - name: OpenSSL development files (the service links against it)
         run: |
@@ -75,7 +75,7 @@ jobs:
       - name: Build and package (scripts/release.sh)
         working-directory: hooks
         env:
-          LEX_SYS: ${{ github.workspace }}/lex-sys/target/release/lex-sys
+          CANCHO: ${{ github.workspace }}/cancho/target/release/cancho
         run: scripts/release.sh --version "${{ steps.v.outputs.version }}" --out "${{ github.workspace }}/dist"
 
       - name: Try the tarball as a downloader would (checksum, unpack, start, post, read back, stop)
@@ -104,12 +104,12 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"; else echo "version=0.0.0-dry.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"; fi
 
       - name: Build the image
-        run: docker build -t lexsys-hooks:${{ steps.v.outputs.version }} .
+        run: docker build -t cancho-hooks:${{ steps.v.outputs.version }} .
 
       - name: Run it, wait for it to be healthy, post an event, read it back
         run: |
           docker volume create hooks-data
-          docker run -d --name hooks -p 8080:8080 -v hooks-data:/var/lib/hooks lexsys-hooks:${{ steps.v.outputs.version }}
+          docker run -d --name hooks -p 8080:8080 -v hooks-data:/var/lib/hooks cancho-hooks:${{ steps.v.outputs.version }}
           for i in $(seq 1 60); do
             s=$(docker inspect -f '{{.State.Health.Status}}' hooks)
             [ "$s" = healthy ] && break
@@ -128,12 +128,12 @@ jobs:
         run: |
           image=ghcr.io/${GITHUB_REPOSITORY,,}
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag lexsys-hooks:${{ steps.v.outputs.version }} "$image:${{ steps.v.outputs.version }}"
+          docker tag cancho-hooks:${{ steps.v.outputs.version }} "$image:${{ steps.v.outputs.version }}"
           docker push "$image:${{ steps.v.outputs.version }}"
           # `latest` names only a release that is not a pre-release.
           case "${{ steps.v.outputs.version }}" in
             *-*) ;;
-            *) docker tag lexsys-hooks:${{ steps.v.outputs.version }} "$image:latest"; docker push "$image:latest" ;;
+            *) docker tag cancho-hooks:${{ steps.v.outputs.version }} "$image:latest"; docker push "$image:latest" ;;
           esac
 
   publish:
@@ -172,4 +172,4 @@ jobs:
           pre=0; case "$GITHUB_REF_NAME" in *-*) pre=1 ;; esac
           scripts/release-notes.sh "$GITHUB_REF_NAME" "$pre" > notes.md
           flags=(); [ "$pre" = 1 ] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "lexsys-hooks ${GITHUB_REF_NAME#v}" --notes-file notes.md "${flags[@]}"
+          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "cancho-hooks ${GITHUB_REF_NAME#v}" --notes-file notes.md "${flags[@]}"

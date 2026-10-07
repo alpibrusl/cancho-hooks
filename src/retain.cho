@@ -1,0 +1,63 @@
+edition 5;
+
+module retain;
+
+// `retain` -- the rules of retention, as pure functions (`docs/retention.md` sections 1, 3, 5 and 6). Unit tests: `tests/retain_test.cho`.
+
+// The age an event must reach before it may be dropped: the retention, or the idempotency window if that is longer (a key inside its window must
+// find its event). 0 when events are kept for ever.
+pub fn age_needed(retention_ms: int, window_ms: int) -> [] int {
+    if retention_ms <= 0 {
+        return 0;
+    }
+    if window_ms > retention_ms {
+        return window_ms;
+    }
+    return retention_ms;
+}
+
+// May the oldest sealed segment go? `last_id` is its last event (-1 if there is no sealed segment), `sealed_ms` when the segment after it was created
+// (no event in it is younger), `floor` the largest id that is final at every endpoint with no replay waiting, `age` from `age_needed`. All of: retention
+// is on; it is sealed; every event in it is final everywhere; it is old enough.
+pub fn may_drop(retention_ms: int, last_id: int, sealed_ms: int, floor: int, now: int, age: int) -> [] bool {
+    if retention_ms <= 0 || last_id < 1 {
+        return false;
+    }
+    if last_id > floor {
+        return false;
+    }
+    return now - sealed_ms >= age;
+}
+
+// Has the oldest sealed segment passed the hard maximum age (`max-age-days`, `docs/design.md` section 47.2)? It goes then whatever pins it: nothing may keep
+// an event longer. `sealed_ms` is when the segment after it was created, so no event in it is younger.
+pub fn expired(max_age_ms: int, last_id: int, sealed_ms: int, now: int) -> [] bool {
+    if max_age_ms <= 0 || last_id < 1 {
+        return false;
+    }
+    return now - sealed_ms >= max_age_ms;
+}
+
+// Should the active segment be sealed for the maximum age? When it holds anything and has been open that long (else its events could never be dropped).
+pub fn roll_for_age(active_bytes: int, max_age_ms: int, created_ms: int, now: int) -> [] bool {
+    return max_age_ms > 0 && active_bytes > 0 && now - created_ms >= max_age_ms;
+}
+
+// Should the active segment be sealed? When it has reached its size, or (retention on) when it holds anything and has been open as long as an event
+// must be kept, so that a quiet service does not keep an old event in a segment that is never sealed.
+pub fn should_roll(active_bytes: int, limit: int, retention_ms: int, created_ms: int, now: int, age: int) -> [] bool {
+    if active_bytes >= limit {
+        return true;
+    }
+    return retention_ms > 0 && active_bytes > 0 && now - created_ms >= age;
+}
+
+// Should the outcomes log be replaced by a snapshot? When it has reached `limit`, or four times what the last snapshot was if that is more, so that a
+// snapshot that is large because the state is large does not run again at once.
+pub fn snapshot_due(size: int, limit: int, last_snapshot: int) -> [] bool {
+    var need = limit;
+    if 4 * last_snapshot > need {
+        need = 4 * last_snapshot;
+    }
+    return size >= need;
+}

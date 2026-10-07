@@ -3,7 +3,7 @@
 
     python3 scripts/bench/https_cost.py [deliveries]         # default 600 per row; HOOKS_BIN=path/to/hooks to name the binary; REPS=5 rows are repeated; KINDS='http, address' only those rows
     EVENT_BYTES=50000 python3 scripts/bench/https_cost.py    # each event carries that many bytes more: the difference from a row without is the cost of the records (docs/pure-tls.md)
-    PIN=1 python3 scripts/bench/https_cost.py                # the service on core 3 (taskset), the receivers and this script on cores 1 and 2: as the lex-sys spike measured
+    PIN=1 python3 scripts/bench/https_cost.py                # the service on core 3 (taskset), the receivers and this script on cores 1 and 2: as the cancho spike measured
 
 Each row starts a service with E endpoints, posts events until there have been `deliveries` deliveries, and reads the service's own CPU time (user + system, from /proc) before and
 after: the difference over the deliveries, in microseconds (the median of REPS runs, with the least and the most). The receivers are Python and are not counted; they run on the other cores. The kinds:

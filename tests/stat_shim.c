@@ -1,7 +1,7 @@
 /* A shim that makes the status calls of the production profile fail.
  *
- * The production profile reads the permission bits of the data directory with lex-sys's `dir_own_mode` (`fstat` on the directory's
- * descriptor) and of its files with `dir_mode` (`fstatat` on one name), src/perm.ls. That the kernel refuses them cannot be made to happen
+ * The production profile reads the permission bits of the data directory with cancho's `dir_own_mode` (`fstat` on the directory's
+ * descriptor) and of its files with `dir_mode` (`fstatat` on one name), src/perm.cho. That the kernel refuses them cannot be made to happen
  * by a file's mode, so tests/production_test.py makes it happen here. Every other call, and every other value of STAT_SHIM, goes to the
  * real function:
  *

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Mutation testing on a COPY of the tree (docs/design.md section 40.10): the work tree is never touched.
 
-    LEX_SYS=/path/to/lex-sys HOOKS_PG=host:port:user:database python3 scripts/mutate.py tests/mutants/https.py [id ...]
-    PURE=1 LEX_SYS=/path/to/lex-sys python3 scripts/mutate.py tests/mutants/pure.py [id ...]     # the build with lex-sys's own TLS: `scripts/build.sh --pure`, tested as pure/build/hooks-pure
+    CANCHO=/path/to/cancho HOOKS_PG=host:port:user:database python3 scripts/mutate.py tests/mutants/https.py [id ...]
+    PURE=1 CANCHO=/path/to/cancho python3 scripts/mutate.py tests/mutants/pure.py [id ...]     # the build with cancho's own TLS: `scripts/build.sh --pure`, tested as pure/build/hooks-pure
 
 The tree (without .git) is copied to a temporary directory and built there. For each mutant of the file named (a list `MUTANTS` of `(id, file, old, new, [test sets])`): the text `old`, which
 must occur exactly once in `file`, is replaced by `new`; the service is built; the test sets are run in order until one fails (the mutant is killed) or all pass (it survives); the file
 is restored and compared byte for byte with what it was (`filecmp`, a mutant never stays on disk). A mutant that does not compile is reported as that (the checker killed it).
 A mutants file may name its own build (`BUILD = [...]`, where `{LEX}` is the compiler): `tests/mutants/mcp.py` rebuilds only `hooks-mcp` and runs `tests/mcp_test.py` with the service that is already in `build/`.
-Test sets: unit (`lex-sys test`), https, names, sessions, api, ssrf, reason, metrics, config, patch, slots, delete, ... (the `tests/*_test.py` of those names), many (all stages of
+Test sets: unit (`cancho test`), https, names, sessions, api, ssrf, reason, metrics, config, patch, slots, delete, ... (the `tests/*_test.py` of those names), many (all stages of
 `tests/many_test.py`) and many:<stage> (one).
 """
 import filecmp
@@ -22,7 +22,7 @@ import time
 here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if len(sys.argv) < 2:
     sys.exit(__doc__)
-lex = os.environ.get("LEX_SYS", "lex-sys")
+lex = os.environ.get("CANCHO", "cancho")
 only = set(sys.argv[2:])
 namespace = {}
 exec(open(sys.argv[1]).read(), namespace)
@@ -32,7 +32,7 @@ copy = tempfile.mkdtemp(prefix="hooks-mutants-")
 for name in os.listdir(here):
     if name != ".git":
         (shutil.copytree if os.path.isdir(os.path.join(here, name)) else shutil.copy2)(os.path.join(here, name), os.path.join(copy, name))
-env = dict(os.environ, LEX_SYS=lex)
+env = dict(os.environ, CANCHO=lex)
 PURE = os.environ.get("PURE") == "1"
 BUILD = ["scripts/build.sh", "--pure"] if PURE else ["scripts/build.sh"]
 BUILD = [w.replace("{LEX}", lex) for w in namespace.get("BUILD", BUILD)]

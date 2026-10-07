@@ -225,7 +225,7 @@ def wait_for(cond, secs):
     return False
 
 
-LIMIT = 1024    # the endpoints there can be (src/state.ls; design section 41: it was 62)
+LIMIT = 1024    # the endpoints there can be (src/state.cho; design section 41: it was 62)
 
 
 def listing(svc):

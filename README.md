@@ -1,10 +1,10 @@
-# lexsys-hooks
+# cancho-hooks
 
-[![ci](https://github.com/alpibrusl/lexsys-hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/lexsys-hooks/actions/workflows/ci.yml)
+[![ci](https://github.com/alpibrusl/cancho-hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/cancho-hooks/actions/workflows/ci.yml)
 
-**Webhooks that survive failure.** A self-hosted delivery service: your events stay on your infrastructure. Post an event once: it is on disk before you get the answer, then signed ([Standard Webhooks](https://www.standardwebhooks.com)) and delivered to every subscribed endpoint, **at least once**, through crashes, outages and slow receivers. One small binary, written in [lex-sys](https://github.com/alpibrusl/lex-sys). The [project page](https://alpibrusl.github.io/lexsys-hooks/) has the pictures.
+**Webhooks that survive failure.** A self-hosted delivery service: your events stay on your infrastructure. Post an event once: it is on disk before you get the answer, then signed ([Standard Webhooks](https://www.standardwebhooks.com)) and delivered to every subscribed endpoint, **at least once**, through crashes, outages and slow receivers. One small binary, written in [cancho](https://github.com/alpibrusl/cancho). The [project page](https://alpibrusl.github.io/cancho-hooks/) has the pictures.
 
-**Status: alpha, not for production yet.** The API may still change. No 24-hour chaos soak has yet completed as a valid run (the third ended inconclusive at 15.8 hours when the test harness failed, not the service as far as is known: [docs/soak.md](docs/soak.md)), so the capacity figures it would give are not published; `https` uses OpenSSL until lex-sys's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
+**Status: alpha, not for production yet.** The API may still change. No 24-hour chaos soak has yet completed as a valid run (the third ended inconclusive at 15.8 hours when the test harness failed, not the service as far as is known: [docs/soak.md](docs/soak.md)), so the capacity figures it would give are not published; `https` uses OpenSSL until cancho's own TLS has been independently reviewed (a second build, `hooks-pure`, has no foreign function at all: [docs/pure-tls.md](docs/pure-tls.md)). The whole list, with what each item was measured as: [docs/status.md](docs/status.md).
 
 ## What you get
 
@@ -22,11 +22,11 @@
 You need `git`, Rust, `gcc`, OpenSSL 3 with its development files (`libssl-dev`), Python 3, and `curl`.
 
 ```sh
-git clone https://github.com/alpibrusl/lex-sys                           # the compiler
-git clone https://github.com/alpibrusl/lexsys-hooks && cd lexsys-hooks
-REV=$(sed -n 's/^lex-sys *= *"\(.*\)"/\1/p' lex-sys.toml)                  # the compiler these sources need
-(cd ../lex-sys && git fetch -q origin && git checkout "$REV" && cargo build --release -p lex-sys)
-export LEX_SYS=$PWD/../lex-sys/target/release/lex-sys
+git clone https://github.com/alpibrusl/cancho                           # the compiler
+git clone https://github.com/alpibrusl/cancho-hooks && cd cancho-hooks
+REV=$(sed -n 's/^cancho *= *"\(.*\)"/\1/p' cancho.toml)                  # the compiler these sources need
+(cd ../cancho && git fetch -q origin && git checkout "$REV" && cargo build --release -p cancho)
+export CANCHO=$PWD/../cancho/target/release/cancho
 scripts/build.sh                                                           # builds build/hooks
 ```
 

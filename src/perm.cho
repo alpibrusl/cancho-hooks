@@ -1,0 +1,167 @@
+edition 7;
+
+module perm;
+
+// `perm` -- who else on the machine can read or write the data directory and its files (`production = 1`, `docs/design.md` section 33).
+//
+// The data directory is opened as a `Dir` (`open_dir`, the one path this spends under the capability), and the permission bits are read beneath
+// it: `dir_own_mode` for the directory itself (`fstat` on the handle) and `dir_mode` for each file (`fstatat` on one component, never following a
+// link). Both are cancho builtins (cancho `docs/directory-listing.md` section 3.5, edition 7, issue #243): before them this file called libc's
+// `statx` through `Ffi`, and that call alone made the authority report of the pure build `bounded: false`.
+//
+// A link is judged by its own bits, which on Linux are `0o777`: a log or `endpoints.conf` that is a symbolic link is a refusal (status 33), where
+// `statx` used to follow it. A data directory has no reason to hold one.
+
+// The bits that matter: read or write by the group (`0o060`) or by others (`0o006`). Execute (search, for a directory) alone lets nobody
+// read or write anything by itself, and the files in it are checked on their own.
+pub fn exposed_bits() -> [] int {
+    return 54;
+}
+
+// What `judge` answers.
+pub fn ok() -> [] int {
+    return 0;
+}
+
+pub fn absent() -> [] int {
+    return 1;
+}
+
+pub fn exposed() -> [] int {
+    return 2;
+}
+
+pub fn unknown() -> [] int {
+    return 3;
+}
+
+// `ENOENT`, the same on Linux and macOS.
+fn no_such_file() -> [] int {
+    return 2;
+}
+
+// Is the mode one that nobody but the owner may read or write?
+pub fn private(mode: int) -> [] bool {
+    return mode >= 0 && mode & exposed_bits() == 0;
+}
+
+// What `dir_mode` or `dir_own_mode` answered, judged: `ok()`, `exposed()`, `absent()` (no such name: nothing to check) or `unknown()`
+// (any other refusal: the mode could not be read, so the start is refused).
+fn judge(answer: Done) -> [] int {
+    match answer {
+        Done::Ok(bits) => {
+            if private(bits) {
+                return ok();
+            }
+            return exposed();
+        }
+        Done::Failed(e) => {
+            if e == no_such_file() {
+                return absent();
+            }
+            return unknown();
+        }
+    }
+}
+
+// The production profile's judgement of the data directory `dir`: `(0, 0)` if it and every entry in it is private, else `(33, n)` if one can be read
+// or written by the group or by others, or `(35, n)` if a mode could not be read (the exit statuses of `docs/design.md` section 33), where
+// `name[0..n]` is the entry (`n` 0: the directory itself). Every entry is judged, whatever its name: the segments of the events log
+// (`events-N.seg`), `events.first`, `delivery.seg`, `endpoints.conf`, a copy a repair or a backup left, and anything else a person put there. The
+// directory must exist and open. `name` is at least 256 bytes (`NAME_MAX` and one).
+pub fn files[&c, &d, &o](fs: &c Fs(""), dir: &d [byte], name: &!o [byte]) -> [fs_read(""), dir_read] (int, int) {
+    var found = (35, 0);
+    match open_dir(fs, dir) {
+        DirOpened::Failed(e) => {
+            found = (35, 0);
+        }
+        DirOpened::Ok(d0) => {
+            var handle = d0;
+            borrow handle as &h in {
+                found = judged(h, name);
+            }
+            dir_close(handle);
+        }
+    }
+    return found;
+}
+
+// The names the service itself keeps, judged first and in this order, so that the message of a refusal is the same on every file system: the kernel
+// lists a directory in no order.
+fn known(k: int) -> [] &static [byte] {
+    if k == 1 {
+        return "events.seg";
+    }
+    if k == 2 {
+        return "delivery.seg";
+    }
+    return "endpoints.conf";
+}
+
+// Copy `text` to the front of `name`; answers its length.
+fn put[&t, &o](name: &!o [byte], text: &t [byte]) -> [] int {
+    var i = 0;
+    while i < len(text) {
+        name[i] = text[i];
+        i = i + 1;
+    }
+    return len(text);
+}
+
+// The directory's own bits, then the three names the service keeps, then every entry in the order the kernel lists them; the first that is not
+// private ends it.
+fn judged[&h, &o](dir: &h Dir, name: &!o [byte]) -> [dir_read] (int, int) {
+    let own = judge(dir_own_mode(dir));
+    if own == exposed() {
+        return (33, 0);
+    }
+    if own != ok() {
+        return (35, 0);
+    }
+    var k = 1;
+    while k < 4 {
+        let r = judge(dir_mode(dir, known(k)));
+        if r == exposed() {
+            return (33, put(name, known(k)));
+        }
+        if r == unknown() {
+            return (35, put(name, known(k)));
+        }
+        k = k + 1;
+    }
+    var found = (0, 0);
+    match dir_list(dir) {
+        Listing::Failed(e) => {
+            found = (35, 0);
+        }
+        Listing::Ok(l) => {
+            var list = l;
+            var going = true;
+            while going {
+                borrow mut list as &!s in {
+                    match dir_next(s, name) {
+                        Listed::Name(n, kind) => {
+                            let r = judge(dir_mode(dir, name[0..n]));
+                            if r == exposed() {
+                                found = (33, n);
+                                going = false;
+                            } else if r == unknown() {
+                                found = (35, n);
+                                going = false;
+                            }
+                        }
+                        Listed::End => {
+                            going = false;
+                        }
+                        Listed::Failed(e) => {
+                            found = (35, 0);
+                            going = false;
+                        }
+                    }
+                }
+            }
+            dir_list_close(list);
+        }
+    }
+    return found;
+}

@@ -8,7 +8,7 @@ delivery makes that handshake abbreviated (half the CPU, `scripts/bench/https_co
 name and port. What is checked here is seen from the receiver's side, which counts the handshakes that resumed one:
 
   1. the first delivery to an endpoint is a full handshake and each one after it resumes (TLS 1.3 and TLS 1.2, and in slot 1000); `tls-resume 0` never resumes. The pure
-     build (`pure/build/hooks-pure`, docs/pure-tls.md) resumes TLS 1.3 only, by lex-sys's design (its `docs/tls-resumption.md` §3 rule 7): its TLS 1.2 deliveries are six full
+     build (`pure/build/hooks-pure`, docs/pure-tls.md) resumes TLS 1.3 only, by cancho's design (its `docs/tls-resumption.md` §3 rule 7): its TLS 1.2 deliveries are six full
      handshakes
   2. a session is the endpoint's own: a second endpoint, behind the same receiver, starts with a full handshake of its own, and resumes its own after that
   3. the session is dropped when the endpoint changes: `PATCH` of the host, of the port, of the secret, and a `DELETE` followed by a new endpoint (which may have the old one's
@@ -28,7 +28,7 @@ import opslib as L  # noqa: E402
 import tlskit as K  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
-# The build with lex-sys's own TLS (docs/pure-tls.md), which resumes TLS 1.3 only.
+# The build with cancho's own TLS (docs/pure-tls.md), which resumes TLS 1.3 only.
 PURE = os.path.basename(BIN) == "hooks-pure"
 TOKEN = "sessions-test-token"
 check = L.Checks()

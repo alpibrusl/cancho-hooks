@@ -9,7 +9,7 @@ is back, so the log may hold an event twice: at-least-once is the contract. What
 was told (`202`, with an id) was stored and which the log does not hold.
 
 The check is made on the file, not through the service: after the last kill the segment is read with a reader written
-here (the format of lexsys-log's docs/design.md section 4, its own CRC-32C) and every acknowledged `(id, payload)` must be
+here (the format of cancho-log's docs/design.md section 4, its own CRC-32C) and every acknowledged `(id, payload)` must be
 in the valid prefix, byte for byte.
 """
 import http.client
@@ -60,7 +60,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-# ---- an independent reader of the log file (lexsys-log design section 4) ------------------------------------------
+# ---- an independent reader of the log file (cancho-log design section 4) ------------------------------------------
 
 def _table():
     t = []

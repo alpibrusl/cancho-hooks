@@ -23,7 +23,7 @@
   </g>
 
   <g font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace">
-    <text x="430" y="248" font-size="64" fill="#E8EEF9" font-weight="700">lexsys<tspan fill="#34D399">-hooks</tspan></text>
+    <text x="430" y="248" font-size="64" fill="#E8EEF9" font-weight="700">cancho<tspan fill="#34D399">-hooks</tspan></text>
     <text x="430" y="310" font-size="30" fill="#8FA3C4">Webhooks that survive failure.</text>
 
     <g font-size="19" font-weight="600">
@@ -35,7 +35,7 @@
       <text x="1047" y="393" fill="#F5A623" text-anchor="middle">retry &#183; replay</text>
     </g>
 
-    <text x="430" y="470" font-size="22" fill="#5B6E93">alpibrusl.github.io/lexsys-hooks</text>
+    <text x="430" y="470" font-size="22" fill="#5B6E93">alpibrusl.github.io/cancho-hooks</text>
     <circle cx="438" cy="548" r="7" fill="#F5A623"/>
     <text x="456" y="555" font-size="18" fill="#5B6E93">alpha &#183; chaos-tested: kill -9, db cuts, lying receivers</text>
   </g>

@@ -1,8 +1,8 @@
 # The mutants of hooks-mcp (docs/design.md section 51): (id, file, the text to change, what to change it to, the test files that should fail).
-# Each `old` occurs exactly once in its file. Run with `LEX_SYS=/path/to/lex-sys python3 scripts/mutate.py tests/mutants/mcp.py [ids...]` after `lex-sys build` has made `build/hooks`:
+# Each `old` occurs exactly once in its file. Run with `CANCHO=/path/to/cancho python3 scripts/mutate.py tests/mutants/mcp.py [ids...]` after `cancho build` has made `build/hooks`:
 # only `hooks-mcp` is rebuilt for each mutant, and `tests/mcp_test.py` is run (it stops at its first failure).
 BUILD = ["{LEX}", "build", "--bin", "hooks-mcp"]
-F = "tools/mcp.ls"
+F = "tools/mcp.cho"
 MUTANTS = [
  # what is offered and what is allowed
  ("M01", F, "        if tool <= last_read_tool() || allow_write {\n            w = json.put_fragment", "        if true {\n            w = json.put_fragment", ["mcp"]),

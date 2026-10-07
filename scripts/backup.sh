@@ -1,5 +1,5 @@
 #!/bin/bash
-# Back up a lexsys-hooks data directory: the two logs (the events log's segments, events.seg events-1.seg ... with events.first, and
+# Back up a cancho-hooks data directory: the two logs (the events log's segments, events.seg events-1.seg ... with events.first, and
 # delivery.seg), endpoints.conf if there is one, and (with --pg-database) a pg_dump of the tables endpoints, attempts and schedules and the
 # sequence endpoint_ids.
 #
@@ -39,7 +39,7 @@ umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 die() { local code=$1; shift; echo "backup: $*" >&2; exit "$code"; }
-# The log checker: `hooks-logcheck` (lex-sys, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
+# The log checker: `hooks-logcheck` (cancho, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
 # reference and takes four and a half minutes of CPU for 400 MB of logs). `LOGCHECK=python` forces the Python one.
 logcheck=()
 if [ "${LOGCHECK:-}" != python ]; then

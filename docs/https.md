@@ -30,4 +30,4 @@ curl -XPATCH -H "Authorization: Bearer $ADMIN" -d '{"scheme":"http"}' localhost:
   handshake about 1,000 us, `https` resumed about 700 us. One core therefore does about 10,000 plain deliveries a second, 970 over `https` with full handshakes and 1,460 resumed (worked out from the CPU per delivery; `status.md` has the method). A lookup that is slow, or a handshake
   that never ends, holds nothing: the longest wait of a request to the service while 64 of either were pending was 1 ms (`tests/https_test.py`, `tests/names_test.py`).
 * **Needs** OpenSSL 3.0 or later at run time (`libssl3`), its development files to build (`libssl-dev`), and `ca-certificates` for the system's store. The authority this adds is listed above and pinned in
-  `authority.json`. lex-sys's own TLS (epic #197) is built as a second binary that needs none of this, `hooks-pure` ([pure-tls.md](pure-tls.md)); it is not the default until lex-sys#209 is closed.
+  `authority.json`. cancho's own TLS (epic #197) is built as a second binary that needs none of this, `hooks-pure` ([pure-tls.md](pure-tls.md)); it is not the default until cancho#209 is closed.

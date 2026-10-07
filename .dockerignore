@@ -1,4 +1,4 @@
-# What the image build does not need: everything but src/, tests/*.ls (lex-sys.toml lists them), sql/, deploy/ and lex-sys.toml.
+# What the image build does not need: everything but src/, tests/*.cho (cancho.toml lists them), sql/, deploy/ and cancho.toml.
 .git
 .github
 .gitignore

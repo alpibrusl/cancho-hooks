@@ -19,7 +19,7 @@ Every unsafe combination is one test, with its own exit status and a message tha
      `production = 0` and everything unsafe (the profile is off), and with a database named (HOOKS_PG) -- production does not need one
   5. several things wrong are said one at a time, in a fixed order (30, 31, 32, 34, then the modes)
   6. the status of a refusal is not the status of a bad setting (2) nor of the other starts that end (10 to 20)
-  7. the status calls going wrong (tests/stat_shim.c, preloaded: lex-sys's `dir_mode` and `dir_own_mode` are `fstatat` and `fstat`): refused by
+  7. the status calls going wrong (tests/stat_shim.c, preloaded: cancho's `dir_mode` and `dir_own_mode` are `fstatat` and `fstat`): refused by
      the kernel for a log or for the directory, each a refusal (35) naming the path, never a pass; and without `production = 1` they are never made
 """
 import os

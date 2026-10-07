@@ -1159,7 +1159,7 @@ def stage6():
         check(f"6. a token to {url}: allowed (this machine)", code == 0 and err == b"", str((code, err)))
     for url in ("http://[::1]:1", "http://[2001:db8::1]:80", "http://[::1"):
         code, out, err, m = run_cli("--url", url)
-        check(f"6. {url}: refused, exit 2 (lex-sys's tcp_connect resolves IPv4 only: a loop that says so at the start, not an error in every call)", code == 2 and b"IPv6" in err and out == b"", str((code, err)))
+        check(f"6. {url}: refused, exit 2 (cancho's tcp_connect resolves IPv4 only: a loop that says so at the start, not an error in every call)", code == 2 and b"IPv6" in err and out == b"", str((code, err)))
     code, out, err, m = run_cli("--help")
     check("6. --help is not a flag it knows: exit 2 and the usage on standard error, nothing on standard output", code == 2 and b"usage:" in err and out == b"", str((code, err)))
     shutil.rmtree(tokfile_dir, ignore_errors=True)
@@ -1293,7 +1293,7 @@ def stage7():
 
 def main():
     if not os.path.exists(MCP):
-        print(f"no {MCP}: build it (lex-sys build)", file=sys.stderr)
+        print(f"no {MCP}: build it (cancho build)", file=sys.stderr)
         return 2
     stage1()
     stage2()

@@ -7,7 +7,7 @@
 -- One row per delivery attempt that ended. `replay` is 1 for an attempt made for a replay. `outcome` is 1 delivered,
 -- 2 failed (it will be tried again), 3 dead (it will not). `status` is the receiver's HTTP status, or a negative reason
 -- (-1 could not connect, -2 could not send, -3 timed out, -4 no answer). `reason` says why an attempt failed, finer than that: the numbers of
--- `src/reason.ls` (0 none, 1 connect refused, 2 connect timeout, 3 other connect error, 4 send timeout, 5 send error, 6 no response before the
+-- `src/reason.cho` (0 none, 1 connect refused, 2 connect timeout, 3 other connect error, 4 send timeout, 5 send error, 6 no response before the
 -- deadline, 7 reset, 8 closed early, 9 bad response, 10 to 12 status 3xx 4xx 5xx, 13 gone, 14 other status, 15 busy, 16 too large, 17 name did not resolve,
 -- 18 name lookup timed out, 19 destination refused (the name resolves to a private address), 20 TLS handshake failed, 21 certificate untrusted, 22 certificate expired,
 -- 23 certificate does not name the host, 24 certificate invalid, 25 handshake timed out, 26 TLS error).

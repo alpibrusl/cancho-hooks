@@ -4,7 +4,7 @@ How an event travels from `POST /events` to a receiver, the retry schedule and i
 
 ## How it works
 
-One thread, one poller. An accepted event is appended to a [`lexsys-log`](https://github.com/alpibrusl/lexsys-log) segment and its
+One thread, one poller. An accepted event is appended to a [`cancho-log`](https://github.com/alpibrusl/cancho-log) segment and its
 request held; after the turn one `flush` covers every append and the held requests are answered. Delivery runs in the same loop without holding it: each attempt is a small state machine (connecting, sending, reading) whose connection is watched on the server's own poller, so up to 64 are in flight together and a slow, silent or unreachable endpoint costs the others almost nothing. Each endpoint has a cursor (every event up to it is delivered or dead) and a window of events above it that finished out of order or are waiting for a retry, so a failing event does not hold up the ones after it. What happened to each attempt goes to a second log, `delivery.seg`, which a restart replays; the time of the next attempt is a Unix time, so it survives too.
 [`design.md`](design.md) has the semantics, the scenario fixed before the build, and what each step found.
 

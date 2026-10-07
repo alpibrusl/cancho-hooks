@@ -1,0 +1,351 @@
+edition 5;
+
+import std.test;
+import idem;
+
+// The idempotency-key index (`src/idem.cho`): lookup, collisions, the window, the body check, the key alphabet, a full index,
+// removal that leaves nothing behind, eviction from the front of the ring (by the window and by the floor), the ring of key
+// bytes wrapping, and two indexes in one array.
+
+// `find` and `add` for the key number `n`, built in `kb`.
+fn find_n[&i, &a, &b](ix: &i [int], arena: &a [byte], kb: &!b [byte], n: int) -> [] int {
+    let m = key_into(kb, n);
+    return idem.find(ix, arena, kb[0..m]);
+}
+
+fn add_n[&i, &a, &b](ix: &!i [int], arena: &!a [byte], kb: &!b [byte], n: int) -> [] int {
+    let m = key_into(kb, n);
+    return idem.add(ix, arena, kb[0..m]);
+}
+
+// "k" and the decimal digits of n, written to the front of `b`: answers the length (2 to 8 bytes), distinct keys for distinct n.
+fn key_into[&b](b: &!b [byte], n: int) -> [] int {
+    var digits = 0;
+    var m = n;
+    while m > 0 {
+        digits = digits + 1;
+        m = m / 10;
+    }
+    if digits == 0 {
+        digits = 1;
+    }
+    b[0] = byte_of('k');
+    m = n;
+    var i = digits;
+    while i > 0 {
+        b[i] = byte_of('0' + m % 10);
+        m = m / 10;
+        i = i - 1;
+    }
+    return digits + 1;
+}
+
+fn a_key_is_found_after_it_is_added[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    test.assert_eq(find_n(ix, arena, kb, 1), 0 - 1);
+    let e = add_n(ix, arena, kb, 1);
+    test.assert_eq(e, 0);
+    idem.set(ix, e, 7, 5000, 99, 12);
+    test.assert_eq(idem.count(ix), 1);
+    test.assert_eq(find_n(ix, arena, kb, 1), 0);
+    test.assert_eq(idem.id_of(ix, 0), 7);
+    test.assert_eq(idem.ms_of(ix, 0), 5000);
+    test.assert_eq(find_n(ix, arena, kb, 2), 0 - 1);
+    let f = add_n(ix, arena, kb, 2);
+    test.assert_eq(f, 1);
+    idem.set(ix, f, 8, 6000, 98, 13);
+    test.assert_eq(find_n(ix, arena, kb, 2), 1);
+    test.assert_eq(find_n(ix, arena, kb, 1), 0);
+    test.assert_eq(idem.id_of(ix, 1), 8);
+    return 0;
+}
+
+fn a_prefix_is_not_the_key[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    let e = add_n(ix, arena, kb, 12345);
+    idem.set(ix, e, 1, 0, 0, 0);
+    test.assert_eq(find_n(ix, arena, kb, 123), 0 - 1);
+    let f = add_n(ix, arena, kb, 123);
+    idem.set(ix, f, 2, 0, 0, 0);
+    test.assert_eq(find_n(ix, arena, kb, 12345), 0);
+    test.assert_eq(find_n(ix, arena, kb, 123), 1);
+    return 0;
+}
+
+fn many_keys_all_found_and_no_others[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    var n = 1;
+    while n <= 20000 {
+        test.assert_eq(find_n(ix, arena, kb, n), 0 - 1);
+        let e = add_n(ix, arena, kb, n);
+        test.assert_eq(e, n - 1);
+        idem.set(ix, e, n, n * 10, n, n);
+        n = n + 1;
+    }
+    test.assert_eq(idem.count(ix), 20000);
+    n = 1;
+    while n <= 20000 {
+        let e = find_n(ix, arena, kb, n);
+        test.assert_eq(e, n - 1);
+        test.assert_eq(idem.id_of(ix, e), n);
+        n = n + 1;
+    }
+    test.assert_eq(find_n(ix, arena, kb, 20001), 0 - 1);
+    test.assert_eq(find_n(ix, arena, kb, 99999), 0 - 1);
+    return 0;
+}
+
+fn the_window_the_floor_and_the_body_check[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    let e = add_n(ix, arena, kb, 5);
+    idem.set(ix, e, 3, 10000, 4242, 17);
+    test.assert(idem.fresh(ix, e, 10000));
+    test.assert(idem.fresh(ix, e, 11000));
+    test.assert(!idem.fresh(ix, e, 11001));
+    test.assert(idem.matches(ix, e, 4242, 17));
+    test.assert(!idem.matches(ix, e, 4243, 17));
+    test.assert(!idem.matches(ix, e, 4242, 18));
+    // A key whose event retention has dropped is not fresh, whatever the clock says.
+    idem.set_floor(ix, 2);
+    test.assert(idem.fresh(ix, e, 10000));
+    idem.set_floor(ix, 3);
+    test.assert(!idem.fresh(ix, e, 10000));
+    // The floor only rises.
+    idem.set_floor(ix, 1);
+    test.assert_eq(idem.floor(ix), 3);
+    return 0;
+}
+
+fn the_key_alphabet[&b](big: &!b [byte]) -> [] int {
+    test.assert(idem.valid("abc-DEF_123:x/y.z"));
+    test.assert(idem.valid("a"));
+    test.assert(idem.valid("~"));
+    test.assert(idem.valid("!"));
+    test.assert(!idem.valid(""));
+    test.assert(!idem.valid("a b"));
+    test.assert(!idem.valid(" "));
+    test.assert(!idem.valid("tab\there"));
+    var j = 0;
+    while j < 300 {
+        big[j] = byte_of('x');
+        j = j + 1;
+    }
+    big[0] = byte_of(127);
+    test.assert(!idem.valid(big[0..1]));
+    big[0] = byte_of(233);
+    test.assert(!idem.valid(big[0..3]));
+    big[0] = byte_of(31);
+    test.assert(!idem.valid(big[0..3]));
+    big[0] = byte_of('x');
+    test.assert(idem.valid(big[0..255]));
+    test.assert(!idem.valid(big[0..256]));
+    return 0;
+}
+
+// A ring of 100: full, it refuses a new key and keeps all it had; once the window has passed for some, eviction gives their room back, from the front
+// and no further than the first that is still fresh.
+fn a_full_index_refuses_then_eviction_makes_room[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    var n = 1;
+    while n <= 100 {
+        let e = add_n(ix, arena, kb, n);
+        test.assert(e >= 0);
+        idem.set(ix, e, n, n * 100, 0, 0);
+        n = n + 1;
+    }
+    test.assert_eq(idem.count(ix), 100);
+    test.assert(!idem.room(ix, 4));
+    test.assert_eq(add_n(ix, arena, kb, 101), 0 - 1);
+    test.assert_eq(idem.count(ix), 100);
+    test.assert(find_n(ix, arena, kb, 1) >= 0);
+    test.assert(find_n(ix, arena, kb, 100) >= 0);
+    // Window 1000: at time 5000 the keys with ms 100..3900 (n 1..39) are past it, n = 40 (ms 4000, exactly the window) is fresh.
+    // A turn evicts at most its budget (a bound on one request's wait): 5 of the 39, then 34 more.
+    test.assert_eq(idem.evict(ix, 5000, 5), 5);
+    test.assert_eq(idem.count(ix), 95);
+    test.assert_eq(find_n(ix, arena, kb, 5), 0 - 1);
+    test.assert(find_n(ix, arena, kb, 6) >= 0);
+    test.assert_eq(idem.evict(ix, 5000, 1000), 34);
+    test.assert_eq(idem.count(ix), 61);
+    test.assert_eq(find_n(ix, arena, kb, 1), 0 - 1);
+    test.assert_eq(find_n(ix, arena, kb, 39), 0 - 1);
+    test.assert(find_n(ix, arena, kb, 40) >= 0);
+    test.assert(find_n(ix, arena, kb, 100) >= 0);
+    test.assert(idem.room(ix, 4));
+    let e = add_n(ix, arena, kb, 101);
+    test.assert(e >= 0);
+    idem.set(ix, e, 101, 5000, 0, 0);
+    test.assert(find_n(ix, arena, kb, 101) >= 0);
+    // Nothing more is past the window now, however many we ask for.
+    test.assert_eq(idem.evict(ix, 5000, 1000), 0);
+    return 0;
+}
+
+// Collisions and removal: the table is half full of keys that probe into one another; removing some leaves the others findable and the removed absent,
+// round after round, and the ring is cycled many times over its capacity.
+fn removal_leaves_no_hole_in_a_probe_run[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    var round = 0;
+    var next = 1;
+    var oldest = 1;
+    while round < 400 {
+        // add 7 keys
+        var j = 0;
+        while j < 7 {
+            let e = add_n(ix, arena, kb, next);
+            test.assert(e >= 0);
+            idem.set(ix, e, next, round, 0, 0);
+            next = next + 1;
+            j = j + 1;
+        }
+        // keep the last 30 only: evict the front by moving the floor past the old ones
+        if next - oldest > 30 {
+            idem.set_floor(ix, next - 31);
+            idem.evict(ix, round, 100);
+            oldest = next - 30;
+        }
+        // every key in 'oldest..next' is found, every older one is not
+        var n = oldest;
+        while n < next {
+            test.assert(find_n(ix, arena, kb, n) >= 0);
+            n = n + 1;
+        }
+        if oldest > 1 {
+            test.assert_eq(find_n(ix, arena, kb, oldest - 1), 0 - 1);
+            test.assert_eq(find_n(ix, arena, kb, 1), 0 - 1);
+        }
+        round = round + 1;
+    }
+    test.assert_eq(idem.count(ix), 30);
+    return 0;
+}
+
+// A key removed on purpose (its repost after the window) and added again is found, and is the only one; the others are untouched.
+fn a_removed_key_can_be_added_again[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    var n = 1;
+    while n <= 20 {
+        let e = add_n(ix, arena, kb, n);
+        idem.set(ix, e, n, 0, 0, 0);
+        n = n + 1;
+    }
+    let e = find_n(ix, arena, kb, 7);
+    test.assert(e >= 0);
+    idem.remove(ix, e);
+    test.assert_eq(find_n(ix, arena, kb, 7), 0 - 1);
+    test.assert_eq(idem.count(ix), 19);
+    n = 1;
+    while n <= 20 {
+        if n != 7 {
+            test.assert(find_n(ix, arena, kb, n) >= 0);
+        }
+        n = n + 1;
+    }
+    let f = add_n(ix, arena, kb, 7);
+    test.assert(f >= 0);
+    idem.set(ix, f, 99, 1, 2, 3);
+    test.assert_eq(find_n(ix, arena, kb, 7), f);
+    test.assert_eq(idem.id_of(ix, f), 99);
+    test.assert_eq(idem.count(ix), 20);
+    // Removing it twice, or an entry already gone, changes nothing.
+    idem.remove(ix, e);
+    test.assert_eq(idem.count(ix), 20);
+    return 0;
+}
+
+// Two indexes in one array do not touch each other.
+fn two_indexes_are_apart[&i, &a, &k](ix: &!i [int], arena: &!a [byte], kb: &!k [byte]) -> [] int {
+    let at = idem.second_at(ix);
+    let aat = idem.second_arena_at(ix);
+    idem.init(ix[at..len(ix)], 50, idem.arena_size(50), 1000000);
+    var n = 1;
+    while n <= 10 {
+        let e = add_n(ix, arena, kb, n);
+        idem.set(ix, e, n, 0, 0, 0);
+        n = n + 1;
+    }
+    n = 100;
+    while n <= 105 {
+        let e = add_n(ix[at..len(ix)], arena[aat..len(arena)], kb, n);
+        test.assert(e >= 0);
+        idem.set(ix[at..len(ix)], e, n, 0, 0, 0);
+        n = n + 1;
+    }
+    test.assert_eq(idem.count(ix), 10);
+    test.assert_eq(idem.count(ix[at..len(ix)]), 6);
+    test.assert_eq(idem.capacity(ix), 100);
+    test.assert_eq(idem.capacity(ix[at..len(ix)]), 50);
+    test.assert_eq(find_n(ix, arena, kb, 100), 0 - 1);
+    test.assert_eq(find_n(ix[at..len(ix)], arena[aat..len(arena)], kb, 3), 0 - 1);
+    test.assert(find_n(ix[at..len(ix)], arena[aat..len(arena)], kb, 103) >= 0);
+    test.assert(find_n(ix, arena, kb, 3) >= 0);
+    return 0;
+}
+
+// Each test owns its index and runs one of the bodies above over it. `cap` entries; `alen` bytes of arena.
+fn test_a_key_is_found_after_it_is_added[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 0, 100, 4800);
+}
+
+fn test_a_prefix_is_not_the_key[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 1, 100, 4800);
+}
+
+fn test_many_keys_all_found_and_no_others[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 2, 30000, 1440000);
+}
+
+fn test_the_window_the_floor_and_the_body_check[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 3, 100, 4800);
+}
+
+fn test_a_full_index_refuses_then_eviction_makes_room[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 4, 100, 4800);
+}
+
+fn test_the_key_alphabet[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 5, 100, 4800);
+}
+
+// A ring of 40 entries over an arena so small (200 bytes, about 30 keys of 6) that the key bytes wrap many times over.
+fn test_removal_leaves_no_hole_in_a_probe_run[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 6, 40, 200);
+}
+
+fn test_a_removed_key_can_be_added_again[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 7, 100, 4800);
+}
+
+fn test_two_indexes_are_apart[&h](heap: &!h Heap) -> [heap] int {
+    return over(heap, 8, 100, 4800);
+}
+
+fn over[&h](heap: &!h Heap, which: int, cap: int, alen: int) -> [heap] int {
+    var ixb = box_slice(heap, idem.ix_size(cap) + idem.ix_size(50), 0);
+    var arb = box_slice(heap, alen + idem.arena_size(50), byte_of(0));
+    var kbb = box_slice(heap, 300, byte_of(0));
+    var r = 0;
+    borrow mut ixb as &!iw in {
+        borrow mut arb as &!aw in {
+            borrow mut kbb as &!kw in {
+                idem.init(contents(iw), cap, alen, 1000);
+                if which == 0 {
+                    r = a_key_is_found_after_it_is_added(contents(iw), contents(aw), contents(kw));
+                } else if which == 1 {
+                    r = a_prefix_is_not_the_key(contents(iw), contents(aw), contents(kw));
+                } else if which == 2 {
+                    r = many_keys_all_found_and_no_others(contents(iw), contents(aw), contents(kw));
+                } else if which == 3 {
+                    r = the_window_the_floor_and_the_body_check(contents(iw), contents(aw), contents(kw));
+                } else if which == 4 {
+                    r = a_full_index_refuses_then_eviction_makes_room(contents(iw), contents(aw), contents(kw));
+                } else if which == 6 {
+                    r = removal_leaves_no_hole_in_a_probe_run(contents(iw), contents(aw), contents(kw));
+                } else if which == 7 {
+                    r = a_removed_key_can_be_added_again(contents(iw), contents(aw), contents(kw));
+                } else if which == 8 {
+                    r = two_indexes_are_apart(contents(iw), contents(aw), contents(kw));
+                } else {
+                    r = the_key_alphabet(contents(kw));
+                }
+            }
+        }
+    }
+    unbox_slice(heap, ixb);
+    unbox_slice(heap, arb);
+    unbox_slice(heap, kbb);
+    return r;
+}

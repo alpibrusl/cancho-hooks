@@ -1,5 +1,5 @@
 /* A delivery.seg for the worst start (docs/design.md section 41.9): `slots` endpoints in slots 0 to slots-1 (ids equal to the slots), each with `dead`
- * dead letters (events 1 to `dead`), so that every table of dead letters is full when `dead` is 2,048. The records are what src/state.ls writes
+ * dead letters (events 1 to `dead`), so that every table of dead letters is full when `dead` is 2,048. The records are what src/state.cho writes
  * (`put_outcome`, 77 bytes each); the file begins with the header (kind 15, 62, format 2) and, if a slot of 62 or above is in use, the marker (kind 18).
  *
  *     gcc -O2 -o scripts/bench/mklog scripts/bench/mklog.c && scripts/bench/mklog delivery.seg 1024 2048

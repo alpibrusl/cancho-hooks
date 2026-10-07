@@ -28,7 +28,7 @@ umask 077
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 die() { local code=$1; shift; echo "restore: $*" >&2; exit "$code"; }
-# The log checker: `hooks-logcheck` (lex-sys, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
+# The log checker: `hooks-logcheck` (cancho, about 350 times faster) beside this script, in `build/`, or on the PATH; else `logcheck.py` (Python, which is the independent
 # reference and takes four and a half minutes of CPU for 400 MB of logs). `LOGCHECK=python` forces the Python one.
 logcheck=()
 if [ "${LOGCHECK:-}" != python ]; then

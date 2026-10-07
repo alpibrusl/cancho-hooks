@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The soak test of lexsys-hooks (docs/soak.md): a long run of the real service under a steady stream, a mix of endpoints, and a seeded schedule of faults, with memory,
+"""The soak test of cancho-hooks (docs/soak.md): a long run of the real service under a steady stream, a mix of endpoints, and a seeded schedule of faults, with memory,
 descriptors, disk and the loop watched, and every acknowledged event followed to every receiver that should have it by two ledgers the service has no hand in.
 
     python3 scripts/soak/soak.py --binary build/hooks --hours 24 --seed 1 --out soak-out [--rate 40 --burst-rate 60 --endpoints 12]
@@ -602,7 +602,7 @@ class Run:
                 "host_at_start": guardmod.HostSampler().sample(time.time()), "meminfo_mb": {k: round(v) for k, v in guardmod.read_meminfo().items() if k in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")}}
         try:
             info["commit"] = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-            info["pin"] = open(os.path.join(ROOT, "lex-sys.toml")).read().split('lex-sys = "')[1].split('"')[0]
+            info["pin"] = open(os.path.join(ROOT, "cancho.toml")).read().split('cancho = "')[1].split('"')[0]
         except (OSError, IndexError):
             pass
         with open(self.path("run.json"), "w") as f:

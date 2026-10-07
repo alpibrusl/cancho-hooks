@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`src/sign.ls` against independent implementations: the reference Python library `standardwebhooks` for signatures, and
+"""`src/sign.cho` against independent implementations: the reference Python library `standardwebhooks` for signatures, and
 Python's `base64` for the encoding.
 
     pip install standardwebhooks
