@@ -66,13 +66,6 @@ a:focus-visible, button:focus-visible, pre:focus-visible, .scroll:focus-visible 
 .wrap { width: 100%; max-width: 62rem; margin: 0 auto; padding: 0 16px; }
 .prose { max-width: 42rem; }
 
-header.top { border-bottom: 1px solid var(--line); background: var(--bg); }
-header.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; padding-top: 0.75rem; padding-bottom: 0.75rem; }
-.brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; } .brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
-nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; margin: 0; padding: 0; }
-nav a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; display: inline-block; }
-nav a:hover { color: var(--fg); text-decoration: underline; }
-.top .gh { margin-left: auto; }
 
 h1 { font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; margin: 0 0 0.75rem; letter-spacing: -0.02em; font-family: var(--mono); }
 h2 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.75rem; letter-spacing: -0.01em; }
@@ -146,30 +139,38 @@ td:first-child { white-space: nowrap; }
 .limits li { margin-bottom: 0.5rem; }
 .limits code { background: transparent; border: 1px solid var(--line); }
 
-footer { margin-top: 3.5rem; border-top: 1px solid var(--line); padding: 1.5rem 0 2.5rem; color: var(--muted); font-size: 0.9rem; }
-footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; }
 
 @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+/* shared:begin (the header and the footer: identical on every page, checked by tests/examples_test.py) */
+.sitewrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+header.site { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.site .sitewrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem 1.5rem; min-height: 3.4rem; }
+header.site .brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+header.site .brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
+header.site nav { display: flex; flex-wrap: wrap; gap: 0 1.2rem; }
+header.site nav a, header.site .gh { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; padding: .35rem 0; border-bottom: 2px solid transparent; }
+header.site nav a:hover, header.site .gh:hover { color: var(--fg); }
+header.site a[aria-current="page"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
+header.site .gh { margin-left: auto; }
+@media (max-width: 40rem) { header.site { position: static; } header.site .sitewrap { padding-top: .4rem; padding-bottom: .3rem; } header.site nav { order: 3; width: 100%; } }
+footer.site { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer.site .links { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; margin-bottom: .8rem; }
+footer.site p { margin: 0 0 .4rem; }
+/* shared:end */
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="top">
-  <div class="wrap">
-    <a class="brand" href="./"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
-    <nav aria-label="Pages">
-      <ul>
-        <li><a href="./">Overview</a></li>
-        <li><a href="examples.html">Examples</a></li>
-        <li><a href="#evidence">Tested</a></li>
-        <li><a href="#costs">Costs</a></li>
-        <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/status.md">Status</a></li>
-      </ul>
-    </nav>
-    <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
-  </div>
-</header>
+<!-- shared:header:begin -->
+<header class="site"><div class="sitewrap">
+  <a class="brand" href="./"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
+  <nav aria-label="Site">
+    <a href="./">Overview</a><a href="examples.html">Examples</a><a href="evidence.html" aria-current="page">Evidence</a><a href="./#start">Install</a>
+  </nav>
+  <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
+</div></header>
+<!-- shared:header:end -->
 
 <main id="main">
 <div class="wrap">
@@ -269,17 +270,12 @@ footer ul { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; fl
 </div>
 </main>
 
-<footer>
-  <div class="wrap">
-    <ul>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a></li>
-      <li><a href="examples.html">Examples</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design document</a></li>
-      <li><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">EUPL-1.2</a></li>
-    </ul>
-    <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Signatures follow the Standard Webhooks specification.</p>
-  </div>
-</footer>
+<!-- shared:footer:begin -->
+<footer class="site"><div class="sitewrap">
+  <div class="links"><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="https://github.com/alpibrusl/cancho-hooks/releases">Releases</a><a href="examples.html">Examples</a><a href="evidence.html">Evidence</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">Licence</a></div>
+  <p>Self-hosted: your events stay on your infrastructure. Signatures follow the Standard Webhooks specification.</p>
+  <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Open source under the EUPL-1.2, provided as is, without warranty: you run it at your own responsibility.</p>
+</div></footer>
+<!-- shared:footer:end -->
 </body>
 </html>

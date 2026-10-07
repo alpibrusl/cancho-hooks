@@ -36,14 +36,6 @@ a { color: var(--accent); text-underline-offset: .15em; }
 .skip:focus { top: 8px; }
 a:focus-visible, .btn:focus-visible, pre:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 
-header.top { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
-header.top .wrap { display: flex; align-items: center; gap: 1.5rem; height: 3.4rem; }
-.brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
-.brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
-nav { display: flex; gap: 1.2rem; margin-left: auto; }
-nav a { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; }
-nav a:hover { color: var(--fg); }
-@media (max-width: 40rem) { nav a.opt { display: none; } }
 
 h1 { font-size: clamp(2.3rem, 6.2vw, 4rem); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 1rem; font-weight: 750; }
 h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); line-height: 1.15; letter-spacing: -.025em; margin: 0 0 .5rem; font-weight: 700; }
@@ -101,8 +93,6 @@ pre.code { background: var(--soft); border: 1px solid var(--line); border-radius
 .status { margin-top: 4.5rem; background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 14px; padding: 1.3rem 1.5rem; }
 .status h2 { font-size: 1.2rem; letter-spacing: -.01em; }
 .status ul { margin: .4rem 0 0; padding-left: 1.2rem; color: var(--muted); }
-footer { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
-footer .wrap { display: flex; flex-wrap: wrap; gap: .5rem 1.6rem; }
 table.fit { width: 100%; border-collapse: collapse; margin-top: 2rem; font-size: .95rem; }
 table.fit th, table.fit td { text-align: left; padding: .8rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.fit thead th { color: var(--muted); font-weight: 600; font-size: .85rem; }
@@ -115,17 +105,35 @@ table.fit tr.us { background: var(--soft); } table.fit tr.us td, table.fit tr.us
 .cols ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--muted); } .cols li { margin: .25rem 0; }
 .cols .no h3 { color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+/* shared:begin (the header and the footer: identical on every page, checked by tests/examples_test.py) */
+.sitewrap { width: 100%; max-width: 68rem; margin: 0 auto; padding: 0 20px; }
+header.site { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+header.site .sitewrap { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem 1.5rem; min-height: 3.4rem; }
+header.site .brand { display: inline-flex; align-items: center; gap: .6rem; font: 700 1rem var(--mono); color: var(--fg); text-decoration: none; letter-spacing: -.01em; white-space: nowrap; }
+header.site .brand img { height: 34px; width: auto; border-radius: 7px; background: #fff; display: block; }
+header.site nav { display: flex; flex-wrap: wrap; gap: 0 1.2rem; }
+header.site nav a, header.site .gh { color: var(--muted); text-decoration: none; font-size: .93rem; white-space: nowrap; padding: .35rem 0; border-bottom: 2px solid transparent; }
+header.site nav a:hover, header.site .gh:hover { color: var(--fg); }
+header.site a[aria-current="page"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
+header.site .gh { margin-left: auto; }
+@media (max-width: 40rem) { header.site { position: static; } header.site .sitewrap { padding-top: .4rem; padding-bottom: .3rem; } header.site nav { order: 3; width: 100%; } }
+footer.site { margin-top: 4rem; border-top: 1px solid var(--line); padding: 1.6rem 0 2.6rem; color: var(--muted); font-size: .9rem; }
+footer.site .links { display: flex; flex-wrap: wrap; gap: .4rem 1.6rem; margin-bottom: .8rem; }
+footer.site p { margin: 0 0 .4rem; }
+/* shared:end */
 </style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<header class="top"><div class="wrap">
-  <a class="brand" href="#top"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
-  <nav aria-label="Sections">
-    <a href="#why" class="opt">Why</a><a href="#proof" class="opt">Evidence</a><a href="#fit" class="opt">Where it fits</a><a href="examples.html" class="opt">Examples</a><a href="#start">Try it</a>
-    <a href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
+<!-- shared:header:begin -->
+<header class="site"><div class="sitewrap">
+  <a class="brand" href="./"><img src="assets/cancho-hooks-logo-96.jpg" alt="" width="36" height="34">cancho-hooks</a>
+  <nav aria-label="Site">
+    <a href="./" aria-current="page">Overview</a><a href="examples.html">Examples</a><a href="evidence.html">Evidence</a><a href="./#start">Install</a>
   </nav>
+  <a class="gh" href="https://github.com/alpibrusl/cancho-hooks">GitHub</a>
 </div></header>
+<!-- shared:header:end -->
 
 <main id="main" class="wrap">
 
@@ -336,13 +344,13 @@ curl -d '{"type":"user.created"}' localhost:8080/events   # {"id":1}</code></pre
 
 </main>
 
-<footer><div class="wrap">
-  <a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="https://github.com/alpibrusl/cancho-hooks/releases">Releases</a><a href="examples.html">Examples</a><a href="evidence.html">Evidence</a>
-  <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/api.md">API</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/runbook.md">Runbook</a>
-  <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a>
-  <span>Self-hosted: your events stay on your infrastructure.</span>
-  <span>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a> · open source under the <a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">EUPL-1.2</a>, provided as is, without warranty: you run it at your own responsibility.</span>
+<!-- shared:footer:begin -->
+<footer class="site"><div class="sitewrap">
+  <div class="links"><a href="https://github.com/alpibrusl/cancho-hooks">Repository</a><a href="https://github.com/alpibrusl/cancho-hooks/releases">Releases</a><a href="examples.html">Examples</a><a href="evidence.html">Evidence</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/README.md">README</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md">Design</a><a href="https://github.com/alpibrusl/cancho-hooks/blob/main/LICENSE">Licence</a></div>
+  <p>Self-hosted: your events stay on your infrastructure. Signatures follow the Standard Webhooks specification.</p>
+  <p>Built on <a href="https://github.com/alpibrusl/cancho">cancho</a>, <a href="https://github.com/alpibrusl/cancho-log">cancho-log</a> and <a href="https://github.com/alpibrusl/cancho-pg">cancho-pg</a>. Open source under the EUPL-1.2, provided as is, without warranty: you run it at your own responsibility.</p>
 </div></footer>
+<!-- shared:footer:end -->
 
 <script>
 // 32 small squares for the 32 OpenSSL calls of the default build.
