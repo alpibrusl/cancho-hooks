@@ -35,6 +35,7 @@ sys.path.insert(0, HERE)
 import common  # noqa: E402,F401  (puts tests/ on the path)
 from common import ACK, CLASSES, EP_MAX, ROOT, plan_endpoints, share  # noqa: E402
 import faults  # noqa: E402
+import guard as guardmod  # noqa: E402
 import monitor  # noqa: E402
 import series  # noqa: E402
 import workers  # noqa: E402
@@ -190,6 +191,8 @@ class Run:
         self.cron_ids = {}
         self.saved_fault_counts = {}
         self.faults = None
+        self.guard = guardmod.Guard(rate=a.rate, replay_cap=a.replay_cap)
+        self.invalid_announced = 0
 
     # ---- small things
     def elapsed(self):
@@ -219,6 +222,23 @@ class Run:
     def violate(self, tag, **kw):
         with self.vlock:
             self.violations.add(tag, **kw)
+
+    def mark_invalid(self, code, why):
+        """The run can no longer be evidence about the service: say so, loudly, and in `run.json` from this moment (it is also in the verdict). The run ends early unless --no-early-stop."""
+        t = time.time()
+        print(f"\n*** RUN INVALID at {self.elapsed():.0f} s: {why} ***\n", flush=True)
+        self.log("invalid", code=code, why=why)
+        try:
+            with open(self.path("run.json")) as f:
+                info = json.load(f)
+            info["valid"] = False
+            info.setdefault("invalid", {})[code] = {"at": t, "elapsed_s": round(self.elapsed(), 1), "why": why}
+            tmp = self.path("run.json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(info, f, indent=1, default=str)
+            os.replace(tmp, self.path("run.json"))
+        except (OSError, ValueError) as ex:
+            self.log("state_error", error=f"run.json: {ex!r}")
 
     def pg_env(self):
         env = dict(os.environ)
@@ -492,6 +512,9 @@ class Run:
 
     def setup(self):
         a = self.args
+        short = guardmod.check_start(allow_low=a.allow_low_memory)
+        if short:
+            raise SystemExit("the run does not start: " + "; ".join(short) + " (--allow-low-memory overrides, and the run says so in run.json)")
         self.pin()
         if a.resume:
             return self.setup_resume()
@@ -571,7 +594,8 @@ class Run:
         a = self.args
         info = {"args": {k: v for k, v in vars(a).items()}, "machine": machine(), "binary_sha256": sha256(a.binary), "service_settings": SERVICE_SETTINGS,
                 "started": time.time(), "duration_s": self.duration, "quiet_s": self.quiet_s, "pinned": {"service": sorted(self.service_cpus or []), "harness": sorted(self.harness_cpus or [])},
-                "shim": self.shim, "ports": {"service": self.port}, "tmpfs": bool(self.tmpfs)}
+                "shim": self.shim, "ports": {"service": self.port}, "tmpfs": bool(self.tmpfs), "valid": True, "receiver_procs": self.nrecv,
+                "host_at_start": guardmod.HostSampler().sample(time.time()), "meminfo_mb": {k: round(v) for k, v in guardmod.read_meminfo().items() if k in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")}}
         try:
             info["commit"] = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             info["pin"] = open(os.path.join(ROOT, "lex-sys.toml")).read().split('lex-sys = "')[1].split('"')[0]
@@ -775,6 +799,13 @@ class Run:
             if a.stop_after_violation and self.t_first_violation and time.time() - self.t_first_violation > a.stop_after_violation:
                 self.log("early-stop", reason="a violation was found and the run is a self-test")
                 self.early = True
+            if self.guard.invalid and not a.no_early_stop and not a.lenient_validity and not self.early:
+                self.log("early-stop", reason="the run is invalid: " + "; ".join(v["why"] for v in self.guard.invalid.values()))
+                print(f"soak: stopping early at {self.elapsed():.0f} s: the run is invalid (--no-early-stop keeps it going for diagnosis)", flush=True)
+                self.early = True
+            if self.guard.invalid and len(self.guard.invalid) != self.invalid_announced:
+                self.invalid_announced = len(self.guard.invalid)
+                last_print = 0.0
             if time.time() - last_print > a.progress_s:
                 last_print = time.time()
                 self.progress()
@@ -783,8 +814,8 @@ class Run:
         rows = self.watcher.rows[-1:] if self.watcher and self.watcher.rows else []
         r = rows[0] if rows else {}
         print(f"[{self.elapsed():7.0f}s/{self.duration:.0f}s] inc {self.svc.inc} acked {self.poster.counts['acked']} rate {r.get('ingest_per_s', '')}/s lag_max {r.get('lag_max', '')} rss {r.get('rss_kb', '')} "
-              f"fds {r.get('fds', '')} rcv {r.get('receivers_cpu_pct', '')}% kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}",
-              flush=True)
+              f"fds {r.get('fds', '')} rcv {r.get('receivers_cpu_max_pct', '')}%max/{r.get('receivers_cpu_pct', '')}% hrn {r.get('harness_cpu_pct', '')}% avail {r.get('mem_avail_mb', '')}MB kills {self.counts['kills']} stops {self.counts['stops']} pg {self.counts['pg_faults']} violations {self.violations.total()} {dict(self.violations.count) if self.violations.total() else ''}"
+              + (f" *** INVALID since {min(v['since'] for v in self.guard.invalid.values()) - self.t0:.0f}s: {', '.join(self.guard.invalid)} ***" if self.guard.invalid else ""), flush=True)
 
     # ---- the end
     def finish(self):
@@ -968,7 +999,7 @@ class Run:
         groups = {"A": "an acknowledged event missing, or an event that is not in the log", "B": "a repeat nothing explains", "C": "a delivery against a filter or of an event older than the endpoint",
                   "D": "a bad, stale or revoked signature, or one signature where two are due", "E": "a cursor that went back or ran ahead", "F": "a dead letter where none may be, or a disabled endpoint",
                   "I": "cron", "J": "the clean stop", "K": "backup and restore", "L": "the service ended or said something it should not", "P": "the poster's own checks",
-                  "END": "an endpoint that had not caught up", "U": "a record of an endpoint that is not in the spec"}
+                  "END": "an endpoint that had not caught up", "G": "a bound the run watched while it went: the disk against what retention allows, the table of waiting replays", "U": "a record of an endpoint that is not in the spec"}
         tally = {}
         for tag, n in v.count.items():
             key = "END" if tag.startswith("END") else tag[0]
@@ -998,14 +1029,18 @@ class Run:
             reasons.append(f"the harness used {sum(hcpu) / len(hcpu):.0f} % of a core on average")
         if over > 0.1:
             reasons.append(f"the load average was above the {cores} cores in {over * 100:.0f} % of the samples")
-        rcv = [float(r["receivers_cpu_pct"]) for r in rows if r.get("receivers_cpu_pct") not in (None, "")]
+        rcv = [float(r["receivers_cpu_max_pct"]) for r in rows if r.get("receivers_cpu_max_pct") not in (None, "")]
         lag = [float(r["recv_loop_lag_max_ms"]) for r in rows if r.get("recv_loop_lag_max_ms") not in (None, "")]
         rcv_over = sum(1 for x in rcv if x > 85) / len(rcv) if rcv else 0.0
         lag_over = sum(1 for x in lag if x > 250) / len(lag) if lag else 0.0
         if rcv_over > 0.05 or lag_over > 0.05:
             reasons.append(f"the receivers' process was above 85 % of a core in {rcv_over * 100:.0f} % of the samples and its loop was late by more than 250 ms in {lag_over * 100:.0f} %: "
                            "a receiver that answers late is a failed attempt to the service, so the lag, the repeats and the late deliveries that follow are the harness's")
-        valid = {"valid": not reasons, "reasons": reasons, "receivers_over_85_fraction": round(rcv_over, 3), "receivers_loop_late_fraction": round(lag_over, 3), "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
+        # what the guard found while the run went on (each at the moment it was met): they are the run's reasons too, with the time
+        for code, g in self.guard.invalid.items():
+            reasons.append(f"[{g['since'] - self.t0 + self.elapsed_before:.0f} s] {g['why']}")
+        valid = {"valid": not reasons, "invalid_at_s": round(min(g["since"] for g in self.guard.invalid.values()) - self.t0 + self.elapsed_before) if self.guard.invalid else None,
+                 "stopped_early": bool(self.early and self.guard.invalid), "reasons": reasons, "receivers_over_85_fraction": round(rcv_over, 3), "receivers_loop_late_fraction": round(lag_over, 3), "poster_rate_ratio": round(ratio, 3), "harness_cpu_pct_mean": round(sum(hcpu) / len(hcpu), 1) if hcpu else None,
                  "loadavg_over_cores_fraction": round(over, 3), "cores": cores}
         failed = [r["id"] for r in results if r["ok"] is False]
         status = "FAIL" if failed else "PASS"
@@ -1062,6 +1097,9 @@ def parse(argv):
     p.add_argument("--min-tail-s", type=float, default=None)
     p.add_argument("--stall-ms", type=float, default=500.0)
     p.add_argument("--p999-ms", type=float, default=50.0)
+    p.add_argument("--no-early-stop", action="store_true", help="go on after the run has been found invalid (it is marked invalid in run.json from that moment either way): for diagnosis")
+    p.add_argument("--allow-low-memory", action="store_true", help="start although the host is short of memory or swap (the run records it in run.json)")
+    p.add_argument("--replay-cap", type=int, default=32, help="the service's table of waiting replays: a table that stays full for three minutes is a violation (G_replays_pinned)")
     p.add_argument("--lenient-validity", action="store_true", help="a run that is not valid is still passed or failed on the invariants (the self-test)")
     p.add_argument("--fault", choices=["lose", "dup", "liar"], help="inject a fault into the harness's own world: the run must FAIL (the self-test)")
     p.add_argument("--waive", default="", help="a comma list of violation tags that do not fail the verdict (they are listed as waived): for looking past a known finding")
