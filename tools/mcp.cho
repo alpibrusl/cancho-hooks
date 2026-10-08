@@ -872,7 +872,18 @@ fn await_conn[&p, &c, &e, &k](poller: &!p Poller, conn: &c Conn, evs: &!e [int],
     if poller_modify(poller, conn, 1, events) != 0 {
         return 0 - 1;
     }
-    return poller_wait(poller, evs, left);
+    // A wait that a signal cut short (-4, EINTR: the process was stopped and continued, or a signal it handles arrived) has not run out of time and has not failed: wait again for
+    // whatever is left of the call's time. Reported as it was, it was taken for the end of the time (0) by the callers, which answered "did not answer in the time allowed" after a
+    // fraction of it (tests/mcp_test.py stage 4).
+    var got = poller_wait(poller, evs, left);
+    while got == 0 - 4 {
+        let again = deadline - clock_ms(clock);
+        if again <= 0 {
+            return 0;
+        }
+        got = poller_wait(poller, evs, again);
+    }
+    return got;
 }
 
 // One exchange: connect, send `request`, read to the end of the connection into `resp`, all within `request_ms` and without ever blocking (a service that does not answer is an
