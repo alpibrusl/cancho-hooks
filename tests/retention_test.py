@@ -1124,7 +1124,10 @@ def stage_stall():
     # 528 ms with the loop's own step inside its bound (CI run 37629892445), where eight runs on a quiet machine gave a longest probe of 14 to 112 ms, a
     # 99th percentile of 4 to 12 ms and a longest step of 14 to 22 ms. So the requests are judged by what they mostly saw (the 99th percentile) and by a
     # loose cap on the worst, which still fails a loop that is held for a second.
-    check("stall: and the requests waited for it little: 99th percentile at most 100 ms (times %.1f; measured: %.1f ms)" % (scale, p(0.99)), p(0.99) <= 100 * scale, str((p(0.99), slow)))
+    # The 99th percentile is bounded at 250 ms, not 100: a step of the loop that is inside its 300 ms gate delays every request that arrives during it by up to that long, and on a shared
+    # runner a few of several hundred probes land in one (PR 77's CI: p50 0.7 ms, p99 122 ms, longest probe 227 ms, the service's own longest step inside its gate). The loop that the
+    # region loss held for 0.5 to 0.96 s puts the 99th percentile at 500 ms or more, so 250 still fails it.
+    check("stall: and the requests waited for it little: 99th percentile at most 250 ms (times %.1f; measured: %.1f ms)" % (scale, p(0.99)), p(0.99) <= 250 * scale, str((p(0.99), slow)))
     check("stall: and none waited a second (times %.1f; the longest probe, measured: %.0f ms)" % (scale, lat[-1]), lat[-1] <= 1000 * scale, str((lat[-1], slow)))
     shutil.rmtree(d, ignore_errors=True)
 
