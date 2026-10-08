@@ -39,6 +39,7 @@ SECRET = "whsec_" + base64.b64encode(os.urandom(24)).decode()
 # Sixteen delays of 2.5 s: an event that fails is tried again every 2.5 s for 40 s before it is a dead letter, so a receiver that comes up
 # within a few seconds is sent every event by its retries, and the retry of 1,024 events does not need an hour to be seen.
 SCHEDULE = ",".join(["2500"] * 16)
+CPU_LIMIT_S = 4
 
 
 def check(name, ok, detail=""):
@@ -87,7 +88,9 @@ class Receiver:
 
 
 class Service:
-    def __init__(self, datadir, schedule=SCHEDULE, deadline="1000", extra=()):
+    # The attempt deadline is not what any check here is of: the healthy receivers answer at once and the dead one refuses at once. At 1 s a stopped machine (a stall of 1.2 s) made an
+    # attempt run out of time that the receiver had read, it was made again, and "each once" found 8 repeats in 3,000 deliveries: a timeout, and the at-least-once contract, not the scan.
+    def __init__(self, datadir, schedule=SCHEDULE, deadline="10000", extra=()):
         self.datadir, self.port, self.proc = datadir, chaos.free_port(), None
         self.args = ["--schedule", schedule, "--deadline-ms", deadline, *extra]
 
@@ -95,6 +98,11 @@ class Service:
         self.proc = subprocess.Popen([BIN, "--port", str(self.port), "--dir", self.datadir, "--allow-private-hosts", "1", *self.args],
                                      stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
         assert self.proc.stderr.readline().strip() == b"listening"
+
+    def cpu_seconds(self):
+        """The processor time this process has used (user and system), from /proc: what the service did, not how long the machine took to let it."""
+        f = open(f"/proc/{self.proc.pid}/stat").read().rsplit(")", 1)[1].split()
+        return (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
 
     def kill(self):
         self.proc.send_signal(signal.SIGKILL)
@@ -183,8 +191,9 @@ def stage1_and_2():
     t0 = time.time()
     post_all(svc)
     posted = time.time() - t0
-    ok = wait_for(lambda: len(a.got()) >= TOTAL, 60)
+    ok = wait_for(lambda: len(a.got()) >= TOTAL, 300)      # (60 s were not enough with the processor shared with six busy loops: posting alone took 56 s)
     took = time.time() - t0
+    cpu = svc.cpu_seconds()
     seen = a.got()
     check("1. A, healthy beside a dead endpoint, is sent all %d events" % TOTAL, ok and sorted(seen) == list(range(1, TOTAL + 1)),
           f"{len(seen)} requests, {len(set(seen))} distinct (posted in {posted:.1f}s)")
@@ -192,7 +201,10 @@ def stage1_and_2():
     # A timing guard, and the only thing that can see the position of an endpoint's scan: `scan_next` passes over records below the one it
     # wants, so a position that is wrong (never moved on, or too early) costs reads and is never wrong in what is sent. A mutant that never
     # moves the position reads the log from the start for every event (4.5 million reads for 3,000) and took 17.0 s here against 2.9 s.
-    check("1. ... within 10 s of the first post (%.1f s; the scan moves on, it does not read the log from its start for each event)" % took, took < 10, f"{took:.1f} s")
+    # The wall clock of this is the machine's as much as the service's (2.9 s on a quiet one; 32.5 s with the processor shared with six busy loops, for the same service), so
+    # what is judged is the processor time the service used, which waiting for a turn does not add to: 0.2 to 0.4 s in four runs here, where the mutant, running for 17 s of wall clock on its reads, can have spent little less than that in the processor. The limit is ten times the first.
+    print("     %d events to A beside a dead B: %.1f s of wall clock, %.2f s of the service's processor time" % (TOTAL, took, cpu), flush=True)
+    check("1. ... the service used under %d s of processor time (%.2f s; the scan moves on, it does not read the log from its start for each event)" % (CPU_LIMIT_S, cpu), cpu < CPU_LIMIT_S, f"{cpu:.2f} s ({took:.1f} s of wall clock)")
     check("1. A's cursor is %d and B's is 0" % TOTAL, wait_for(lambda: svc.cursors() == {0: TOTAL, 1: 0}, 10), str(svc.cursors()))
     s = svc.get("/stats")
     check("1. B has failed attempts, A none (one attempt each: %d delivered)" % s["delivered"], s["delivered"] == TOTAL and s["failed"] >= 1024, str(s))
