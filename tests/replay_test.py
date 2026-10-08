@@ -176,24 +176,26 @@ def main():
     check("4. the refusals started nothing", get(svc, "/stats")["replays"] == 0)
     stop(svc, d)
 
-    # 5. a restart with a replay pending
-    svc, a, b, d = start("1500")
+    # 5. a restart with a replay pending. The delay it is given is long (6 s), so that what is asked of the time can be asked of a machine that is slow: "at once" is under half of
+    # it, and the restart and the checks after it have most of it to be made in (with 1.5 s they had a second, and the replay was tried again before the check that it was not)
+    DELAY = 6.0
+    svc, a, b, d = start(str(int(DELAY * 1000)))
     post_event(svc, 1)
     check("5. event 1 delivered everywhere", wait_for(lambda: a.ids() == ["evt_1"] and b.ids() == ["evt_1"], 5), f"{a.ids()} {b.ids()}")
     a.status = 500
     request(svc, "POST", "/events/1/replay/0")
     check("5. the replay's first attempt fails", wait_for(lambda: len(a.seen) == 2, 5), str(a.ids()))
     request(svc, "POST", "/events/1/replay/0")
-    check("5. asking again starts it over: an attempt at once, not after the 1.5 s it had been given",
-          wait_for(lambda: len(a.seen) == 3, 0.9), str(a.ids()))
+    check("5. asking again starts it over: an attempt at once, not after the %.0f s it had been given" % DELAY,
+          wait_for(lambda: len(a.seen) == 3, DELAY / 2), str(a.ids()))
     time.sleep(0.2)
     svc.kill()
     a.status = 204
     svc.start()
     check("5. after the restart the replay is still pending", get(svc, "/stats")["replays"] == 1, str(get(svc, "/stats")))
     time.sleep(0.5)
-    check("5. ... and waits for the time it was given (1.5 s), it is not tried at once", len(a.seen) == 3, str(a.ids()))
-    check("5. ... and is delivered when its time comes", wait_for(lambda: len(a.seen) == 4, 6), str(a.ids()))
+    check("5. ... and waits for the time it was given (%.0f s), it is not tried at once" % DELAY, len(a.seen) == 3, str(a.ids()))
+    check("5. ... and is delivered when its time comes", wait_for(lambda: len(a.seen) == 4, 2 * DELAY), str(a.ids()))
     quiet(2.0)
     check("5. ... once", len(a.seen) == 4 and get(svc, "/stats")["replays"] == 0, f"{len(a.seen)} {get(svc, '/stats')}")
     svc.kill()
