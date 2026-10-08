@@ -205,7 +205,10 @@ def main():
         sink = srv_good = srv_bad = None
         # a retry an hour away: every event is one attempt to each endpoint during the test, so when the count of attempts is reached nothing is in flight (and the endpoints
         # that fail hold every event in their windows: stage one stays under the 1,024 of a window)
-        r = Rig(pki, dns, ["--deadline-ms", "3000", "--schedule", "3600000"])
+        # The deadline is long because one attempt that fails for being slow ends the test: its retry is an hour away, an endpoint goes no further than 1,024 events past its oldest
+        # one that is not final, and the burst stops there (attempts 1,170 of 1,700 with one `tls_timeout`; 1,716 of 3,200 with one `dns_timeout`; and with the burst ended by luck first,
+        # 3,198 of 3,200 delivered). The name server and the receiver here are Python threads, and an attempt is not late for 30 s unless something is stuck.
+        r = Rig(pki, dns, ["--deadline-ms", "30000", "--schedule", "3600000"])
         if kind == "tls":
             srv_good = K.TlsServer(*cert)
             r.add(1, "https://hooks.test", srv_good.port)
