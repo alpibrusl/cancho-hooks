@@ -25,6 +25,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+from loadmeter import LoadMeter  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 128   # the default is 5: a burst of connections would lose a SYN and wait a second
 
@@ -108,6 +109,11 @@ def wait_for(cond, secs):
 def main():
     bad = []
 
+    # A gap at the receiver is the delay and whatever the machine added at the two ends of it (a Python thread that stamps the request when it gets its turn, the service's loop that
+    # sends it when it gets its): never less than the delay, and on a busy machine more by as much as a process can be kept waiting. The upper end of a gap is 0.4 s on a quiet one and
+    # twice what the machine kept this process waiting while the gaps were being made (`LoadMeter`) besides.
+    meter = LoadMeter()
+
     # 1. the delays
     delays = [0.2, 0.4, 0.8, 1.6]
     r = Receiver(fail_first=4)
@@ -120,15 +126,17 @@ def main():
     if len(r.times) != 5:
         bad.append(f"1: expected 5 requests (4 failures, 1 success, then silence), saw {len(r.times)}")
     for g, want in zip(gaps, delays):
-        if not (want - 0.02 <= g <= want + 0.4):
-            bad.append(f"1: gap {g:.3f}s outside [{want - 0.02:.2f}, {want + 0.4:.2f}]")
+        if not (want - 0.02 <= g <= want + 0.4 + 2 * meter.stall_s):
+            bad.append(f"1: gap {g:.3f}s outside [{want - 0.02:.2f}, {want + 0.4 + 2 * meter.stall_s:.2f}] (the receiver waited {meter.stall_s:.2f}s for its turn)")
     stop(svc, d)
 
     # 2. dead letter
     r = Receiver(fail_first=10**9)
     svc, d = start("100,100,100", r)
     post_event(svc)
-    time.sleep(2.5)
+    # (it was 2.5 s of waiting for four attempts 100 ms apart to have been made: the attempts are waited for, and then a second for a fifth that must not come)
+    wait_for(lambda: len(r.times) >= 4 and stats(svc)["dead"] >= 1, 15)
+    time.sleep(1.0)
     s = stats(svc)
     print(f"2. requests {len(r.times)}; stats {s}")
     if len(r.times) != 4 or s["dead"] != 1 or s["delivered"] != 0 or s["attempts"] != 4:
@@ -155,14 +163,15 @@ def main():
     gaps3 = [b - a for a, b in zip(r.times, r.times[1:])]
     print(f"3. killed after each failure: gaps {[round(g, 3) for g in gaps3]} for delays {delays3}")
     for g, want in zip(gaps3, delays3):
-        if not (want - 0.05 <= g <= want + 0.6):
-            bad.append(f"3: gap {g:.3f}s outside [{want - 0.05:.2f}, {want + 0.6:.2f}]")
+        if not (want - 0.05 <= g <= want + 0.6 + 2 * meter.stall_s):
+            bad.append(f"3: gap {g:.3f}s outside [{want - 0.05:.2f}, {want + 0.6 + 2 * meter.stall_s:.2f}] (the receiver waited {meter.stall_s:.2f}s for its turn)")
     if len(gaps3) < 3:
         bad.append(f"3: only {len(r.times)} requests arrived, wanted 4")
     time.sleep(1.5)
     if len(r.times) != 4:
         bad.append(f"3: {len(r.times)} requests in all, wanted 4")
     stop(svc, d)
+    meter.stop()
 
     if bad:
         for b in bad:
