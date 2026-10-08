@@ -895,6 +895,25 @@ def stage4():
     check("4. ... and the next call is served", m.rpc("ping", id=2)["id"] == 2, "")
     m.done()
     fake.close()
+    # the same, with the process stopped and continued 0.4 s in: a wait that a signal cuts short is not the end of the time (it was: the answer came after 0.6 s of the 2)
+    fake = Fake(lambda r: HANG)
+    m = Mcp(url=fake.url, timeout=2)
+    box = []
+    t0 = time.time()
+    th = threading.Thread(target=lambda: box.append(m.call("hooks_health", id=1, timeout=30)))
+    th.start()
+    time.sleep(0.4)
+    os.kill(m.p.pid, signal.SIGSTOP)
+    time.sleep(0.1)
+    os.kill(m.p.pid, signal.SIGCONT)
+    th.join(40)
+    took = time.time() - t0
+    r = box[0] if box else None
+    got = (r["result"]["isError"], r["result"]["content"][0]["text"]) if r and "result" in r else r
+    check("4. a call whose process is stopped and continued 0.4 s in still takes its whole time (2 s) and says the time ran out, not that it could not connect",
+          isinstance(got, tuple) and got[0] is True and "in the time allowed" in got[1] and 1.8 < took < 6, f"{got} {took:.2f}s")
+    m.done()
+    fake.close()
     fake = Fake(lambda r: [b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{", 30.0])
     m = Mcp(url=fake.url, timeout=2)
     t0 = time.time()
