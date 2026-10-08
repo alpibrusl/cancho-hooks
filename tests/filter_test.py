@@ -171,7 +171,13 @@ def main():
     add_endpoint(1, dead_port, secret(), types="rare")
     add_endpoint(2, alive.port, secret(), types="")
     d = tmp()
-    svc = start(d, schedule=",".join(["1000"] * 16), deadline="500")
+    # The rare event waits for its retries from the moment it is posted until 1,500 more have been, the checks are made and the endpoint is revived. 16 retries a second apart were a
+    # window of 16 s, which posting 1,500 events can outlast on a busy machine (the event then died, the cursor moved on, and the check that it was held failed); 16 of 3 s were 48 s,
+    # which posting outlasted when each request took 35 ms. 16 is the most the schedule has, so the delays are 10 s: 160 s, and the revived receiver is sent the event at the next retry,
+    # 10 s later at most.
+    # (The deadline is not what is checked: the dead endpoint refuses at once and the live one answers. At 500 ms the live one's receiver, a Python thread, was late for it 4 to 27 times in
+    # 2,500 with the processor shared with six busy loops, each a failed attempt, and "no attempt at the dead endpoint: attempts equal 2,500" counted them.)
+    svc = start(d, schedule=",".join(["10000"] * 16), deadline="10000")
     for n in range(1, 2501):
         post_event(svc, n, "common")
     ok = wait_for(lambda: cursors(svc) == {1: 2500, 2: 2500}, 30)
@@ -179,14 +185,14 @@ def main():
     post_event(svc, 2501, "rare")
     for n in range(2502, 2502 + 1500):
         post_event(svc, n, "common")
-    ok = wait_for(lambda: cursors(svc)[2] == 4001 and get(svc, "/stats")["failed"] >= 2, 30)
+    ok = wait_for(lambda: cursors(svc)[2] == 4001 and get(svc, "/stats")["failed"] >= 2, 60)
     check("3. the rare event fails and waits for its retry, and holds the dead endpoint's cursor just before it", ok and cursors(svc)[1] == 2500, str((cursors(svc), get(svc, "/stats"))))
     time.sleep(0.5)
     st = get(svc, "/stats")
     check("3. ... the events behind it, inside its window, are passed over meanwhile (the window is 1,024 cells and the rare event is one), the healthy endpoint is not held",
           st["filtered"] == 2500 + 1023 and cursors(svc)[2] == 4001, str(st))
     revived = Receiver(port=dead_port)
-    ok = wait_for(lambda: cursors(svc) == {1: 4001, 2: 4001}, 30)
+    ok = wait_for(lambda: cursors(svc) == {1: 4001, 2: 4001}, 60)
     check("3. when the endpoint is up the rare event is delivered once, and the cursor goes to the end", ok and revived.events() == [2501], str((cursors(svc), revived.events())))
     stop(svc)
     shutil.rmtree(d)
