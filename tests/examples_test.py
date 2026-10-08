@@ -315,6 +315,48 @@ def check_shared_chrome():
               str(shared_differences(mutated)))
 
 
+# ---- 5b. what a search engine reads ------------------------------------------------------------------------------------
+
+SITE = "https://alpibrusl.github.io/cancho-hooks/"
+
+
+def meta(text, attr, name):
+    m = re.search(r'<meta %s="%s" content="([^"]*)">' % (attr, re.escape(name)), text)
+    return m.group(1) if m else None
+
+
+def check_search_metadata():
+    texts = {n: open(os.path.join(DOCS, n), encoding="utf-8").read() for n in PAGES}
+    titles = {n: re.search(r"<title>(.*?)</title>", t, re.S).group(1) for n, t in texts.items()}
+    descs = {n: meta(t, "name", "description") for n, t in texts.items()}
+    check("5b. every page has a title of 25 to 70 characters, and no two pages have the same one", all(25 <= len(v) <= 70 for v in titles.values()) and len(set(titles.values())) == len(titles), str(titles))
+    check("5b. every page has a description of 70 to 200 characters, and no two have the same one", all(v and 70 <= len(v) <= 200 for v in descs.values()) and len(set(descs.values())) == len(descs), str(descs))
+    url = {n: SITE if n == "index.html" else SITE + n for n in texts}
+    canon = {n: (re.search(r'<link rel="canonical" href="([^"]*)">', t) or [None, None])[1] for n, t in texts.items()}
+    check("5b. every page names itself as its canonical address, and og:url says the same", all(canon[n] == url[n] and meta(texts[n], "property", "og:url") == url[n] for n in texts), str(canon))
+    check("5b. every page has an og:title and a twitter:title, an og:description and a twitter:description, and they agree", all(
+        meta(t, "property", "og:title") and meta(t, "property", "og:title") == meta(t, "name", "twitter:title") and meta(t, "property", "og:description") and
+        meta(t, "property", "og:description") == meta(t, "name", "twitter:description") for t in texts.values()))
+    check("5b. every page has exactly one h1", all(len(re.findall(r"<h1[ >]", t)) == 1 for t in texts.values()), str({n: len(re.findall(r"<h1[ >]", t)) for n, t in texts.items()}))
+    check("5b. every image on every page has an alt attribute", all(' alt="' in m for t in texts.values() for m in re.findall(r"<img [^>]*>", t)))
+    blocks = re.findall(r'<script type="application/ld\+json">(.*?)</script>', texts["index.html"], re.S)
+    ld = json.loads(blocks[0]) if len(blocks) == 1 else {}
+    need = ["name", "description", "url", "applicationCategory", "operatingSystem", "license", "downloadUrl", "codeRepository", "softwareVersion"]
+    check("5b. the home page has one structured description of the software (JSON-LD, SoftwareApplication) with the fields a search engine reads", ld.get("@type") == "SoftwareApplication" and all(ld.get(k) for k in need), str(ld))
+    rel = ld.get("softwareVersion", "")
+    check("5b. ... and the version it names is the one the install instructions download", ("v%s/" % rel) in texts["index.html"].split("</script>", 1)[1], rel)
+    sm = open(os.path.join(DOCS, "sitemap.xml"), encoding="utf-8").read()
+    locs = re.findall(r"<loc>([^<]+)</loc>", sm)
+    check("5b. the sitemap lists exactly the pages of the site, each by its canonical address", sorted(locs) == sorted(url.values()), str(locs))
+    robots = open(os.path.join(DOCS, "robots.txt"), encoding="utf-8").read().splitlines()
+    check("5b. robots.txt allows crawling and names the sitemap", "Sitemap: " + SITE + "sitemap.xml" in robots and "Disallow: /" not in robots)
+    # the check can fail
+    bad = dict(texts)
+    bad["evidence.html"] = bad["evidence.html"].replace(url["evidence.html"] + '">\n<meta name="robots"', SITE + 'x">\n<meta name="robots"')
+    check("5b. a canonical address that is not the page's own is refused (mutation)", bad["evidence.html"] != texts["evidence.html"] and
+          not all((re.search(r'<link rel="canonical" href="([^"]*)">', t) or [None, None])[1] == url[n] for n, t in bad.items()))
+
+
 def shared_parts_raw(text, which):
     return text[text.index(f"<!-- shared:{which}:begin -->"):text.index(f"<!-- shared:{which}:end -->")]
 
@@ -484,6 +526,7 @@ def main():
 
     # ---- 5. one header and one footer
     check_shared_chrome()
+    check_search_metadata()
 
     # ---- 6. the recordings
     check_casts(outputs, page, have)
