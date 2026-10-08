@@ -22,6 +22,21 @@ from common import F_EFF, F_RISK, REC, read_records, recv_ledger  # noqa: E402
 RESULTS = []
 
 
+def raise_descriptor_limit(n=8192):
+    """Stage 8 has one receiver process hold 1,200 listening sockets and the control connection beside them. Where the soft limit of descriptors is 1,024 (a container's, a
+    shell's default on some systems) the receiver's accept fails with 'Too many open files' and the control connection is never answered: 10 s of a recv, a timeout, and a failure
+    that says nothing of the receiver. The children inherit the limit; the hard limit is the most there is."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, n), hard), hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
+raise_descriptor_limit()
+
+
 def check(name, ok, detail=""):
     RESULTS.append(ok)
     print(("ok   " if ok else "FAIL ") + name + (f"   [{detail}]" if detail and not ok else ""), flush=True)
@@ -254,7 +269,9 @@ def main():
         c = socket.create_connection(("127.0.0.1", dns.port))
 
         def batch(n):
-            t0 = time.time()
+            # the cost of a question is the processor time this process spends on it (the stub is in it), not the time the machine takes to give it the processor: 84 us against 37 us
+            # in wall-clock time with the processor shared with six busy loops, for a stub whose cost did not grow
+            t0 = time.process_time()
             for _ in range(n):
                 c.sendall(struct.pack(">H", len(q)) + q)
                 got = b""
@@ -264,7 +281,7 @@ def main():
                 body = got[2:]
                 while len(body) < ln:
                     body += c.recv(ln - len(body))
-            return (time.time() - t0) / n * 1e6
+            return (time.process_time() - t0) / n * 1e6
 
         first = batch(3000)
         batch(25000)
