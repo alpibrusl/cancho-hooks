@@ -21,6 +21,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import opslib as L  # noqa: E402
 import tlskit as K  # noqa: E402
+from loadmeter import LoadMeter  # noqa: E402
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 check = L.Checks()
@@ -42,11 +43,30 @@ def healthz_ms(svc):
 
 
 def watch_health(svc, secs):
-    worst, end = 0.0, time.time() + secs
+    """The waits for /healthz, in milliseconds, for `secs` seconds of one request after another (a probe at a time, 20 ms apart)."""
+    waits, end = [], time.time() + secs
     while time.time() < end:
-        worst = max(worst, healthz_ms(svc))
+        waits.append(healthz_ms(svc))
         time.sleep(0.02)
-    return worst
+    return sorted(waits)
+
+
+# What would show a loop held by a lookup is a request that waits for the lookup: for the 2 s that a slow name server takes, one probe waits most of it (the next ones are not made until it
+# answers), and at the end of the wait the loop is free. A single slow probe among eighty is a machine that took its processor away from the service, the client or the kernel for
+# a moment (105 ms with the processor shared with six busy loops, on a service whose probes took 1 to 5 ms), so the probes are judged by what nearly all of them saw (the 95th
+# percentile: at most 100 ms) and by a cap on the worst that is half of the lookup's time, which a held loop exceeds by seconds.
+LOOKUP_S = 2.0
+P95_MS = 100        # for a machine that gives the test a processor of its own; times what this one gave (`LoadMeter.slowdown`), for the probes of a client that is waiting for its turn
+CAP_MS = LOOKUP_S * 1000 / 2
+METER = LoadMeter()
+
+
+def p95_limit():
+    return P95_MS * max(1.0, METER.slowdown())
+
+
+def p95(waits):
+    return waits[min(len(waits) - 1, int(len(waits) * 0.95))]
 
 
 def main():
@@ -73,9 +93,10 @@ def main():
     dns = K.DnsStub({"db.test": ["127.0.0.1"]}, delay=2.0)
     svc = L.Service(BIN, tempfile.mkdtemp(prefix="hooks-dbname-"), flags(dns.port))
     svc.start(timeout=30, loaded=False)
-    worst = watch_health(svc, 1.8)
+    waits = watch_health(svc, 1.8)
     ready = L.wait_for(lambda: svc.has_line("endpoints loaded"), 20)
-    check(f"2. a name server that takes 2 s: /healthz answered in at most {worst:.0f} ms meanwhile (under 100), and then the database is there", worst < 100 and ready, f"{worst} {ready}")
+    check(f"2. a name server that takes 2 s: /healthz answered meanwhile in at most {p95(waits):.0f} ms for 95 of 100 (under {p95_limit():.0f}), the longest {waits[-1]:.0f} ms (under {CAP_MS:.0f}), and then the database is there",
+          p95(waits) <= p95_limit() and waits[-1] < CAP_MS and ready, f"{len(waits)} probes, p95 {p95(waits)}, max {waits[-1]}, {ready}, limit {p95_limit():.0f}")
     svc.kill()
     dns.close()
 
@@ -83,11 +104,14 @@ def main():
     dns = K.DnsStub({"other.test": ["127.0.0.1"]})
     svc = L.Service(BIN, tempfile.mkdtemp(prefix="hooks-dbname-"), flags(dns.port))
     svc.start(timeout=30, loaded=False)
-    worst = watch_health(svc, 3.0)
+    waits = watch_health(svc, 3.0)
+    # the lookups are tried again after a wait that grows; two of them have failed by the time the third second is over on a machine that is not stopped now and then (a stall of
+    # half a second in the first one moved the second past it), so it is waited for
+    L.wait_for(lambda: svc.stats().get("database_lookup_failures", 0) >= 2, 20)
     code, body = svc.get("/readyz")
     st = svc.stats()
-    check(f"3. a name the server does not know: /readyz is 503 naming the database, {st.get('database_lookup_failures')} lookups failed, /healthz at most {worst:.0f} ms",
-          code == 503 and b"database" in body and st.get("database_lookup_failures", 0) >= 2 and worst < 100, f"{code} {body} {st.get('database_lookup_failures')} {worst}")
+    check(f"3. a name the server does not know: /readyz is 503 naming the database, {st.get('database_lookup_failures')} lookups failed, /healthz at most {p95(waits):.0f} ms for 95 of 100, the longest {waits[-1]:.0f} ms",
+          code == 503 and b"database" in body and st.get("database_lookup_failures", 0) >= 2 and p95(waits) <= p95_limit() and waits[-1] < CAP_MS, f"{code} {body} {st.get('database_lookup_failures')} p95 {p95(waits)} max {waits[-1]}")
     tried = st.get("database_lookups", 0)
     time.sleep(3)
     later = svc.stats().get("database_lookups", 0)

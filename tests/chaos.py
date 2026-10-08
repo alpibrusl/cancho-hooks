@@ -54,8 +54,30 @@ def small_pages():
 small_pages()
 
 
+_GIVEN = set()
+
+
 def free_port():
-    with socket.socket() as s:
+    """A port to give a service, or to leave with nothing listening on it: below the range the system hands out as ephemeral (Linux 32768 and up, macOS 49152 and up), and one
+    that has not been given out before by this process.
+
+    A port bound to 0 and released a moment ago is an ephemeral one, and it can be handed to another socket before it is used: as the source port of a connection that the
+    service or the test itself makes (a connect to it then does not fail; or the service cannot bind it: the start is refused, `address in use`). The ports below the range are
+    never handed out by a bind to 0 or by a connect, and the only way to meet one is to be given it here (a bind is tried, so nothing listens there and none is in TIME_WAIT)."""
+    import random
+    rng = random.SystemRandom()
+    for _ in range(500):
+        p = rng.randint(12000, 30000)
+        if p in _GIVEN:
+            continue
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", p))
+            except OSError:
+                continue
+        _GIVEN.add(p)
+        return p
+    with socket.socket() as s:          # (no port in the range was free: 500 tried)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 

@@ -63,7 +63,8 @@ def stage2():
     svc = L.Service(BIN, d, args)
     check("2. the service starts through the proxy", svc.start(), svc.stderr())
     check("2. with the database reachable: 200", readyz(svc) == (200, {"ready": True}))
-    check("2. ... two history connections", svc.metrics().value("hooks_history_connections") == 2)
+    # `listening` and the endpoints being loaded come as the first of the two connections is made; the second is made a moment later (the start says "1 of 2 connections live" and then "2 of 2")
+    check("2. ... two history connections", L.wait_for(lambda: svc.metrics().value("hooks_history_connections") == 2, 10), str(svc.metrics().value("hooks_history_connections")))
     proxy.cut()
     ok = L.wait_for(lambda: readyz(svc)[0] == 503, 15)
     st, body = readyz(svc)
@@ -74,8 +75,10 @@ def stage2():
     check("2. ... /healthz is still 200", svc.get("/healthz")[0] == 200)
     status, data = svc.post_event(1)
     check("2. ... and delivery is unaffected: an event is stored and delivered", status == 202 and L.wait_for(lambda: peer.distinct() == {1}, 10), str((status, data)))
-    time.sleep(0.2)
-    check("2. ... the history rows wait in the queue (bounded: 256), they are not lost yet", svc.metrics().value("hooks_history_queue") >= 1)
+    check("2. ... the history rows wait in the queue (bounded: 256), they are not lost yet", L.wait_for(lambda: svc.metrics().value("hooks_history_queue") >= 1, 10))
+    # the check below counts the attempts to connect that failed while the database was away: one has to have been made before it comes back (it was 0.2 s of waiting for that; on
+    # a machine that is slow to schedule the service it is longer)
+    L.wait_for(lambda: svc.metrics().value("hooks_database_connect_failures_total") >= 1, 10)
     proxy.mode = "pass"
     check("2. the database is back: /readyz is 200 again, with no restart", L.wait_for(lambda: readyz(svc) == (200, {"ready": True}), 15), str(readyz(svc)))
     m = svc.metrics()

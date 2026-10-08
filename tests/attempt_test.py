@@ -32,6 +32,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
 
 DEADLINE = 0.8
+# Only the `stall` case is of the deadline, so only it runs with a short one. In every other case the answer is meant to come well before the deadline, and what is asked is that
+# it did ("soon": within half of it); with a deadline of 0.8 s that was 0.5 s of a machine that may be several times slower than the one the numbers were taken on (a receiver that
+# reads a 60,000-byte body 2 KiB at a time, 10 ms apart, took 0.89 s of wall clock when the processor was shared with six busy loops, and the attempt was ended at the deadline: a
+# failure, correctly). A deadline that slowness cannot reach keeps the claim and drops the dependence on the machine's speed.
+LONG_DEADLINE = 10.0
 
 
 def receiver(mode, got):
@@ -91,18 +96,16 @@ def outcomes(path):
     return [o for o in (struct.unpack("<5q", dict(pairs)[b"o"]) for _, pairs in records) if o[0] not in (10, 11)]
 
 
-def run(mode):
+def run(mode, deadline):
     got = []
     if mode == "refused":
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
+        port = chaos.free_port()      # nothing listens there, and no connection is given it as its own port
     else:
         port = receiver(mode, got)
     datadir = tempfile.mkdtemp(prefix="hooks-attempt-")
     with open(os.path.join(datadir, "endpoints.conf"), "w") as f:
         f.write(f"0 127.0.0.1 {port} whsec_{base64.b64encode(os.urandom(24)).decode()}\n")
-    svc = chaos.Service(chaos.free_port(), datadir, extra=("60000", str(int(DEADLINE * 1000))))
+    svc = chaos.Service(chaos.free_port(), datadir, extra=("60000", str(int(deadline * 1000))))
     svc.start()
     body = {"type": "t", "pad": "x" * (60000 if mode == "large" else 0)}
     payload = json.dumps(body).encode()
@@ -110,7 +113,7 @@ def run(mode):
     chaos.post(svc.port, payload, timeout=5)
     seg = os.path.join(datadir, "delivery.seg")
     seen = None
-    while time.time() < t0 + 6:
+    while time.time() < t0 + deadline + 5:
         o = outcomes(seg)
         if o:
             seen = (o[0], time.time() - t0)
@@ -124,10 +127,12 @@ def run(mode):
 
 def main():
     bad = 0
-    cases = [("ok", 1, 0, 0.5), ("500", 2, 0, 0.5), ("stall", 2, DEADLINE - 0.05, DEADLINE + 0.6), ("close", 2, 0, 0.5),
-             ("junk", 2, 0, 0.5), ("split", 1, 0.25, 0.9), ("refused", 2, 0, 0.5), ("large", 1, 0, 5)]
-    for mode, kind, lo, hi in cases:
-        seen, got, payload = run(mode)
+    # (receiver, outcome kind, earliest, latest, deadline)
+    soon = LONG_DEADLINE / 2
+    cases = [("ok", 1, 0, soon, LONG_DEADLINE), ("500", 2, 0, soon, LONG_DEADLINE), ("stall", 2, DEADLINE - 0.05, DEADLINE + 0.6, DEADLINE), ("close", 2, 0, soon, LONG_DEADLINE),
+             ("junk", 2, 0, soon, LONG_DEADLINE), ("split", 1, 0.25, soon, LONG_DEADLINE), ("refused", 2, 0, soon, LONG_DEADLINE), ("large", 1, 0, soon, LONG_DEADLINE)]
+    for mode, kind, lo, hi, deadline in cases:
+        seen, got, payload = run(mode, deadline)
         why = []
         if seen is None:
             why.append("no outcome was recorded")

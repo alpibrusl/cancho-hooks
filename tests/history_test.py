@@ -104,9 +104,7 @@ class Receiver:
 
 
 def closed_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    return chaos.free_port()   # nothing listens there, and none of the ports a connection is given as its own is this one
 
 
 def get(svc, path):

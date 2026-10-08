@@ -28,8 +28,11 @@ run "curl -s -w ' [%{http_code}]\n' -X POST \$URL/events -H 'Idempotency-Key: or
 check "refused with 422" test "${OUT##* }" = "[422]"
 
 say "the 202 came after the event was flushed to disk. Now the service dies, hard, before it has delivered anything"
-run "kill -9 \$SVC_PID"
-{ wait "$SVC_PID"; } 2>/dev/null || true
+# (not `run`: bash tells of a job that was killed, "Killed", at the moment it reaps it, which is in the shell's own turn when the service dies at once and in the wait when it is a
+# little slower to die. The kill and the wait are one group with its error output discarded, so the report goes to the same place on a quiet machine and on a busy one)
+# shellcheck disable=SC2016
+printf '%s\n' '$ kill -9 $SVC_PID'
+{ kill -9 "$SVC_PID"; wait "$SVC_PID"; } 2>/dev/null || true
 start_service --schedule 500,500,500,500,500,500 --retry-jitter 0
 say "the key was remembered too: asking again does not make a second event"
 run "curl -s -w ' [%{http_code}]\n' -X POST \$URL/events -H 'Idempotency-Key: order-1042' -d '{\"type\":\"payment.captured\",\"order\":1042,\"amount\":4900}'"

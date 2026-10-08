@@ -38,6 +38,8 @@ import http.client
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 MCP = os.environ.get("HOOKS_MCP") or os.path.join(os.path.dirname(BIN), "hooks-mcp")
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import chaos  # noqa: E402
 HAVE_PG = bool(os.environ.get("HOOKS_PG"))
 FAILS = []
 TOKENS = []          # every token this test ever wrote to a file: none may be seen on standard output or standard error
@@ -56,9 +58,7 @@ def check(name, ok, detail=""):
 
 
 def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    return chaos.free_port()   # below the ephemeral range: a port bound to 0 and released can be given to another socket before the service has it
 
 
 # ---- the client of hooks-mcp ---------------------------------------------------------------------------------------------------------
@@ -66,7 +66,7 @@ def free_port():
 class Mcp:
     """hooks-mcp on pipes. Everything it writes is kept: every line of standard output must be a JSON-RPC message (checked as it arrives), and standard error is kept whole."""
 
-    def __init__(self, *args, url=None, token=None, write=False, timeout=None, extra=(), stdin=subprocess.PIPE):
+    def __init__(self, *args, url=None, token=None, write=False, timeout=None, extra=(), stdin=subprocess.PIPE, read_stdout=True):
         self.dir = tempfile.mkdtemp(prefix="hooks-mcp-test-")
         cmd = [MCP]
         if url:
@@ -88,7 +88,8 @@ class Mcp:
         self.raw = []
         self.err = bytearray()
         self.bad_lines = []
-        threading.Thread(target=self._out, daemon=True).start()
+        if read_stdout:
+            threading.Thread(target=self._out, daemon=True).start()
         threading.Thread(target=self._err, daemon=True).start()
         CLIENTS.append(self)
 
@@ -497,15 +498,20 @@ def stage1():
     m.write_raw(b"x" * (MAX_LINE + 10))
     code = m.close()
     check("1. end of input in the middle of a line that is too long: -32600, exit 0", code == 0 and b'"code":-32600' in m.stdout(), str(m.stdout()[:100]))
-    # the client goes away while the server has something to say
-    m = Mcp(url=dead)
+    # the client goes away while the server has something to say. Nothing reads the pipe, so closing it closes it: a thread blocked in a read of it keeps the pipe open until the read
+    # returns (the kernel holds the file for as long as the call lasts), and a server that wrote its fifty answers into a pipe that was still open was never told, and never ended
+    m = Mcp(url=dead, read_stdout=False)
     m.p.stdout.close()
     for i in range(50):
         try:
             m.send({"jsonrpc": "2.0", "id": i, "method": "ping"})
         except OSError:
             break
-    time.sleep(0.5)
+    # it ends at its first write to the closed pipe; how soon is the machine's (0.5 s was not always enough with the processor shared), so it is waited for, and a server that does
+    # not end is the one that spins
+    end = time.time() + 15
+    while m.p.poll() is None and time.time() < end:
+        time.sleep(0.02)
     check("1. standard output closed by the client: the server ends (it does not spin)", m.p.poll() is not None, "")
     m.p.kill()
 

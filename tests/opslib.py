@@ -89,15 +89,40 @@ def pg_flags(port=None):
 
 # ---- the service ------------------------------------------------------------------------------------------------------
 
+class _Pipe:
+    """The read end of a service's stderr, taken without waiting: `take()` moves what is in the pipe, line by line, to `sink` (the owner's lock is held)."""
+
+    def __init__(self, fd, sink):
+        self.fd, self.sink, self.partial, self.eof = fd, sink, b"", False
+        os.set_blocking(fd, False)
+
+    def take(self):
+        while not self.eof:
+            try:
+                chunk = os.read(self.fd, 65536)
+            except BlockingIOError:
+                return
+            except OSError:
+                chunk = b""
+            if not chunk:
+                self.eof = True
+                if self.partial:
+                    self.sink().append(self.partial.decode(errors="replace"))
+                    self.partial = b""
+                return
+            *whole, self.partial = (self.partial + chunk).split(b"\n")
+            self.sink().extend(w.decode(errors="replace") for w in whole)
+
+
 class Service:
     """A running `hooks`, its stderr kept line by line. `start()` waits for `listening` (or for the process to end: `exited`)."""
 
     def __init__(self, bin_path, datadir, args=(), port=None, power_loss=False, env=None):
         self.bin, self.dir, self.args = os.path.abspath(bin_path), datadir, list(args)
         self.port = port or chaos.free_port()
-        self.lines, self.proc, self.power_loss, self.extra_env = [], None, power_loss, env or {}
+        self._lines, self.proc, self.power_loss, self.extra_env = [], None, power_loss, env or {}
         self.lock = threading.Lock()
-        self.reader = None
+        self.reader, self._pipe = None, None
 
     def start(self, timeout=15.0, loaded=True):
         env = dict(os.environ, **self.extra_env)
@@ -108,7 +133,8 @@ class Service:
         # test is of the service's handling of the signal, so it starts it with the default disposition, as systemd and a terminal do.
         self.proc = subprocess.Popen([self.bin, "--port", str(self.port), "--dir", self.dir, "--allow-private-hosts", "1", *self.args],
                                      stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-        self.reader = threading.Thread(target=self._read, args=(self.proc,), daemon=True)
+        self._pipe = _Pipe(self.proc.stderr.fileno(), lambda: self._lines)
+        self.reader = threading.Thread(target=self._read, args=(self._pipe,), daemon=True)
         self.reader.start()
         # A test that raises (or is told to stop) must not leave a service running against the database: one that does fires the schedules of the next test into its own log.
         atexit.register(lambda proc=self.proc: proc.poll() is None and proc.kill())
@@ -118,18 +144,32 @@ class Service:
             wait_for(lambda: self.has_line("endpoints loaded") or self.proc.poll() is not None, timeout)
         return "listening" in self.lines
 
-    def _read(self, proc):
-        for raw in proc.stderr:
+    @property
+    def lines(self):
+        """What the service has written to stderr, line by line. Reading it first takes whatever is already in the pipe, so a line the service wrote before the
+        caller asked is there: it does not depend on the reader thread having been given the processor since (on a busy machine it may not have been for a
+        second, and a check that the service said nothing else after `listening` passed or failed on that thread's turn, not the service's)."""
+        with self.lock:
+            if self._pipe is not None:
+                self._pipe.take()
+            return self._lines
+
+    @lines.setter
+    def lines(self, value):
+        with self.lock:
+            self._lines = value
+
+    def _read(self, pipe):
+        while not pipe.eof:
+            select.select([pipe.fd], [], [])
             with self.lock:
-                self.lines.append(raw.decode(errors="replace").rstrip("\n"))
+                pipe.take()
 
     def stderr(self):
-        with self.lock:
-            return "\n".join(self.lines)
+        return "\n".join(self.lines)
 
     def has_line(self, text):
-        with self.lock:
-            return any(text in line for line in self.lines)
+        return any(text in line for line in self.lines)
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None

@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 sys.dont_write_bytecode = True
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "hooks")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos  # noqa: E402
 PAGE = os.path.join(ROOT, "docs", "examples.html")
 GITHUB = "https://github.com/alpibrusl/cancho-hooks/blob/main/"
 NEEDS_PG = {1, 4}
@@ -152,11 +154,7 @@ def load_receiver():
 
 
 def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    return chaos.free_port()   # below the ephemeral range: a port bound to 0 and released can be given to another socket before the receiver has it
 
 
 def post(port, headers, body, timeout=10):
@@ -225,12 +223,19 @@ def test_receiver():
             try:
                 proc.stdout.readline()  # listening
                 body = b'{"type":"t"}'
-                statuses = [post(port, signed(secret, "evt_7", body), body) for _ in range(requests)]
+                # The receiver answers a request and then prints its line, on a thread of its own for each connection: a request sent as soon as the answer has come may have its line
+                # printed before the line of the one before. So, where the order of the lines is what is checked, the line of a request is read before the next is sent.
+                statuses, lines = [], []
+                for _ in range(requests):
+                    statuses.append(post(port, signed(secret, "evt_7", body), body))
+                    if label == "normal":
+                        lines.append(proc.stdout.readline().strip())
                 results[label] = statuses
                 if label == "normal":
                     bad = post(port, dict(signed(secret, "evt_8", body), **{"webhook-signature": "v1," + base64.b64encode(b"x" * 32).decode()}), body)
                     results["bad signature"] = bad
-                    results["lines"] = [proc.stdout.readline().strip() for _ in range(3)]
+                    lines.append(proc.stdout.readline().strip())
+                    results["lines"] = lines
             finally:
                 proc.terminate()
                 proc.wait(5)

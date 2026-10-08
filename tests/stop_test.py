@@ -239,7 +239,12 @@ def stage5():
             try:
                 status, data = chaos.post(svc.port, body, timeout=3)
             except Exception:  # noqa: BLE001
-                return
+                # A request that got no answer (the machine was slow, or the service has been told to stop) is not an acknowledgement and is not counted. Giving up on it ended the
+                # worker for good on the first slow answer, and with the four of them gone the load never came (400 events stored: never, in the 60 s that were waited).
+                if stop_posting.is_set():
+                    return
+                time.sleep(0.05)
+                continue
             if status == 202:
                 with lock:
                     acked[json.loads(data)["id"]] = body
