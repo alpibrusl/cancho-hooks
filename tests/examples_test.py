@@ -42,6 +42,8 @@ from datetime import datetime, timezone
 sys.dont_write_bytecode = True
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "hooks")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos  # noqa: E402
 PAGE = os.path.join(ROOT, "docs", "examples.html")
 GITHUB = "https://github.com/alpibrusl/cancho-hooks/blob/main/"
 NEEDS_PG = {1, 4}
@@ -152,11 +154,7 @@ def load_receiver():
 
 
 def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    return chaos.free_port()   # below the ephemeral range: a port bound to 0 and released can be given to another socket before the receiver has it
 
 
 def post(port, headers, body, timeout=10):

@@ -38,6 +38,8 @@ import http.client
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 MCP = os.environ.get("HOOKS_MCP") or os.path.join(os.path.dirname(BIN), "hooks-mcp")
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import chaos  # noqa: E402
 HAVE_PG = bool(os.environ.get("HOOKS_PG"))
 FAILS = []
 TOKENS = []          # every token this test ever wrote to a file: none may be seen on standard output or standard error
@@ -56,9 +58,7 @@ def check(name, ok, detail=""):
 
 
 def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    return chaos.free_port()   # below the ephemeral range: a port bound to 0 and released can be given to another socket before the service has it
 
 
 # ---- the client of hooks-mcp ---------------------------------------------------------------------------------------------------------

@@ -25,6 +25,8 @@ import time
 
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chaos  # noqa: E402
 SPEC = json.load(open(os.path.join(ROOT, "docs", "openapi.json")))
 FAILS = []
 
@@ -151,11 +153,7 @@ def fits(v, s, where="$"):
 
 # ---- the service
 def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    return chaos.free_port()   # below the ephemeral range: a port bound to 0 and released can be given to another socket before the service has it
 
 
 work = tempfile.mkdtemp(prefix="openapi_test_")

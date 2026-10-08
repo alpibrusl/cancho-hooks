@@ -94,9 +94,7 @@ def outcomes(path):
 def run(mode):
     got = []
     if mode == "refused":
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
+        port = chaos.free_port()      # nothing listens there, and no connection is given it as its own port
     else:
         port = receiver(mode, got)
     datadir = tempfile.mkdtemp(prefix="hooks-attempt-")
