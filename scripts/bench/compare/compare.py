@@ -41,6 +41,7 @@ PADDING = "x" * 120
 SECRET = "whsec_" + "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"
 RUN = f"bench{os.getpid()}"
 CLEANUP = []
+STARTS = [0]          # every start of a system has names of its own: a container that is still being removed keeps its name for a moment
 
 
 def sh(*cmd, input=None, check=True, timeout=300):
@@ -52,6 +53,7 @@ def sh(*cmd, input=None, check=True, timeout=300):
 
 def port_free(p):
     s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)     # as a server does: the TIME_WAIT sockets of the last run do not hold the port
     try:
         s.bind(("127.0.0.1", p))
         return True
@@ -147,9 +149,11 @@ class System:
         self.a = a
         self.names = {}          # role -> container name
         self.volumes = []
+        STARTS[0] += 1
+        self.tag = f"{RUN}-{STARTS[0]}"
 
     def container(self, role, image, args, env=None, extra=None, cpus=None):
-        n = f"{RUN}-{self.name}-{role}"
+        n = f"{self.tag}-{self.name}-{role}"
         cmd = ["docker", "run", "-d", "--name", n, "--network", "host", "--cpuset-cpus", cpus or self.a.sut_cpus]
         for k, v in (env or {}).items():
             cmd += ["-e", f"{k}={v}"]
@@ -183,7 +187,7 @@ class HooksFiles(System):
     def start(self, E, sink_base):
         for p in (18080,):
             assert port_free(p), f"port {p} is in use"
-        vol = f"{RUN}-hooks-data"
+        vol = f"{self.tag}-hooks-data"
         sh("docker", "volume", "create", vol)
         self.volumes.append(vol)
         conf = "".join(f"{i} 127.0.0.1 {sink_base + i} {SECRET}\n" for i in range(E))
@@ -206,7 +210,7 @@ class HooksPG(HooksFiles):
         sh("docker", "exec", "-i", pg, "psql", "-h", "127.0.0.1", "-p", "55440", "-U", "postgres", "-d", "hooks", "-q", "-f", "-", input=schema)
         rows = ",".join(f"({i}, '127.0.0.1', {sink_base + i}, '{SECRET}')" for i in range(E))
         sh("docker", "exec", pg, "psql", "-h", "127.0.0.1", "-p", "55440", "-U", "postgres", "-d", "hooks", "-q", "-c", f"insert into endpoints (id, host, port, secret) values {rows}")
-        vol = f"{RUN}-hooks-data"
+        vol = f"{self.tag}-hooks-data"
         sh("docker", "volume", "create", vol)
         self.volumes.append(vol)
         sh("docker", "run", "--rm", "--user", "root", "-v", f"{vol}:/d", "--entrypoint", "sh", self.a.hooks_image, "-c", "chown -R 10001 /d && chmod 700 /d")
@@ -232,7 +236,8 @@ class Svix(System):
         secret = "bench-secret-" + "k" * 24
         env = {"SVIX_JWT_SECRET": secret, "SVIX_DB_DSN": "postgresql://postgres@127.0.0.1:55441/svix", "SVIX_REDIS_DSN": "redis://127.0.0.1:56379", "SVIX_QUEUE_TYPE": "redis",
                "SVIX_LISTEN_ADDRESS": "127.0.0.1:18071", "SVIX_WHITELIST_SUBNETS": '["127.0.0.0/8"]'}
-        token = sh("docker", "run", "--rm", "-e", f"SVIX_JWT_SECRET={secret}", self.a.svix_image, "jwt", "generate").split()[-1]
+        # the command validates the whole configuration, so it is given the same environment as the server
+        token = sh("docker", "run", "--rm", *[x for k, v in env.items() for x in ("-e", f"{k}={v}")], self.a.svix_image, "svix-server", "jwt", "generate").split()[-1]
         self.container("service", self.a.svix_image, [], env=env)
         auth = {"Authorization": f"Bearer {token}"}
         wait_for(lambda: http("GET", "http://127.0.0.1:18071/api/v1/health/", headers=auth)[0] in (200, 204), "svix health", secs=120)
@@ -408,7 +413,7 @@ def machine(a):
         if line.startswith("model name"):
             model = line.split(":", 1)[1].strip()
             break
-    sha = sh("git", "-C", REPO, "rev-parse", "HEAD", check=False)
+    sha = os.environ.get("HARNESS_COMMIT") or sh("git", "-C", REPO, "rev-parse", "HEAD", check=False) or "unknown (not a git checkout: set HARNESS_COMMIT)"
     return {"cpu": model, "cores": os.cpu_count(), "kernel": platform.release(), "docker": sh("docker", "version", "-f", "{{.Server.Version}}", check=False), "loadavg_start": os.getloadavg(),
             "governors": governors(parse_cpus(a.sut_cpus) | {a.sink_cpu, a.load_cpu}), "harness_commit": sha, "date": time.strftime("%Y-%m-%d %H:%M:%S %z")}
 
@@ -427,7 +432,7 @@ def markdown(o):
     m = o["machine"]
     L = ["# Comparison of webhook services", "",
          f"Machine: {m['cpu']}, {m['cores']} cores, kernel {m['kernel']}, docker {m['docker']}; governors {sorted(set(m['governors'].values()))}; load average at the start {m['loadavg_start']}, at the end {o['loadavg_end']}. "
-         f"System under test on cores {o['sut_cpus']}, receivers on {o['sink_cpu']}, load on {o['load_cpu']}. {o['reps']} runs of each row: the median, then (least to most). Harness commit {m['harness_commit'][:12]}, {m['date']}.", ""]
+         f"System under test on cores {o['sut_cpus']}, receivers on {o['sink_cpu']}, load on {o['load_cpu']}. {o['reps']} runs of each row: the median, then (least to most). Harness commit {m['harness_commit'][:12] if len(m['harness_commit']) == 40 else m['harness_commit']}, {m['date']}.", ""]
     for s, d in o["systems"].items():
         L.append(f"* **{s}**: {d['notes']} Images: " + "; ".join(f"{r} `{i}`" for r, i in d["images"].items()))
     L += ["", "## Throughput (every post as fast as the service answers; 64 connections)", "",

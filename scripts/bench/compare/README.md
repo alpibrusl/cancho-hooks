@@ -48,7 +48,9 @@ python3 scripts/bench/compare/compare.py --smoke --out bench-smoke       # a min
 python3 scripts/bench/compare/compare.py --out bench-out --svix-image svix/svix-server:<tag>
 ```
 
-Output: `compare.md` (the tables, the machine, the images) and `compare.json` (every run). The smoke run does not need the governor and its numbers mean nothing.
+On a host that is not a git checkout (a copy of this directory), set `HARNESS_COMMIT=<sha>` so that the result says which harness made it.
+
+Output: `compare.md` (the tables, the machine, the images) and `compare.json` (every run). The smoke run does not need the governor and its numbers mean nothing. It has been run on all three systems (2 endpoints, 300 to 1,000 events): each delivered every event once.
 
 ## Publishing a result
 
