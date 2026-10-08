@@ -44,6 +44,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chaos  # noqa: E402
+from loadmeter import LoadMeter  # noqa: E402
 
 http.server.HTTPServer.request_queue_size = 256
 BIN = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "build/hooks"
@@ -1072,6 +1073,7 @@ def stage_stall():
     svc.start()
     lat = []
     stop = threading.Event()
+    meter = LoadMeter()      # how much of a processor this machine is giving a process while the stage runs (see the checks at the end)
 
     def probe():
         c = __import__("http.client").client.HTTPConnection("127.0.0.1", svc.port, timeout=30)
@@ -1085,10 +1087,12 @@ def stage_stall():
     th = threading.Thread(target=probe)
     th.start()
     post_many(svc, 1, 1100, pad=100, threads=4)
-    ok = wait_for(lambda: svc.stats()["failed"] >= 62 * 1024, 120)
+    ok = wait_for(lambda: svc.stats()["failed"] >= 62 * 1024, 600)       # (63,488 failed attempts: 120 s were not enough with the processor shared with six busy loops, 40,160 by then)
     time.sleep(1)
     stop.set()
     th.join()
+    meter.stop()
+    slow = meter.slowdown()
     s = svc.stats()
     lat.sort()
     p = lambda q: lat[min(len(lat) - 1, int(q * len(lat)))]  # noqa: E731
@@ -1108,14 +1112,20 @@ def stage_stall():
     # the stated bound (docs/retention.md section 12): the largest snapshot there can be (62 full windows, 63,488 records, 4.9 MB) holds the loop for
     # 40 to 70 ms measured (0.5 to 0.96 s before `state.put_outcome` stopped losing its region: docs/cancho-log-retention.md gap 6); every other step
     # is a few milliseconds. The gate leaves room for a loaded machine.
-    check("stall: no step held the loop for more than 300 ms, the largest state there can be (measured: %d ms)" % s["maintenance_ms_max"], s["maintenance_ms_max"] <= 300, str(s["maintenance_ms_max"]))
+    # The step is measured in wall-clock time by the service, so a machine that gives the service a fraction of a processor makes it longer in proportion: 990 ms was the step
+    # with the processor shared with six busy loops, a snapshot that took 40 to 70 ms of processor time. The 300 ms is for a machine that gives a whole processor; what this one gave
+    # is measured while the stage runs (`LoadMeter.slowdown`: the wall clock of a short spin over its processor time, 1.0 when a core is free; the 90th percentile of those taken
+    # every 250 ms) and the bound is that many times as long. The region loss that this check exists for held the loop for 0.5 to 0.96 s on a machine with a free core.
+    scale = max(1.0, slow)
+    check("stall: no step held the loop for more than 300 ms (times %.1f, what this machine gave the stage), the largest state there can be (measured: %d ms)" % (scale, s["maintenance_ms_max"]),
+          s["maintenance_ms_max"] <= 300 * scale, str((s["maintenance_ms_max"], slow)))
     # What bounds the loop is the line above: the service measures its own longest step (`maintenance_ms_max`), and that is the gate that caught the
     # region loss (0.5 to 0.96 s). The longest PROBE is the worst of several hundred requests on a machine that is not ours: on a shared CI runner it was
     # 528 ms with the loop's own step inside its bound (CI run 37629892445), where eight runs on a quiet machine gave a longest probe of 14 to 112 ms, a
     # 99th percentile of 4 to 12 ms and a longest step of 14 to 22 ms. So the requests are judged by what they mostly saw (the 99th percentile) and by a
     # loose cap on the worst, which still fails a loop that is held for a second.
-    check("stall: and the requests waited for it little: 99th percentile at most 100 ms (measured: %.1f ms)" % p(0.99), p(0.99) <= 100, str(p(0.99)))
-    check("stall: and none waited a second (the longest probe, measured: %.0f ms)" % lat[-1], lat[-1] <= 1000, str(lat[-1]))
+    check("stall: and the requests waited for it little: 99th percentile at most 100 ms (times %.1f; measured: %.1f ms)" % (scale, p(0.99)), p(0.99) <= 100 * scale, str((p(0.99), slow)))
+    check("stall: and none waited a second (times %.1f; the longest probe, measured: %.0f ms)" % (scale, lat[-1]), lat[-1] <= 1000 * scale, str((lat[-1], slow)))
     shutil.rmtree(d, ignore_errors=True)
 
 
