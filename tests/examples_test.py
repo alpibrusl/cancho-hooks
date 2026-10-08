@@ -223,12 +223,19 @@ def test_receiver():
             try:
                 proc.stdout.readline()  # listening
                 body = b'{"type":"t"}'
-                statuses = [post(port, signed(secret, "evt_7", body), body) for _ in range(requests)]
+                # The receiver answers a request and then prints its line, on a thread of its own for each connection: a request sent as soon as the answer has come may have its line
+                # printed before the line of the one before. So, where the order of the lines is what is checked, the line of a request is read before the next is sent.
+                statuses, lines = [], []
+                for _ in range(requests):
+                    statuses.append(post(port, signed(secret, "evt_7", body), body))
+                    if label == "normal":
+                        lines.append(proc.stdout.readline().strip())
                 results[label] = statuses
                 if label == "normal":
                     bad = post(port, dict(signed(secret, "evt_8", body), **{"webhook-signature": "v1," + base64.b64encode(b"x" * 32).decode()}), body)
                     results["bad signature"] = bad
-                    results["lines"] = [proc.stdout.readline().strip() for _ in range(3)]
+                    lines.append(proc.stdout.readline().strip())
+                    results["lines"] = lines
             finally:
                 proc.terminate()
                 proc.wait(5)
