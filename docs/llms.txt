@@ -17,6 +17,7 @@
 
 ## Running it
 - [Runbook](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/runbook.md): backup, restore, start failures.
+- [Deploy with cancho-oci](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/deploy-oci.md): image, signature, SBOM and a machine that verifies all three; the honest gaps of the path.
 - [Security](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/security.md) and [privacy](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/privacy.md).
 - [Examples](https://alpibrusl.github.io/cancho-hooks/examples.html): seven use cases as runnable scripts (`examples/`), each checked against what it prints.
 - [Evidence](https://alpibrusl.github.io/cancho-hooks/evidence.html): what was tested and how, and what is not claimed.
