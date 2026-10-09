@@ -20,6 +20,7 @@
 - [Security](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/security.md) and [privacy](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/privacy.md).
 - [Examples](https://alpibrusl.github.io/cancho-hooks/examples.html): seven use cases as runnable scripts (`examples/`), each checked against what it prints.
 - [Evidence](https://alpibrusl.github.io/cancho-hooks/evidence.html): what was tested and how, and what is not claimed.
+- [Proof](https://alpibrusl.github.io/cancho-hooks/proof.html): the authority report of every build -- hooks and its named OpenSSL calls, hooks-pure bounded with none, the agent surface -- every label explained.
 
 ## Optional
 - [Design](https://github.com/alpibrusl/cancho-hooks/blob/main/docs/design.md): why each part is the way it is.

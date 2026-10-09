@@ -82,6 +82,11 @@ jobs:
         if: matrix.shard == 'd'
         working-directory: hooks
         run: CANCHO=../cancho/target/release/cancho scripts/check-authority.sh
+      # The proof page's report tables are spliced from the committed reports; a report that changed without the page, or a hand edit of the page, is a red build.
+      - name: The proof page is what the reports say
+        if: matrix.shard == 'd'
+        working-directory: hooks
+        run: python3 scripts/proof.py --check
 
       # `hooks-mcp` (docs/agents.md) holds no foreign function and no `Ffi`: its report is pinned in docs/authority-mcp.json (the same way, `--mcp`).
       # `hooks-logcheck` (tools/logcheck.cho) reads the logs and, for `trim`, cuts a torn tail: its report is pinned in docs/authority-logcheck.json too.
