@@ -97,6 +97,7 @@ verified evt_1 {} {"type":"user.created","id":7}
 | [the examples page](https://alpibrusl.github.io/cancho-hooks/examples.html), [docs/examples.md](docs/examples.md) | seven use cases as scripts you can run, and the mechanisms by hand |
 | [docs/delivery.md](docs/delivery.md), [docs/endpoints.md](docs/endpoints.md), [docs/cron.md](docs/cron.md), [docs/https.md](docs/https.md) | how it behaves |
 | [docs/security.md](docs/security.md), [docs/privacy.md](docs/privacy.md), [docs/runbook.md](docs/runbook.md), [docs/operating.md](docs/operating.md) | running it safely, and what it holds about people |
+| [docs/deploy-oci.md](docs/deploy-oci.md) | deploying it as a verified image: build, sign, SBOM and pull with cancho-oci |
 | [docs/status.md](docs/status.md), [docs/production.md](docs/production.md), [docs/soak.md](docs/soak.md), [docs/capacity.md](docs/capacity.md) | what is built, what is left, what was measured |
 | [docs/testing.md](docs/testing.md), [docs/design.md](docs/design.md) | how it is tested, and what building each step found |
 
