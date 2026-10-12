@@ -45,6 +45,23 @@ MEANINGS = {
 }
 
 
+# Where a program uses a capability for something other than what the service does, its table says so: the shared wording above is the service's.
+MEANINGS_FOR = {
+    "authority-mcp": {
+        "clock": "the clock, for the time limit of a call",
+        "fs_read(\"\")": "reading a path given at runtime: the token file of <code>--token-file</code>, and nothing else",
+        "io_read": "standard input: the agent&rsquo;s JSON-RPC requests",
+        "io_write": "standard output: the JSON-RPC answers, and nothing else",
+        "net_out(\"\")": "connecting: to the one host in <code>--url</code> (this machine unless told otherwise). The compiler cannot bound the host, because it is an argument; that it connects only there and sends the token nowhere else is what <code>tests/mcp_test.py</code> shows",
+    },
+    "authority-logcheck": {
+        "file_read": "reading a file: the event log",
+        "file_write": "writing a file: only <code>trim</code>, to cut a torn tail of the log",
+        "io_write": "standard output: its report",
+    },
+}
+
+
 def label_text(label):
     if label["argument"] is None:
         return label["name"]
@@ -55,9 +72,9 @@ def load(name):
     return json.loads((ROOT / "docs" / ("%s.json" % name)).read_text())
 
 
-def row(label):
+def row(label, report=None):
     text = label_text(label)
-    meaning = MEANINGS.get(text)
+    meaning = MEANINGS_FOR.get(report, {}).get(text) or MEANINGS.get(text)
     if meaning is None:
         sys.exit("proof.py: no meaning written for %s; the page must explain every derived label" % text)
     cls = "good" if label["bounded"] else "bad"
@@ -69,12 +86,15 @@ def row(label):
 def table(name, title, note):
     report = load(name)
     labels = report["labels"]
+    # A note that denies a capability the report derives is the one false statement this page must not make.
+    if any(l["name"].startswith("net_") for l in labels) and "no network" in note.lower():
+        sys.exit("proof.py: the note of %s says there is no network capability, and its report has one" % name)
     return [
         '  <div class="fitwrap"><table class="fit wide">',
         "    <thead><tr><th>%s &middot; <code>docs/%s.json</code></th><td>what it means</td><td>the compiler says</td></tr></thead>"
         % (html.escape(title), name),
         "    <tbody>",
-    ] + [row(l) for l in labels] + [
+    ] + [row(l, name) for l in labels] + [
         "    </tbody>",
         "  </table></div>",
         '  <p class="note">%s</p>' % html.escape(note),
@@ -89,7 +109,7 @@ def fragment():
         '<div><b>0</b><span>capabilities the <code>hooks-pure</code> build does not have: its report is <strong>bounded: true</strong>, no foreign call</span></div>',
         '<div><b>%d</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report: that is what makes it <strong>not bounded</strong></span></div>' % len(unbounded),
         '<div><b>%d</b><span>signals that stop it: INT and TERM, waited for gracefully; there is no kill capability</span></div>' % len([l for l in hooks["labels"] if l["name"].startswith("signals")]),
-        '<div><b>2</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>',
+        '<div><b>3</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>',
     ]
     parts = ['  <div class="stats">'] + stats + ["  </div>"]
     parts += table("authority", "hooks, the default build (https via OpenSSL)",
@@ -97,9 +117,9 @@ def fragment():
     parts += table("authority-pure", "hooks-pure: the same service with cancho's own TLS",
                    "No ffi capability at all: TLS is cancho's packages/tls (not yet independently reviewed). Everything else the default build does, this build does too - one process, on-disk before the answer.")
     parts += table("authority-mcp", "hooks-mcp: the agent surface (tools/mcp.cho)",
-                   "The MCP server agents talk to: reads the log through stdin, answers on stdout, no network capability at all - the agent tool cannot reach anywhere.")
+                   "The MCP server agents talk to: JSON-RPC on standard input and output, and it calls the hooks service over plain HTTP. It does have a network capability (net_out), to the one host in --url, which the compiler cannot narrow; it has no capability to listen, to write a file or to call a foreign function.")
     parts += table("authority-logcheck", "hooks-logcheck: the log reader (tools/logcheck.cho)",
-                   "Reads the log, checks it, and for trim cuts a torn tail: file read and write, no network, no foreign call.")
+                   "Reads the log and checks it; only trim writes, to cut a torn tail. No network capability, no foreign call.")
     parts.append('  <p>A change to any of the four reports fails CI before it fails a reader (<code>scripts/check-authority.sh</code>, its <code>--pure</code>, <code>--mcp</code> and <code>--logcheck</code> variants). The approval of a new capability is the commit of its report.')
     return "\n".join(parts) + "\n"
 
