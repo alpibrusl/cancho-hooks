@@ -262,7 +262,7 @@ def test_receiver():
 # ---- 5. the shared header and footer ----------------------------------------------------------------------------------
 
 DOCS = os.path.join(ROOT, "docs")
-PAGES = {"index.html": "Overview", "examples.html": "Examples", "evidence.html": "Evidence"}
+PAGES = {"index.html": "Overview", "examples.html": "Examples", "evidence.html": "Evidence", "proof.html": "Proof"}
 
 
 def shared_parts(text):
@@ -289,14 +289,14 @@ def shared_differences(texts):
 
 def check_shared_chrome():
     texts = {n: open(os.path.join(DOCS, n), encoding="utf-8").read() for n in PAGES}
-    check("5. index, evidence and examples have the same header, the same footer and the same CSS for them", not shared_differences(texts), str(shared_differences(texts)))
+    check("5. index, evidence, examples and proof have the same header, the same footer and the same CSS for them", not shared_differences(texts), str(shared_differences(texts)))
     for n, label in PAGES.items():
         head = shared_parts_raw(texts[n], "header")
         current = re.findall(r'<a [^>]*aria-current="page"[^>]*>([^<]*)</a>', head)
         check(f"5. {n} marks one link as the current page, {label}", current == [label], str(current))
     head = shared_parts(texts["index.html"])["header"]
-    want = ["Overview", "Examples", "Evidence", "Install", "GitHub"]
-    check("5. the header says Overview, Examples, Evidence, Install and GitHub", re.findall(r"<a [^>]*>(?:<img[^>]*>)?([^<]+)</a>", head)[1:] == want, head)
+    want = ["Overview", "Examples", "Evidence", "Proof", "Install", "GitHub"]
+    check("5. the header says Overview, Examples, Evidence, Proof, Install and GitHub", re.findall(r"<a [^>]*>(?:<img[^>]*>)?([^<]+)</a>", head)[1:] == want, head)
     ids = {n: set(re.findall(r'\bid="([^"]+)"', t)) for n, t in texts.items()}
     bad = []
     for href in re.findall(r'href="([^"]+)"', head + shared_parts(texts["index.html"])["footer"]):
