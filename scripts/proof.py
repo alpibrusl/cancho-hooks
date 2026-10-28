@@ -104,9 +104,9 @@ def table(name, title, note):
 def fragment():
     hooks, pure = load("authority"), load("authority-pure")
     mcp, logcheck = load("authority-mcp"), load("authority-logcheck")
-    unbounded = hooks["unbounded_by"]
+    unbounded = [u for u in hooks["unbounded_by"] if ":" in u]
     stats = [
-        '<div><b>0</b><span>capabilities the <code>hooks-pure</code> build does not have: its report is <strong>bounded: true</strong>, no foreign call</span></div>',
+        '<div><b>0</b><span>foreign calls in the <code>hooks-pure</code> build; its report is unbounded only by the open <code>net_in("")</code> and <code>net_out("")</code>, the addresses it is given</span></div>',
         '<div><b>%d</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report: that is what makes it <strong>not bounded</strong></span></div>' % len(unbounded),
         '<div><b>%d</b><span>signals that stop it: INT and TERM, waited for gracefully; there is no kill capability</span></div>' % len([l for l in hooks["labels"] if l["name"].startswith("signals")]),
         '<div><b>3</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>',

@@ -4,7 +4,7 @@
 
 [package]
 name = "hooks-pure"
-cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+cancho = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/cancho-log"
@@ -13,7 +13,7 @@ path = ".cancho-vcs/log"
 
 [dependencies.server]
 git = "https://github.com/alpibrusl/cancho"
-rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+rev = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
 path = "packages/http-server/.cancho-vcs"
 
 [dependencies.pg]
@@ -39,7 +39,7 @@ path = ".cancho-vcs"
 # cancho's own TLS client and the certificate verifier it needs (cancho epic #197).
 [dependencies.tls]
 git = "https://github.com/alpibrusl/cancho"
-rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+rev = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
 path = "packages/tls/.cancho-vcs/tls"
 
 [[bin]]

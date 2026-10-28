@@ -32,7 +32,9 @@
     "libssl:SSL_set_session",
     "libssl:SSL_shutdown",
     "libssl:SSL_write",
-    "libssl:TLS_client_method"
+    "libssl:TLS_client_method",
+    "net_in(\"\")",
+    "net_out(\"\")"
   ],
   "effects": [
     "args",
@@ -128,12 +130,12 @@
     {
       "name": "net_in",
       "argument": "",
-      "bounded": true
+      "bounded": false
     },
     {
       "name": "net_out",
       "argument": "",
-      "bounded": true
+      "bounded": false
     },
     {
       "name": "poll",
@@ -150,6 +152,9 @@
       "argument": null,
       "bounded": true
     }
+  ],
+  "never_touches": [
+    "other programs"
   ],
   "foreign_symbols": [
     "BIO_new",
