@@ -53,5 +53,11 @@
       "bounded": true
     }
   ],
+  "never_touches": [
+    "the network",
+    "signals",
+    "other programs",
+    "foreign code"
+  ],
   "foreign_symbols": []
 }

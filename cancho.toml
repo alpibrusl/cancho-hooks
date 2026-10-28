@@ -4,16 +4,16 @@
 
 [package]
 name = "hooks"
-cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+cancho = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/cancho-log"
-rev = "71128de72692427b094429fc729d82435144b2e9"
+rev = "1e7c2fd284c46307b1db1243b3a33852b27b3cf9"
 path = ".cancho-vcs/log"
 
 [dependencies.server]
 git = "https://github.com/alpibrusl/cancho"
-rev = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+rev = "f4ead824f33b291a0ad7620a34a0c1346a7abe4f"
 path = "packages/http-server/.cancho-vcs"
 
 # The API, declared once (src/api.cho): `web` makes the router and the OpenAPI document from one declaration, and `schema` is what the
@@ -21,12 +21,12 @@ path = "packages/http-server/.cancho-vcs"
 # records `schema` as its own requirement; the project names `schema` as well because its sources import it.
 [dependencies.schema]
 git = "https://github.com/alpibrusl/cancho-schema"
-rev = "5152851c7487315cb20f031c9c1c69216e5a2931"
+rev = "ab15474b0974f96fc71595520774bd2f17a7e3b9"
 path = ".cancho-vcs"
 
 [dependencies.web]
 git = "https://github.com/alpibrusl/cancho-web"
-rev = "7f261354f74c322cecce9449650899091a2482a5"
+rev = "c45a1a95638d0c58838f819428c6e8f5388ca5e6"
 path = ".cancho-vcs"
 
 [[bin]]
@@ -173,10 +173,10 @@ std = true
 
 [dependencies.pg]
 git = "https://github.com/alpibrusl/cancho-pg"
-rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+rev = "a31de2a94eedc7bb1a3608914eec27d35f6aa6d2"
 path = ".cancho-vcs"
 
 [dependencies.pool]
 git = "https://github.com/alpibrusl/cancho-pg"
-rev = "f1b972fb519f16a9982146691e4a28ef3bc9d79d"
+rev = "a31de2a94eedc7bb1a3608914eec27d35f6aa6d2"
 path = ".cancho-vcs-pool"

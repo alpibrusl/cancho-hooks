@@ -203,7 +203,7 @@ footer.site p { margin: 0 0 .4rem; }
   <p class="sub">Spliced from the committed reports by <code>scripts/proof.py</code>; a change to any report fails CI before it fails a reader. Where the compiler says <strong>UNBOUNDED</strong>, that is a fact being reported, not a problem being hidden: the default build&rsquo;s OpenSSL calls are the one thing the compiler cannot bound &mdash; and the <code>hooks-pure</code> build exists to be the answer to it.</p>
 <!-- report:begin -->
   <div class="stats">
-<div><b>0</b><span>capabilities the <code>hooks-pure</code> build does not have: its report is <strong>bounded: true</strong>, no foreign call</span></div>
+<div><b>0</b><span>foreign calls in the <code>hooks-pure</code> build; its report is unbounded only by the open <code>net_in("")</code> and <code>net_out("")</code>, the addresses it is given</span></div>
 <div><b>32</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report: that is what makes it <strong>not bounded</strong></span></div>
 <div><b>2</b><span>signals that stop it: INT and TERM, waited for gracefully; there is no kill capability</span></div>
 <div><b>3</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>
@@ -225,8 +225,8 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>fs_read(&quot;&quot;)</code></th><td>reading a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_write(&quot;&quot;)</code></th><td>writing a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;INT,TERM&quot;)</code></th><td>graceful stop: INT and TERM are waited for, never a kill</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading a delivered signal</td><td class="good">bounded</td></tr>
@@ -248,8 +248,8 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>fs_read(&quot;&quot;)</code></th><td>reading a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_write(&quot;&quot;)</code></th><td>writing a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;INT,TERM&quot;)</code></th><td>graceful stop: INT and TERM are waited for, never a kill</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading a delivered signal</td><td class="good">bounded</td></tr>
@@ -268,7 +268,7 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
       <tr><th><code>io_read</code></th><td>standard input: the agent&rsquo;s JSON-RPC requests</td><td class="good">bounded</td></tr>
       <tr><th><code>io_write</code></th><td>standard output: the JSON-RPC answers, and nothing else</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: to the one host in <code>--url</code> (this machine unless told otherwise). The compiler cannot bound the host, because it is an argument; that it connects only there and sends the token nowhere else is what <code>tests/mcp_test.py</code> shows</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: to the one host in <code>--url</code> (this machine unless told otherwise). The compiler cannot bound the host, because it is an argument; that it connects only there and sends the token nowhere else is what <code>tests/mcp_test.py</code> shows</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
     </tbody>
   </table></div>
