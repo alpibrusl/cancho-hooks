@@ -42,14 +42,13 @@ The binary uses the system's OpenSSL for `https` delivery (`libssl3`: `apt insta
 
 ## Quick start (building from source)
 
-You need `git`, Rust, `gcc`, OpenSSL 3 with its development files (`libssl-dev`), Python 3, and `curl`.
+You need `git`, `gcc`, OpenSSL 3 with its development files (`libssl-dev`), Python 3, and `curl`.
 
 ```sh
-git clone https://github.com/alpibrusl/cancho                           # the compiler
 git clone https://github.com/alpibrusl/cancho-hooks && cd cancho-hooks
-REV=$(sed -n 's/^cancho *= *"\(.*\)"/\1/p' cancho.toml)                  # the compiler these sources need
-(cd ../cancho && git fetch -q origin && git checkout "$REV" && cargo build --release -p cancho)
-export CANCHO=$PWD/../cancho/target/release/cancho
+REV=$(sed -n 's/^cancho *= *"\(.*\)"/\1/p' cancho.toml)                  # the compiler release these sources need
+curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "$REV"   # prebuilt, into ~/.local/bin
+export CANCHO=$HOME/.local/bin/cancho
 scripts/build.sh                                                           # builds build/hooks
 ```
 

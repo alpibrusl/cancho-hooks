@@ -4,7 +4,7 @@
 
 [package]
 name = "hooks-pure"
-cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"
+cancho = "0.1.1"
 
 [dependencies.log]
 git = "https://github.com/alpibrusl/cancho-log"
