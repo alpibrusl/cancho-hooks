@@ -58,7 +58,7 @@ epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}
 if [ "$build" = 1 ]; then
   : "${CANCHO:?set CANCHO to the cancho compiler binary (the commit cancho.toml pins)}"
   rm -rf "$here/build/hooks" "$here/build/deps"
-  (cd "$here" && CC="$here/scripts/cc-ssl.sh" "$CANCHO" build) >&2 || die 4 "cancho build failed (OpenSSL's development files are needed to link: libssl-dev)"
+  CANCHO="$CANCHO" "$here/scripts/build.sh" >&2 || die 4 "cancho build failed (OpenSSL's development files are needed to link: libssl-dev)"
 fi
 [ -x "$here/build/hooks" ] || die 3 "build/hooks does not exist: build first, or drop --no-build"
 if [ "$build" = 0 ]; then echo "release: --no-build: packaging whatever build/hooks is (the SBOM records its hash, not how it was made)" >&2; fi

@@ -45,7 +45,7 @@ jobs:
         working-directory: hooks
         run: cancho fmt --check src tools
 
-      # The service is linked against OpenSSL (src/ossl.cho; scripts/cc-ssl.sh adds -lssl -lcrypto) and its tests of https use the `openssl` command to make certificates.
+      # The service is linked against OpenSSL (src/ossl.cho; scripts/build.sh links it with -l ssl -l crypto) and its tests of https use the `openssl` command to make certificates.
       - name: OpenSSL (the development files to link against, and the command the tests make certificates with)
         run: |
           dpkg -s libssl-dev >/dev/null 2>&1 || (sudo apt-get update -q && sudo apt-get install -y -q libssl-dev openssl)
