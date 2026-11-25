@@ -19,9 +19,9 @@
 <meta name="theme-color" content="#2f5de0">
 <meta property="og:site_name" content="cancho-hooks">
 <meta property="og:title" content="Proof: what the compiler says cancho-hooks may do">
-<meta property="og:description" content="The authority report of every cancho-hooks build: hooks and its named OpenSSL calls, hooks-pure bounded with none, the agent surface. What is not proved, said plainly.">
+<meta property="og:description" content="The authority report of every cancho-hooks build: hooks and its named OpenSSL calls, hooks-pure with none, the agent surface. What is not proved, said plainly.">
 <meta name="twitter:title" content="Proof: what the compiler says cancho-hooks may do">
-<meta name="twitter:description" content="The authority report of every cancho-hooks build: hooks and its named OpenSSL calls, hooks-pure bounded with none, the agent surface. What is not proved, said plainly.">
+<meta name="twitter:description" content="The authority report of every cancho-hooks build: hooks and its named OpenSSL calls, hooks-pure with none, the agent surface. What is not proved, said plainly.">
 <style>
 :root {
   --bg: #ffffff;
@@ -203,8 +203,8 @@ footer.site p { margin: 0 0 .4rem; }
   <p class="sub">Spliced from the committed reports by <code>scripts/proof.py</code>; a change to any report fails CI before it fails a reader. Where the compiler says <strong>UNBOUNDED</strong>, that is a fact being reported, not a problem being hidden: the default build&rsquo;s OpenSSL calls are the one thing the compiler cannot bound &mdash; and the <code>hooks-pure</code> build exists to be the answer to it.</p>
 <!-- report:begin -->
   <div class="stats">
-<div><b>0</b><span>capabilities the <code>hooks-pure</code> build does not have: its report is <strong>bounded: true</strong>, no foreign call</span></div>
-<div><b>32</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report: that is what makes it <strong>not bounded</strong></span></div>
+<div><b>0</b><span>foreign calls in the <code>hooks-pure</code> build: its report is still <strong>bounded: false</strong>, but only for the unnarrowed network, <code>net_in("")</code> and <code>net_out("")</code></span></div>
+<div><b>34</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report, besides the same unnarrowed network: that is what makes it <strong>not bounded</strong></span></div>
 <div><b>2</b><span>signals that stop it: INT and TERM, waited for gracefully; there is no kill capability</span></div>
 <div><b>3</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>
   </div>
@@ -225,14 +225,14 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>fs_read(&quot;&quot;)</code></th><td>reading a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_write(&quot;&quot;)</code></th><td>writing a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;INT,TERM&quot;)</code></th><td>graceful stop: INT and TERM are waited for, never a kill</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading a delivered signal</td><td class="good">bounded</td></tr>
     </tbody>
   </table></div>
-  <p class="note">The report is what the compiler derives; docs/authority.json is the same report as of the last time a person approved it, and CI fails on any difference. unbounded_by names all 32 OpenSSL symbols it can call; each is one line in the committed report.</p>
+  <p class="note">The report is what the compiler derives; docs/authority.json is the same report as of the last time a person approved it, and CI fails on any difference. unbounded_by names all 34 OpenSSL symbols it can call; each is one line in the committed report.</p>
   <div class="fitwrap"><table class="fit wide">
     <thead><tr><th>hooks-pure: the same service with cancho&#x27;s own TLS &middot; <code>docs/authority-pure.json</code></th><td>what it means</td><td>the compiler says</td></tr></thead>
     <tbody>
@@ -248,8 +248,8 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>fs_read(&quot;&quot;)</code></th><td>reading a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>fs_write(&quot;&quot;)</code></th><td>writing a path given at runtime (the data directory)</td><td class="good">bounded</td></tr>
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_in(&quot;&quot;)</code></th><td>listening: the bound is shared with connecting and <strong>not narrowed</strong></td><td class="bad">UNBOUNDED</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: the endpoints&rsquo; addresses, enforced in code (public addresses only), not proved by the compiler</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
       <tr><th><code>signals(&quot;INT,TERM&quot;)</code></th><td>graceful stop: INT and TERM are waited for, never a kill</td><td class="good">bounded</td></tr>
       <tr><th><code>signals_read</code></th><td>reading a delivered signal</td><td class="good">bounded</td></tr>
@@ -268,11 +268,11 @@ footer.site p { margin: 0 0 .4rem; }
       <tr><th><code>heap</code></th><td>the heap</td><td class="good">bounded</td></tr>
       <tr><th><code>io_read</code></th><td>standard input: the agent&rsquo;s JSON-RPC requests</td><td class="good">bounded</td></tr>
       <tr><th><code>io_write</code></th><td>standard output: the JSON-RPC answers, and nothing else</td><td class="good">bounded</td></tr>
-      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: to the one host in <code>--url</code> (this machine unless told otherwise). The compiler cannot bound the host, because it is an argument; that it connects only there and sends the token nowhere else is what <code>tests/mcp_test.py</code> shows</td><td class="good">bounded</td></tr>
+      <tr><th><code>net_out(&quot;&quot;)</code></th><td>connecting: to the one host in <code>--url</code> (this machine unless told otherwise). The compiler cannot bound the host, because it is an argument; that it connects only there and sends the token nowhere else is what <code>tests/mcp_test.py</code> shows</td><td class="bad">UNBOUNDED</td></tr>
       <tr><th><code>poll</code></th><td>the poller: one thread, one loop</td><td class="good">bounded</td></tr>
     </tbody>
   </table></div>
-  <p class="note">The MCP server agents talk to: JSON-RPC on standard input and output, and it calls the hooks service over plain HTTP. It does have a network capability (net_out), to the one host in --url, which the compiler cannot narrow; it has no capability to listen, to write a file or to call a foreign function.</p>
+  <p class="note">The MCP server agents talk to: JSON-RPC on standard input and output, and it calls the hooks service over plain HTTP. It does have a network capability (net_out), to the one host in --url, which the program does not narrow (the report is &lt;em&gt;not bounded&lt;/em&gt; for it); it has no capability to listen, to write a file or to call a foreign function.</p>
   <div class="fitwrap"><table class="fit wide">
     <thead><tr><th>hooks-logcheck: the log reader (tools/logcheck.cho) &middot; <code>docs/authority-logcheck.json</code></th><td>what it means</td><td>the compiler says</td></tr></thead>
     <tbody>
@@ -306,7 +306,7 @@ cat docs/authority.json | python3 -m json.tool | head -20</code></pre>
   <h2>What this does not prove</h2>
   <ul>
     <li><strong>A capability boundary is not a security review.</strong> The reports say what the builds can reach; they do not certify that the logic inside those bounds is free of bugs. The chaos tests are the other half of the story, and they are not a substitute for an external audit. Alpha: not for production.</li>
-    <li><strong>The default build is not bounded, on purpose and by name.</strong> Its report lists all 32 OpenSSL symbols it can call (<code>unbounded_by</code>), which is why <code>bounded</code> is false for it. <code>hooks-pure</code> is the bounded build &mdash; and cancho&rsquo;s own TLS it uses is not yet independently reviewed.</li>
+    <li><strong>No build is bounded today, and the report says so.</strong> Every report holds the network unnarrowed (<code>net_out("")</code>, and <code>net_in("")</code> for the service), which cancho 0.1.1 names in <code>unbounded_by</code>. The default build also lists all 32 OpenSSL symbols it can call. <code>hooks-pure</code> has no foreign call, and cancho&rsquo;s own TLS it uses is not yet independently reviewed. Narrowing the network is open work.</li>
     <li><strong>Delivery destinations are enforced, not proved.</strong> The network bound is not narrowed: <code>net_out("")</code>. Deliveries go only to public addresses by code and by test, not by compiler proof.</li>
     <li><strong>PostgreSQL, when you use it, is outside the report</strong>: it is another process the service talks to over a connection, like any endpoint.</li>
   </ul>

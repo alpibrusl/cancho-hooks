@@ -35,12 +35,14 @@
     {
       "name": "fs_read",
       "argument": "",
-      "bounded": true
+      "bounded": true,
+      "confinement": "lexical"
     },
     {
       "name": "fs_write",
       "argument": "",
-      "bounded": true
+      "bounded": true,
+      "confinement": "lexical"
     },
     {
       "name": "heap",
@@ -52,6 +54,12 @@
       "argument": null,
       "bounded": true
     }
+  ],
+  "never_touches": [
+    "the network",
+    "signals",
+    "other programs",
+    "foreign code"
   ],
   "foreign_symbols": []
 }
