@@ -14,7 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [a, b, c, d]
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: the backup tests dump with the runner's pg_dump and restore into the postgres:16 service below. The runner that
+    # ubuntu-latest now names has a newer client, whose dump sets `transaction_timeout` (PostgreSQL 17 and later) and is refused by a 16 server
+    # ("unrecognized configuration parameter"). ubuntu-24.04 has the 16 client. Move both together when the service image moves.
+    runs-on: ubuntu-24.04
     # A PostgreSQL that wants a password (SCRAM-SHA-256), for the history test.
     services:
       postgres:

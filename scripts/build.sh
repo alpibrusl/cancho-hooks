@@ -42,7 +42,7 @@ files=$(find src -name '*.cho' | LC_ALL=C sort; find build/deps -maxdepth 1 -nam
 # The other programs of cancho.toml (the probes the tests run, the OpenAPI writer, the MCP server, the log checker) link nothing but libc, so the project mode
 # builds them, one `--bin` each: `cancho build` alone would stop at `hooks`, which it cannot link. (Before the line above replaced `CC=scripts/cc-ssl.sh cancho build`,
 # that one command built them all; without this loop build/sign_probe and build/cron_probe are not there and the tests that run them fail.)
-for bin in $(awk '/^\[\[bin\]\]/ { in_bin = 1; next } in_bin && /^name *=/ { gsub(/^name *= *"|"$/, ""); if ($0 != "hooks") print; in_bin = 0 }' cancho.toml); do
+awk '/^\[\[bin\]\]/ { in_bin = 1; next } in_bin && /^name *=/ { gsub(/^name *= *"|"$/, ""); if ($0 != "hooks") print; in_bin = 0 }' cancho.toml | while read -r bin; do
   "$CANCHO" build --bin "$bin"
 done
 shims "$here/build"
