@@ -69,7 +69,7 @@ The service keeps its two logs in [`cancho-log`](https://github.com/alpibrusl/ca
   has been independently reviewed (#209), and the 32 symbols go with it.
 
 The authority report (`cancho authority`) therefore says `bounded: false`, with the symbols above under `unbounded_by`, each with the library the program says it is in (a library
-is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in cancho), and names the two signals. The second build, `hooks-pure` (cancho's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol and its report says `bounded: true`**; it is not the default until that TLS has been independently reviewed.
+is not an authority domain: the labels bound everything except what those symbols do; `docs/foreign-authority.md` in cancho), and names the two signals. The second build, `hooks-pure` (cancho's own TLS, [pure-tls.md](pure-tls.md)), has **no foreign symbol** (its report says `bounded: false` only for the unnarrowed network, `net_in("")` and `net_out("")`, as cancho 0.1.1 reports it); it is not the default until that TLS has been independently reviewed.
 
 ## The audit log
 

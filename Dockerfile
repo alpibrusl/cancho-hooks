@@ -6,15 +6,15 @@
 #   docker run --rm --entrypoint cat cancho-hooks /usr/share/hooks/schema.sql | psql ...     # the tables, if you use PostgreSQL
 #
 # TWO STAGES, and what is pinned in each:
-#   compiler  the cancho compiler at the commit `cancho.toml` names ([package] cancho: one place, which `cancho build` itself
-#             checks), built with the Rust toolchain that commit's rust-toolchain.toml pins, from its Cargo.lock (--locked).
+#   compiler  the cancho compiler at the release `cancho.toml` names ([package] cancho: one place, which `cancho build` itself
+#             checks), installed prebuilt by scripts/install.sh.
 #   build     `cancho build` of this repository: it fetches the libraries cancho.toml pins by commit and checks them.
 #   runtime   the binary, tini, a non-root user, a volume and a health check. Nothing else: no shell tools beyond the base image's,
 #             no compiler, no git.
 #
 # NOT pinned, and the honest limit of "reproducible" here: the base image is a tag (ubuntu:24.04), not a digest; apt packages are
-# whatever the archive has that day (clang 18 in noble: the compiler's LLVM backend shells out to `clang`); rustup-init is a fixed
-# version but its checksum comes from the same server. To pin the base: `--build-arg BASE=ubuntu:24.04@sha256:<digest>`.
+# whatever the archive has that day (clang 18 in noble: the compiler's LLVM backend shells out to `clang`); the compiler is the prebuilt release
+# cancho.toml names, fetched by scripts/install.sh over https. To pin the base: `--build-arg BASE=ubuntu:24.04@sha256:<digest>`.
 # The runtime base must be the build base (the binary links the glibc of the image it was built in).
 #
 # .github/workflows/release.yml builds this image, waits for it to be healthy, posts an event, reads it back and stops it (a dry run on a push that
@@ -22,32 +22,17 @@
 ARG BASE=ubuntu:24.04
 
 FROM ${BASE} AS compiler
-ARG RUSTUP_VERSION=1.28.2
-ENV DEBIAN_FRONTEND=noninteractive RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git libssl-dev \
  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
- && curl -fsSL -o /tmp/rustup-init.sha256 "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init.sha256" \
- && (cd /tmp && echo "$(cut -d' ' -f1 rustup-init.sha256)  rustup-init" | sha256sum -c -) \
- && chmod +x /tmp/rustup-init \
- && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
- && rm /tmp/rustup-init /tmp/rustup-init.sha256
 # The pin lives in cancho.toml and nowhere else.
 COPY cancho.toml /src/hooks/cancho.toml
 RUN set -eu; \
-    REV=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' /src/hooks/cancho.toml); \
+    REV=$(sed -n 's/^cancho *= *"\([0-9a-f.]*\)".*/\1/p' /src/hooks/cancho.toml); \
     test -n "$REV"; \
-    git clone --quiet https://github.com/alpibrusl/cancho /src/cancho; \
-    git -C /src/cancho checkout --quiet "$REV"; \
-    CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /src/cancho/rust-toolchain.toml); \
-    test -n "$CHANNEL"; \
-    rustup toolchain install "$CHANNEL" --profile minimal; \
-    cd /src/cancho; \
-    RUSTUP_TOOLCHAIN="$CHANNEL" cargo build --release --locked -p cancho; \
-    cp target/release/cancho /usr/local/bin/cancho; \
+    curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "$REV" /usr/local; \
     cancho --version | tee /cancho.version; \
-    echo "rust $CHANNEL" >> /cancho.version; \
     echo "clang $(clang --version | head -n 1)" >> /cancho.version
 
 FROM compiler AS build
@@ -56,11 +41,13 @@ COPY src ./src
 COPY tests ./tests
 COPY tools ./tools
 COPY sql ./sql
-COPY scripts/cc-ssl.sh ./scripts/cc-ssl.sh
 # The binary is normalized as scripts/release.sh does (no symbols, no build-id: the only bytes that differ between two builds of
 # the same sources), so the image holds the same bytes as bin/hooks in the release tarball when the toolchain is the same.
-# CC adds -lssl -lcrypto to the link (the project file has no linking options for a program): the service calls OpenSSL (src/ossl.cho).
-RUN CC=/src/hooks/scripts/cc-ssl.sh cancho build \
+# `-l ssl -l crypto` is the link of OpenSSL, which the service calls (src/ossl.cho). The standalone compiler reads no `CC` and project mode takes no `-l`, so the
+# bin is built from its files (its sources, then the libraries `cancho install` writes to build/deps), as scripts/build.sh does.
+RUN cancho install \
+ && mkdir -p build \
+ && cancho build $(find src -name '*.cho' | LC_ALL=C sort) $(find build/deps -maxdepth 1 -name '*.cho' | LC_ALL=C sort) --std -l ssl -l crypto -o build/hooks \
  && test -x build/hooks \
  && ldd build/hooks > /ldd.txt \
  && strip --strip-all --remove-section=.note.gnu.build-id -o /hooks build/hooks \

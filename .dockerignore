@@ -5,7 +5,6 @@
 build
 docs
 scripts/*
-!scripts/cc-ssl.sh
 README.md
 LICENSE
 Dockerfile

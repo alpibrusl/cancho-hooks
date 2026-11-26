@@ -1879,7 +1879,7 @@ committing the file is the approval. Each function takes only the part of the ca
 declared are those a TLS client needs and no more (no function that opens a file other than the trust store, none that reads the environment: OpenSSL does that itself in
 `SSL_CTX_set_default_verify_paths`).
 
-Building: the project file has no linking options for a program, so `scripts/cc-ssl.sh` (a `cc` that adds `-lssl -lcrypto`) is the `CC` of `cancho build` (`scripts/build.sh`, `scripts/release.sh`, the
+Building: the project file has no linking options for a program, so (once; since 0.1.1 the compiler reads no `CC`) `scripts/build.sh` gives `cancho build` the files of the bin and `-l ssl -l crypto`, where a `cc` wrapper that added them was its `CC` (`scripts/build.sh`, `scripts/release.sh`, the
 Dockerfile). OpenSSL **3.0 or later** is needed (`SSL_CTX_load_verify_file` is its one-string form of the call that loads a file; the two-string form cannot be declared: cancho gap 4), at run time
 (`libssl3` on Debian and Ubuntu) and with its development files to build (`libssl-dev`).
 
@@ -1949,7 +1949,7 @@ declares `ffi("libssl")` and no longer performs it is refused), which is the for
 * **Open.** No keep-alive (40.6). No revocation. No client certificate. No IPv6, no `/etc/hosts`, one name server over TCP only, no cache of lookups (a name server that is slow slows every attempt to its names). A per-name allow-list for private
   addresses (today `allow-private-hosts` is all or nothing). An `https` endpoint at an address with a certificate for that address. `GET /config` does not show the three new settings. A query id that is not unpredictable.
   The last unverified claim of the spike that this repeats: handshake CPU depends on how busy the core is kept, so a figure is only good with the concurrency it was measured at.
-* **What cancho lacked or got wrong (reproducers in the report of this change):** (1) a project cannot say what a program links with (`[[bin]]` has no `links`): `scripts/cc-ssl.sh` is a `CC` that adds `-lssl -lcrypto`; the same gap as the spike's 11. (2) A
+* **What cancho lacked or got wrong (reproducers in the report of this change):** (1) a project cannot say what a program links with (`[[bin]]` has no `links`): a `CC` wrapper added `-lssl -lcrypto` (since 0.1.1: `-l ssl -l crypto` on the command line); the same gap as the spike's 11. (2) A
   local binding named like a function of an imported module breaks the qualified call: with `let bare = ...` in scope, `destination.bare(x)` is "`bare` is a local binding, not a function". (3) `std.conns` has no way to put a connection in a slot that is free
   on purpose: `redial` closes one and puts the next, and relies on the table giving back the slot it just freed ("newest freed first" is in the comment of the module and in no test of it); a `replace(table, slot, conn)` would say what is meant. (4) The
   declared scope of a foreign function is not checked against what is linked (the follow-up 5 of cancho `foreign-authority.md`): `libssl` can be claimed with no `-lssl`, and this change's CI pin is of the claim and the symbol, not of the library. (5) Nothing

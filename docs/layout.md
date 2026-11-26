@@ -45,7 +45,7 @@ src/view.cho        what the database says, as an HTTP answer
 src/sign.cho        HMAC-SHA256, base64 and the Standard Webhooks signature
 cancho.toml       the project file: the compiler, the libraries (each pinned to a commit) and the programs
 tools/openapi.cho   `hooks-openapi`: prints the OpenAPI document of `src/api.cho` (the console and nothing else)
-scripts/build.sh   `cancho build` (linked against OpenSSL: `scripts/cc-ssl.sh`), and the fsync shim the crash tests preload
+scripts/build.sh   `cancho build` (linked against OpenSSL: `-l ssl -l crypto`), and the fsync shim the crash tests preload
 scripts/openapi.sh   regenerates `docs/openapi.json` from the declaration (`--check` compares)
 scripts/check-authority.sh   regenerates the authority report and compares it with `authority.json` (`--update` writes it)
 scripts/backup.sh, restore.sh, logcheck.py   backup and restore of the two logs (and the tables), and the checker that refuses an inconsistent pair

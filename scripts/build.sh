@@ -6,7 +6,7 @@
 #   CANCHO_PURE   the compiler for `--pure`          (default: CANCHO; the pure build pins a newer one than the default build, `pure/cancho.toml`)
 #
 #   scripts/build.sh --pure   build `pure/build/hooks-pure` instead: the service with cancho's own TLS and no OpenSSL (docs/pure-tls.md). Nothing is linked
-#                             but libc, so it needs neither `libssl-dev` nor `scripts/cc-ssl.sh`. The shims are built beside it too, if `gcc` is there:
+#                             but libc, so it needs no `libssl-dev`. The shims are built beside it too, if `gcc` is there:
 #                             the harnesses look for them beside the binary they are given, and a power cut without the fsync shim is not one.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,6 +30,19 @@ if [ "${1:-}" = --pure ]; then
   fi
   exit 0
 fi
-# libssl and libcrypto are linked in by the C compiler driver, because the project file has no linking options (scripts/cc-ssl.sh).
-(cd "$here" && CC="$here/scripts/cc-ssl.sh" "$CANCHO" build)
+# libssl and libcrypto are linked in with `-l ssl -l crypto`. The standalone compiler reads no `CC` (docs/standalone-cancho.md) and the project mode takes no `-l`, so
+# the `hooks` bin is built from its files, as `cancho build` would be given them: its sources, then the libraries `cancho install` writes to build/deps (the same
+# list scripts/check-authority.sh reports on). `OPENSSL_LIB` names a directory to search (-L), for a system whose OpenSSL is not on the linker's path (Homebrew's).
+cd "$here"
+"$CANCHO" install
+mkdir -p build
+files=$(find src -name '*.cho' | LC_ALL=C sort; find build/deps -maxdepth 1 -name '*.cho' | LC_ALL=C sort)
+# shellcheck disable=SC2086
+"$CANCHO" build $files --std ${OPENSSL_LIB:+-L "$OPENSSL_LIB"} -l ssl -l crypto -o build/hooks
+# The other programs of cancho.toml (the probes the tests run, the OpenAPI writer, the MCP server, the log checker) link nothing but libc, so the project mode
+# builds them, one `--bin` each: `cancho build` alone would stop at `hooks`, which it cannot link. (Before the line above replaced `CC=scripts/cc-ssl.sh cancho build`,
+# that one command built them all; without this loop build/sign_probe and build/cron_probe are not there and the tests that run them fail.)
+awk '/^\[\[bin\]\]/ { in_bin = 1; next } in_bin && /^name *=/ { gsub(/^name *= *"|"$/, ""); if ($0 != "hooks") print; in_bin = 0 }' cancho.toml | while read -r bin; do
+  "$CANCHO" build --bin "$bin"
+done
 shims "$here/build"

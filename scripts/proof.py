@@ -106,8 +106,8 @@ def fragment():
     mcp, logcheck = load("authority-mcp"), load("authority-logcheck")
     unbounded = hooks["unbounded_by"]
     stats = [
-        '<div><b>0</b><span>capabilities the <code>hooks-pure</code> build does not have: its report is <strong>bounded: true</strong>, no foreign call</span></div>',
-        '<div><b>%d</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report: that is what makes it <strong>not bounded</strong></span></div>' % len(unbounded),
+        '<div><b>0</b><span>foreign calls in the <code>hooks-pure</code> build: its report is still <strong>bounded: false</strong>, but only for the unnarrowed network, <code>net_in(\"\")</code> and <code>net_out(\"\")</code></span></div>',
+        '<div><b>%d</b><span>foreign symbols the default build can call, every one OpenSSL&rsquo;s (libssl, libcrypto), named in its report, besides the same unnarrowed network: that is what makes it <strong>not bounded</strong></span></div>' % len(unbounded),
         '<div><b>%d</b><span>signals that stop it: INT and TERM, waited for gracefully; there is no kill capability</span></div>' % len([l for l in hooks["labels"] if l["name"].startswith("signals")]),
         '<div><b>3</b><span>of the four programs are pure cancho end to end (<code>hooks-pure</code>, <code>hooks-mcp</code>, <code>hooks-logcheck</code>); the default <code>hooks</code> names its OpenSSL</span></div>',
     ]
@@ -117,7 +117,7 @@ def fragment():
     parts += table("authority-pure", "hooks-pure: the same service with cancho's own TLS",
                    "No ffi capability at all: TLS is cancho's packages/tls (not yet independently reviewed). Everything else the default build does, this build does too - one process, on-disk before the answer.")
     parts += table("authority-mcp", "hooks-mcp: the agent surface (tools/mcp.cho)",
-                   "The MCP server agents talk to: JSON-RPC on standard input and output, and it calls the hooks service over plain HTTP. It does have a network capability (net_out), to the one host in --url, which the compiler cannot narrow; it has no capability to listen, to write a file or to call a foreign function.")
+                   "The MCP server agents talk to: JSON-RPC on standard input and output, and it calls the hooks service over plain HTTP. It does have a network capability (net_out), to the one host in --url, which the program does not narrow (the report is <em>not bounded</em> for it); it has no capability to listen, to write a file or to call a foreign function.")
     parts += table("authority-logcheck", "hooks-logcheck: the log reader (tools/logcheck.cho)",
                    "Reads the log and checks it; only trim writes, to cut a torn tail. No network capability, no foreign call.")
     parts.append('  <p>A change to any of the four reports fails CI before it fails a reader (<code>scripts/check-authority.sh</code>, its <code>--pure</code>, <code>--mcp</code> and <code>--logcheck</code> variants). The approval of a new capability is the commit of its report.')
